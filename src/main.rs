@@ -81,14 +81,17 @@ impl MethodCommand for Completion {
                                                   absolute: 0,
                                               });
         let items: Vec<_> = suggestions.into_iter()
-                                       .map(|symbol| {
+                                       .map(|ident| {
+                                           // Remove the `:Line x, Row y suffix`
+                                           let label =
+                                               String::from(ident.name
+                                                                 .as_ref()
+                                                                 .split(':')
+                                                                 .next()
+                                                                 .unwrap_or(ident.name.as_ref()));
                                            CompletionItem {
-                                               label:
-                                                   String::from(symbol.as_ref()
-                                                                      .split(':')
-                                                                      .next()
-                                                                      .unwrap_or(symbol.as_ref())),
-                                               detail: Some("comment".into()),
+                                               label: label,
+                                               detail: Some(format!("{}", ident.typ)),
                                                kind: Some(CompletionItemKind::Variable),
                                                ..CompletionItem::default()
                                            }
@@ -158,9 +161,9 @@ impl NotificationCommand for TextDocumentDidChange {
                             "params": {}
                         }}"#,
                         to_value(&PublishDiagnosticsParams {
-            uri: filename.clone(),
-            diagnostics: diagnostics,
-        }));
+                            uri: filename.clone(),
+                            diagnostics: diagnostics,
+                        }));
         print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
     }
 }
