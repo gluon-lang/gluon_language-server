@@ -1,0 +1,23 @@
+[package]
+name = "gluon_language-server"
+version = "0.1.0"
+authors = ["Markus Westerlind <marwes91@gmail.com>"]
+
+[dependencies.jsonrpc-core]
+version = "2.0.7"
+default-features = false
+features = ["nightly"]
+
+[dependencies]
+log = "0.3.6"
+env_logger = "0.3.3"
+
+serde = "*"
+serde_json = "*"
+serde_macros = "*"
+
+[dependencies.gluon]
+version = "0.1.1"
+git = "https://github.com/Marwes/gluon.git"
+rev = "e19c2a4479ef33ccfb23616c6316e0055e81f325"
+path = "../gluon"
