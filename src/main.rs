@@ -76,7 +76,7 @@ impl MethodCommand for Completion {
         let suggestions = completion::suggest(&ast::EmptyEnv::new(),
                                               expr,
                                               ast::Location {
-                                                  row: change.position.line as i32,
+                                                  row: (change.position.line + 1) as i32,
                                                   column: change.position.character as i32,
                                                   absolute: 0,
                                               });
@@ -100,7 +100,7 @@ impl MethodCommand for Completion {
 
 fn location_to_position(loc: &ast::Location) -> Position {
     Position {
-        line: loc.row as u64,
+        line: loc.row as u64 + 1,
         character: loc.column as u64,
     }
 }
