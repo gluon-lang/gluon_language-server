@@ -33,10 +33,70 @@ use std::str;
 
 use language_server::*;
 
+struct ServerError<E> {
+    message: String,
+    data: Option<E>,
+}
+
+trait LanguageServerCommand: Send + Sync {
+    type Param: serde::Deserialize;
+    type Output: serde::Serialize;
+    type Error: serde::Serialize;
+    fn execute(&self, param: Self::Param) -> Result<Self::Output, ServerError<Self::Error>>;
+
+    fn invalid_params(&self) -> Option<Self::Error>;
+}
+
+struct ServerCommand<T>(T);
+
+impl<T> MethodCommand for ServerCommand<T>
+    where T: LanguageServerCommand
+{
+    fn execute(&self, param: Params) -> Result<Value, Error> {
+        match param {
+            Params::Map(ref map) => {
+                match from_value(Value::Object(map.clone())) {
+                    Ok(value) => {
+                        return self.0
+                                   .execute(value)
+                                   .map(|value| to_value(&value))
+                                   .map_err(|error| {
+                                       Error {
+                                           code: ErrorCode::InternalError,
+                                           message: error.message,
+                                           data: error.data.as_ref().map(to_value),
+                                       }
+                                   })
+                    }
+                    Err(_) => (),
+                }
+            }
+            _ => (),
+        }
+        let data = self.0.invalid_params();
+        Err(Error {
+            code: ErrorCode::InvalidParams,
+            message: format!("Invalid params: {:?}", param),
+            data: data.as_ref().map(to_value),
+        })
+    }
+}
+
 struct Initialize(RootedThread);
-impl MethodCommand for Initialize {
-    fn execute(&self, _params: Params) -> Result<Value, Error> {
-        let result = InitializeResult {
+impl LanguageServerCommand for Initialize {
+    type Param = InitializeParams;
+    type Output = InitializeResult;
+    type Error = InitializeError;
+    fn execute(&self,
+               change: InitializeParams)
+               -> Result<InitializeResult, ServerError<InitializeError>> {
+        let import = self.0.get_macros().get("import").expect("Import macro");
+        let import = import.downcast_ref::<Import<CheckImporter>>()
+                           .expect("Check importer");
+        if let Some(ref path) = change.root_path {
+            import.add_path(path);
+        }
+        Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncKind::Full),
                 completion_provider: Some(CompletionOptions {
@@ -44,31 +104,31 @@ impl MethodCommand for Initialize {
                     trigger_characters: vec![".".into()],
                 }),
             },
-        };
-        Ok(to_value(&result))
+        })
+    }
+
+    fn invalid_params(&self) -> Option<Self::Error> {
+        Some(InitializeError {
+            retry: false,
+        })
     }
 }
 
 struct Completion(RootedThread);
-impl MethodCommand for Completion {
-    fn execute(&self, params: Params) -> Result<Value, Error> {
-        let change: TextDocumentPositionParams = match params {
-            Params::Map(map) => {
-                match from_value(Value::Object(map)) {
-                    Ok(change) => change,
-                    Err(_) => return Err(Error::invalid_params()),
-                }
-            }
-            _ => return Err(Error::invalid_params()),
-        };
+impl LanguageServerCommand for Completion {
+    type Param = TextDocumentPositionParams;
+    type Output = Vec<CompletionItem>;
+    type Error = ();
+    fn execute(&self,
+               change: TextDocumentPositionParams)
+               -> Result<Vec<CompletionItem>, ServerError<()>> {
         let thread = &self.0;
         let module = change.text_document.uri;
         let import = thread.get_macros().get("import").expect("Import macro");
         let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
         let importer = import.importer.0.lock().unwrap();
         let expr = try!(importer.get(&module).ok_or_else(|| {
-            Error {
-                code: ErrorCode::InternalError,
+            ServerError {
                 message: format!("Module `{}` is not defined", module),
                 data: None,
             }
@@ -97,7 +157,11 @@ impl MethodCommand for Completion {
                                            }
                                        })
                                        .collect();
-        Ok(to_value(&items))
+        Ok(items)
+    }
+
+    fn invalid_params(&self) -> Option<Self::Error> {
+        None
     }
 }
 
@@ -244,8 +308,9 @@ fn main() {
         thread.get_macros().insert("import".into(), import);
 
         let mut io = IoHandler::new();
-        io.add_method("initialize", Initialize(thread.clone()));
-        io.add_method("textDocument/completion", Completion(thread.clone()));
+        io.add_method("initialize", ServerCommand(Initialize(thread.clone())));
+        io.add_method("textDocument/completion",
+                      ServerCommand(Completion(thread.clone())));
         io.add_notification("textDocument/didChange", TextDocumentDidChange(thread));
 
         main_loop(&mut io).unwrap();

@@ -47,9 +47,44 @@ pub struct TextDocumentPositionParams {
     pub position: Position,
 }
 
+#[derive(Deserialize)]
+pub struct InitializeParams {
+    /**
+     * The process Id of the parent process that started
+     * the server.
+     */
+    #[serde(rename="processId")]
+    pub process_id: u64,
+
+    /**
+     * The rootPath of the workspace. Is null
+     * if no folder is open.
+     */
+    #[serde(rename="rootPath")]
+    pub root_path: Option<String>,
+
+    /**
+     * The capabilities provided by the client (editor)
+     */
+    pub capabilities: ClientCapabilities,
+}
+
+#[derive(Deserialize)]
+pub struct ClientCapabilities { _dummy: Option<()> }
+
 #[derive(Default, Serialize)]
 pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
+}
+
+#[derive(Default, Serialize)]
+pub struct InitializeError {
+    /**
+     * Indicates whether the client should retry to send the
+     * initilize request after showing the message provided
+     * in the ResponseError.
+     */
+    pub retry: bool,
 }
 
 #[derive(Default, Serialize)]

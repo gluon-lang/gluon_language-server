@@ -8,7 +8,7 @@ import { Trace } from 'vscode-jsonrpc';
 
 export function activate(context: ExtensionContext) {
 
-	let serverPath = context.asAbsolutePath(path.join('target', 'debug', 'gluon_language-server.exe'));
+	let serverPath = 'gluon_language-server.exe';
 	
 	// If the extension is launched in debug mode then the debug server options are used
 	// Otherwise the run options are used
