@@ -16,6 +16,17 @@
 	],
 	"main": "./out/src/extension",
 	"contributes": {
+		"languages": [{
+            "id": "gluon",
+            "aliases": ["Gluon", "gluon"],
+            "extensions": [".glu"],
+            "configuration": "./gluon.configuration.json"
+        }],
+        "grammars": [{
+            "language": "gluon",
+            "scopeName": "source.glu",
+            "path": "./syntaxes/gluon.tmLanguage"
+		}],
 		"configuration": {
 			"type": "object",
 			"title": "Example configuration",
