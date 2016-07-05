@@ -30,6 +30,9 @@ use std::error::Error as StdError;
 use std::io;
 use std::io::{Read, Write};
 use std::str;
+use std::sync::Arc;
+use std::sync::atomic;
+use std::sync::atomic::AtomicBool;
 
 use language_server::*;
 
@@ -269,9 +272,9 @@ fn log_message(message: String) {
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
-fn main_loop(io: &mut IoHandler) -> Result<(), Box<StdError>> {
+fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<StdError>> {
     let stdin = io::stdin();
-    loop {
+    while !exit_token.load(atomic::Ordering::SeqCst) {
         let mut header = String::new();
         let n = try!(stdin.read_line(&mut header));
         if n == 0 {
@@ -298,6 +301,7 @@ fn main_loop(io: &mut IoHandler) -> Result<(), Box<StdError>> {
             }
         }
     }
+    Ok(())
 }
 
 fn main() {
@@ -311,9 +315,13 @@ fn main() {
         io.add_method("initialize", ServerCommand(Initialize(thread.clone())));
         io.add_method("textDocument/completion",
                       ServerCommand(Completion(thread.clone())));
+        io.add_method("shutdown", |_| Ok(Value::I64(0)));
+        let exit_token = Arc::new(AtomicBool::new(false));
+        let exit_token2 = exit_token.clone();
+        io.add_notification("exit", move |_| exit_token.store(true, atomic::Ordering::SeqCst));
         io.add_notification("textDocument/didChange", TextDocumentDidChange(thread));
 
-        main_loop(&mut io).unwrap();
+        main_loop(&mut io, exit_token2).unwrap();
     });
     if let Err(err) = handle.join() {
         let msg = err.downcast_ref::<&'static str>()

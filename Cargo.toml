@@ -19,4 +19,4 @@ serde_macros = "*"
 [dependencies.gluon]
 version = "0.1.1"
 git = "https://github.com/Marwes/gluon.git"
-rev = "2166c325b31ec3e78c5900166d48b7b87892dab8"
+rev = "77b3cdcfcf4ebb5e324fe98b7da2a45e93bf3557"
