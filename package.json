@@ -12,7 +12,7 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onLanguage:plaintext"
+		"onLanguage:gluon"
 	],
 	"main": "./out/src/extension",
 	"contributes": {
@@ -29,7 +29,7 @@
 		}],
 		"configuration": {
 			"type": "object",
-			"title": "Example configuration",
+			"title": "Gluon configuration",
 			"properties": {
 				"gluon.maxNumberOfProblems": {
 					"type": "number",
