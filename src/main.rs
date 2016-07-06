@@ -244,7 +244,14 @@ impl TextDocumentDidChange {
         let fileinput = &change.content_changes[0].text;
         let name = filename_to_module(filename);
         let mut compiler = Compiler::new();
-        let MacroValue(mut expr) = try!(fileinput.expand_macro(&mut compiler, thread, &name));
+        // The parser may find parse errors but still produce an expression
+        // For that case still typecheck the expression but return the type error afterwards
+        let (expr, parse_result): (_, GluonResult<()>) = match compiler.parse_partial_expr(&name, fileinput) {
+            Ok(expr) => (expr, Ok(())),
+            Err((None, err)) => return Err(err.into()),
+            Err((Some(expr), err)) => (expr, Err(err.into())),
+        };
+        let MacroValue(mut expr) = try!(expr.expand_macro(&mut compiler, thread, &name));
         let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
             Ok(typ) => {
                 let metadata = Metadata::default();
@@ -259,7 +266,7 @@ impl TextDocumentDidChange {
                            .expect("Check importer");
         let mut importer = import.importer.0.lock().unwrap();
         importer.insert(filename.clone(), expr);
-        result
+        result.or(parse_result)
     }
 }
 
