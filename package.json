@@ -5,6 +5,7 @@
 	"license": "MIT",
 	"version": "0.0.1",
 	"publisher": "gluon-lang",
+	"repository": "https://github.com/Marwes/gluon_language-server",
 	"engines": {
 		"vscode": "^0.10.10"
 	},
@@ -47,14 +48,13 @@
 	"scripts": {
 		"vscode:prepublish": "node ./node_modules/vscode/bin/compile",
 		"compile": "node ./node_modules/vscode/bin/compile -watch -p ./",
-		"build-server": "cargo build --release",
-		"postinstall": "node ./node_modules/vscode/bin/install && cargo build --release"
+		"postinstall": "node ./node_modules/vscode/bin/install"
 	},
 	"devDependencies": {
-		"typescript": "^1.8.9",
-		"vscode": "^0.11.0"
+		"typescript": "^1.8.9"
 	},
 	"dependencies": {
-		"vscode-languageclient": "^2.2.1"
+		"vscode-languageclient": "^2.2.1",
+		"vscode": "^0.11.0"
 	}
 }
