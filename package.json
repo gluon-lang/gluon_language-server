@@ -1,10 +1,10 @@
 {
-	"name": "vscode-gluon",
+	"name": "gluon",
 	"description": "Language server for the gluon programming language",
 	"author": "Markus Westerlind",
 	"license": "MIT",
 	"version": "0.0.1",
-	"publisher": "gluon-lang",
+	"publisher": "Marwes",
 	"repository": "https://github.com/Marwes/gluon_language-server",
 	"engines": {
 		"vscode": "^0.10.10"
@@ -38,8 +38,8 @@
 					"description": "Controls the maximum number of problems produced by the server."
 				},
 				"gluon.language-server.path": {
-					"type": ["string", "null"],
-					"default": null,
+					"type": ["string"],
+					"default": "gluon_language-server",
 					"description": "Specifies the path to the language server binary."
 				}
 			}
