@@ -1,5 +1,5 @@
 {
-	"name": "gluon-language-server",
+	"name": "vscode-gluon",
 	"description": "Language server for the gluon programming language",
 	"author": "Markus Westerlind",
 	"license": "MIT",
