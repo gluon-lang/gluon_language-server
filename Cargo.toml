@@ -2,21 +2,32 @@
 name = "gluon_language-server"
 version = "0.1.0"
 authors = ["Markus Westerlind <marwes91@gmail.com>"]
+build = "build.rs"
+description = "Language server providing completion for gluon"
+license = "MIT"
+repository = "https://github.com/Marwes/gluon_language-server"
+
+[build-dependencies.serde_codegen]
+version = "*"
+optional = true
 
 [dependencies.jsonrpc-core]
 version = "2.0.7"
-default-features = false
-features = ["nightly"]
 
 [dependencies]
 log = "0.3.6"
 env_logger = "0.3.3"
 
-serde = "*"
-serde_json = "*"
-serde_macros = "*"
+serde = "0.7.9"
+serde_json = "0.7.1"
+
+[dependencies.serde_macros]
+version = "0.7.9"
+optional = true
 
 [dependencies.gluon]
-version = "0.1.1"
-git = "https://github.com/Marwes/gluon.git"
-rev = "559235c32864627409ddd3da05c8273df6fd5f6f"
+version = "0.1.2"
+
+[features]
+default = ["serde_codegen"]
+nightly = ["serde_macros", "jsonrpc-core/nightly"]
