@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/Marwes/gluon_language-server"
 
 [build-dependencies.serde_codegen]
-version = "*"
+version = "0.7.9"
 optional = true
 
 [dependencies.jsonrpc-core]
