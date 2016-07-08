@@ -13,6 +13,10 @@ The language server is available at [crates.io][] and can be installed by runnin
 }
 ```
 
+## Example
+
+![example](http://i.imgur.com/44bH0ww.gif)
+
 [Visual Studio Code]:https://code.visualstudio.com/
 [gluon]:https://github.com/Marwes/gluon
 [crates.io]:https://crates.io/
