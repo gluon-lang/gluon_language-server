@@ -10,7 +10,7 @@ use gluon::base::symbol::Symbol;
 use gluon::check::completion;
 use gluon::import::{CheckImporter, Import};
 use gluon::vm::internal::Value as GluonValue;
-use gluon::vm::thread::ThreadInternal;
+use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
@@ -38,7 +38,30 @@ trait LanguageServerCommand: Send + Sync {
     fn invalid_params(&self) -> Option<Self::Error>;
 }
 
+trait LanguageServerNotification: Send + Sync {
+    type Param: serde::Deserialize;
+    fn execute(&self, param: Self::Param);
+}
+
 struct ServerCommand<T>(T);
+
+impl<T> NotificationCommand for ServerCommand<T>
+    where T: LanguageServerNotification
+{
+    fn execute(&self, param: Params) {
+        match param {
+            Params::Map(ref map) => {
+                match from_value(Value::Object(map.clone())) {
+                    Ok(value) => {
+                        self.0.execute(value);
+                    }
+                    Err(_) => log_message(format!("Invalid parameters: {:?}", map)),
+                }
+            }
+            _ => log_message(format!("Invalid parameters: {:?}", param)),
+        }
+    }
+}
 
 impl<T> MethodCommand for ServerCommand<T>
     where T: LanguageServerCommand
@@ -169,93 +192,93 @@ fn span_to_range(span: &ast::Span) -> Range {
     }
 }
 
-struct TextDocumentDidChange(RootedThread);
-impl NotificationCommand for TextDocumentDidChange {
-    fn execute(&self, params: Params) {
-        let change: DidChangeTextDocumentParams = match params {
-            Params::Map(map) => {
-                match from_value(Value::Object(map)) {
-                    Ok(change) => change,
-                    Err(_) => return,
-                }
-            }
-            _ => return,
-        };
-        let diagnostics = match self.execute2(&change) {
-            Ok(_) => vec![],
-            Err(err) => {
-                match err {
-                    GluonError::Typecheck(err) => {
-                        err.errors()
-                           .errors
-                           .into_iter()
-                           .map(|err| {
-                               Diagnostic {
-                                   message: format!("{}", err.value),
-                                   severity: Some(DiagnosticSeverity::Error),
-                                   range: span_to_range(&err.span),
-                                   ..Diagnostic::default()
-                               }
-                           })
-                           .collect()
-                    }
-                    err => {
-                        vec![Diagnostic {
-                                 message: format!("{}", err),
-                                 severity: Some(DiagnosticSeverity::Error),
-                                 ..Diagnostic::default()
-                             }]
-                    }
-                }
-            }
-        };
-        let filename = &change.text_document.uri;
-        let r = format!(r#"{{
-                            "jsonrpc": "2.0",
-                            "method": "textDocument/publishDiagnostics",
-                            "params": {}
-                        }}"#,
-                        to_value(&PublishDiagnosticsParams {
-                            uri: filename.clone(),
-                            diagnostics: diagnostics,
-                        }));
-        print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+struct TextDocumentDidOpen(RootedThread);
+impl LanguageServerNotification for TextDocumentDidOpen {
+    type Param = DidOpenTextDocumentParams;
+
+    fn execute(&self, change: DidOpenTextDocumentParams) {
+        run_diagnostics(&self.0, &change.text_document.uri, &change.text_document.text);
     }
 }
 
-impl TextDocumentDidChange {
-    fn execute2(&self, change: &DidChangeTextDocumentParams) -> GluonResult<()> {
-        use gluon::compiler_pipeline::*;
+struct TextDocumentDidChange(RootedThread);
+impl LanguageServerNotification for TextDocumentDidChange {
+    type Param = DidChangeTextDocumentParams;
 
-        let thread = &self.0;
-        let filename = &change.text_document.uri;
-        let fileinput = &change.content_changes[0].text;
-        let name = filename_to_module(filename);
-        let mut compiler = Compiler::new();
-        // The parser may find parse errors but still produce an expression
-        // For that case still typecheck the expression but return the type error afterwards
-        let (expr, parse_result): (_, GluonResult<()>) = match compiler.parse_partial_expr(&name, fileinput) {
-            Ok(expr) => (expr, Ok(())),
-            Err((None, err)) => return Err(err.into()),
-            Err((Some(expr), err)) => (expr, Err(err.into())),
-        };
-        let MacroValue(mut expr) = try!(expr.expand_macro(&mut compiler, thread, &name));
-        let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
-            Ok(typ) => {
-                let metadata = Metadata::default();
-                try!(thread.global_env()
-                           .set_global(Symbol::new(filename), typ, metadata, GluonValue::Int(0)));
-                Ok(())
-            }
-            Err(err) => Err(err),
-        };
-        let import = thread.get_macros().get("import").expect("Import macro");
-        let import = import.downcast_ref::<Import<CheckImporter>>()
-                           .expect("Check importer");
-        let mut importer = import.importer.0.lock().unwrap();
-        importer.insert(filename.clone(), expr);
-        result.or(parse_result)
+    fn execute(&self, change: DidChangeTextDocumentParams) {
+        run_diagnostics(&self.0, &change.text_document.uri, &change.content_changes[0].text);
     }
+}
+
+fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()> {
+    use gluon::compiler_pipeline::*;
+
+    let name = filename_to_module(filename);
+    let mut compiler = Compiler::new();
+    // The parser may find parse errors but still produce an expression
+    // For that case still typecheck the expression but return the type error afterwards
+    let (expr, parse_result): (_, GluonResult<()>) = match compiler.parse_partial_expr(&name, fileinput) {
+        Ok(expr) => (expr, Ok(())),
+        Err((None, err)) => return Err(err.into()),
+        Err((Some(expr), err)) => (expr, Err(err.into())),
+    };
+    let MacroValue(mut expr) = try!(expr.expand_macro(&mut compiler, thread, &name));
+    let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
+        Ok(typ) => {
+            let metadata = Metadata::default();
+            try!(thread.global_env()
+                        .set_global(Symbol::new(filename), typ, metadata, GluonValue::Int(0)));
+            Ok(())
+        }
+        Err(err) => Err(err),
+    };
+    let import = thread.get_macros().get("import").expect("Import macro");
+    let import = import.downcast_ref::<Import<CheckImporter>>()
+                        .expect("Check importer");
+    let mut importer = import.importer.0.lock().unwrap();
+    importer.insert(filename.into(), expr);
+    result.or(parse_result)
+}
+
+fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
+    let diagnostics = match typecheck(thread, filename, fileinput) {
+        Ok(_) => vec![],
+        Err(err) => {
+            match err {
+                GluonError::Typecheck(err) => {
+                    err.errors()
+                        .errors
+                        .into_iter()
+                        .map(|err| {
+                            Diagnostic {
+                                message: format!("{}", err.value),
+                                severity: Some(DiagnosticSeverity::Error),
+                                range: span_to_range(&err.span),
+                                ..Diagnostic::default()
+                            }
+                        })
+                        .collect()
+                }
+                err => {
+                    vec![Diagnostic {
+                                message: format!("{}", err),
+                                severity: Some(DiagnosticSeverity::Error),
+                                ..Diagnostic::default()
+                            }]
+                }
+            }
+        }
+    };
+    let r = format!(r#"{{
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {}
+                    }}"#,
+                    to_value(&PublishDiagnosticsParams {
+                        uri: filename.into(),
+                        diagnostics: diagnostics,
+                    }));
+    print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
 fn log_message(message: String) {
@@ -314,7 +337,8 @@ fn main() {
         let exit_token = Arc::new(AtomicBool::new(false));
         let exit_token2 = exit_token.clone();
         io.add_notification("exit", move |_| exit_token.store(true, atomic::Ordering::SeqCst));
-        io.add_notification("textDocument/didChange", TextDocumentDidChange(thread));
+        io.add_notification("textDocument/didOpen", ServerCommand(TextDocumentDidOpen(thread.clone())));
+        io.add_notification("textDocument/didChange", ServerCommand(TextDocumentDidChange(thread)));
 
         main_loop(&mut io, exit_token2).unwrap();
     });

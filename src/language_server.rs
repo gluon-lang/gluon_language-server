@@ -21,6 +21,40 @@ pub struct VersionedTextDocumentIdentifier {
 }
 
 #[derive(Deserialize)]
+pub struct TextDocumentItem {
+    /**
+     * The text document's URI.
+     */
+    pub uri: String,
+
+    /**
+     * The text document's language identifier.
+     */
+    #[serde(rename="languageId")]
+    pub language_id: String,
+
+    /**
+     * The version number of this document (it will strictly increase after each
+     * change, including undo/redo).
+     */
+    pub version: u64,
+    
+    /**
+     * The content of the opened text document.
+     */
+    pub text: String,
+}
+
+#[derive(Deserialize)]
+pub struct DidOpenTextDocumentParams {
+    /**
+     * The document that was opened.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentItem,
+}
+
+#[derive(Deserialize)]
 pub struct TextDocumentContentChangeEvent {
     pub range: Option<Range>,
     #[serde(rename="rangeLength")]
