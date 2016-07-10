@@ -72,15 +72,15 @@ impl<T> MethodCommand for ServerCommand<T>
                 match from_value(Value::Object(map.clone())) {
                     Ok(value) => {
                         return self.0
-                                   .execute(value)
-                                   .map(|value| to_value(&value))
-                                   .map_err(|error| {
-                                       Error {
-                                           code: ErrorCode::InternalError,
-                                           message: error.message,
-                                           data: error.data.as_ref().map(to_value),
-                                       }
-                                   })
+                            .execute(value)
+                            .map(|value| to_value(&value))
+                            .map_err(|error| {
+                                Error {
+                                    code: ErrorCode::InternalError,
+                                    message: error.message,
+                                    data: error.data.as_ref().map(to_value),
+                                }
+                            })
                     }
                     Err(_) => (),
                 }
@@ -106,7 +106,7 @@ impl LanguageServerCommand for Initialize {
                -> Result<InitializeResult, ServerError<InitializeError>> {
         let import = self.0.get_macros().get("import").expect("Import macro");
         let import = import.downcast_ref::<Import<CheckImporter>>()
-                           .expect("Check importer");
+            .expect("Check importer");
         if let Some(ref path) = change.root_path {
             import.add_path(path);
         }
@@ -117,14 +117,15 @@ impl LanguageServerCommand for Initialize {
                     resolve_provider: Some(true),
                     trigger_characters: vec![".".into()],
                 }),
+                hover_provider: Some(true),
+                ..
+                ServerCapabilities::default()
             },
         })
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
-        Some(InitializeError {
-            retry: false,
-        })
+        Some(InitializeError { retry: false })
     }
 }
 
@@ -155,23 +156,65 @@ impl LanguageServerCommand for Completion {
                                                   absolute: 0,
                                               });
         let items: Vec<_> = suggestions.into_iter()
-                                       .map(|ident| {
-                                           // Remove the `:Line x, Row y suffix`
-                                           let label =
-                                               String::from(ident.name
-                                                                 .as_ref()
-                                                                 .split(':')
-                                                                 .next()
-                                                                 .unwrap_or(ident.name.as_ref()));
-                                           CompletionItem {
-                                               label: label,
-                                               detail: Some(format!("{}", ident.typ)),
-                                               kind: Some(CompletionItemKind::Variable),
-                                               ..CompletionItem::default()
-                                           }
-                                       })
-                                       .collect();
+            .map(|ident| {
+                // Remove the `:Line x, Row y suffix`
+                let label = String::from(ident.name
+                    .as_ref()
+                    .split(':')
+                    .next()
+                    .unwrap_or(ident.name.as_ref()));
+                CompletionItem {
+                    label: label,
+                    detail: Some(format!("{}", ident.typ)),
+                    kind: Some(CompletionItemKind::Variable),
+                    ..CompletionItem::default()
+                }
+            })
+            .collect();
         Ok(items)
+    }
+
+    fn invalid_params(&self) -> Option<Self::Error> {
+        None
+    }
+}
+
+struct HoverCommand(RootedThread);
+impl LanguageServerCommand for HoverCommand {
+    type Param = TextDocumentPositionParams;
+    type Output = Hover;
+    type Error = ();
+    fn execute(&self, change: TextDocumentPositionParams) -> Result<Hover, ServerError<()>> {
+        let thread = &self.0;
+        let module = change.text_document.uri;
+        let import = thread.get_macros().get("import").expect("Import macro");
+        let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
+        let importer = import.importer.0.lock().unwrap();
+        let expr = try!(importer.get(&module).ok_or_else(|| {
+            ServerError {
+                message: format!("Module `{}` is not defined", module),
+                data: None,
+            }
+        }));
+        completion::find(&ast::EmptyEnv::new(),
+                         expr,
+                         ast::Location {
+                             row: (change.position.line + 1) as i32,
+                             column: change.position.character as i32,
+                             absolute: 0,
+                         })
+            .map(|typ| {
+                Hover {
+                    contents: vec![MarkedString::String(format!("{}", typ))],
+                    range: None,
+                }
+            })
+            .map_err(|()| {
+                ServerError {
+                    message: "Could not find a type for hover".into(),
+                    data: None,
+                }
+            })
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -197,7 +240,9 @@ impl LanguageServerNotification for TextDocumentDidOpen {
     type Param = DidOpenTextDocumentParams;
 
     fn execute(&self, change: DidOpenTextDocumentParams) {
-        run_diagnostics(&self.0, &change.text_document.uri, &change.text_document.text);
+        run_diagnostics(&self.0,
+                        &change.text_document.uri,
+                        &change.text_document.text);
     }
 }
 
@@ -206,7 +251,9 @@ impl LanguageServerNotification for TextDocumentDidChange {
     type Param = DidChangeTextDocumentParams;
 
     fn execute(&self, change: DidChangeTextDocumentParams) {
-        run_diagnostics(&self.0, &change.text_document.uri, &change.content_changes[0].text);
+        run_diagnostics(&self.0,
+                        &change.text_document.uri,
+                        &change.content_changes[0].text);
     }
 }
 
@@ -217,24 +264,25 @@ fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()
     let mut compiler = Compiler::new();
     // The parser may find parse errors but still produce an expression
     // For that case still typecheck the expression but return the parse error afterwards
-    let (expr, parse_result): (_, GluonResult<()>) = match compiler.parse_partial_expr(&name, fileinput) {
-        Ok(expr) => (expr, Ok(())),
-        Err((None, err)) => return Err(err.into()),
-        Err((Some(expr), err)) => (expr, Err(err.into())),
-    };
+    let (expr, parse_result): (_, GluonResult<()>) =
+        match compiler.parse_partial_expr(&name, fileinput) {
+            Ok(expr) => (expr, Ok(())),
+            Err((None, err)) => return Err(err.into()),
+            Err((Some(expr), err)) => (expr, Err(err.into())),
+        };
     let MacroValue(mut expr) = try!(expr.expand_macro(&mut compiler, thread, &name));
     let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
         Ok(typ) => {
             let metadata = Metadata::default();
             try!(thread.global_env()
-                        .set_global(Symbol::new(filename), typ, metadata, GluonValue::Int(0)));
+                .set_global(Symbol::new(filename), typ, metadata, GluonValue::Int(0)));
             Ok(())
         }
         Err(err) => Err(err),
     };
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import.downcast_ref::<Import<CheckImporter>>()
-                        .expect("Check importer");
+        .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
     importer.insert(filename.into(), expr);
     result.or(parse_result)
@@ -265,7 +313,7 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                         .map(|err| {
                             let p = Position {
                                 line: err.position.line as u64 - 1,
-                                character: err.position.column as u64
+                                character: err.position.column as u64,
                             };
                             Diagnostic {
                                 message: format!("{}", err),
@@ -278,10 +326,10 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                 }
                 err => {
                     vec![Diagnostic {
-                                message: format!("{}", err),
-                                severity: Some(DiagnosticSeverity::Error),
-                                ..Diagnostic::default()
-                            }]
+                             message: format!("{}", err),
+                             severity: Some(DiagnosticSeverity::Error),
+                             ..Diagnostic::default()
+                         }]
                 }
             }
         }
@@ -350,20 +398,25 @@ fn main() {
         io.add_method("initialize", ServerCommand(Initialize(thread.clone())));
         io.add_method("textDocument/completion",
                       ServerCommand(Completion(thread.clone())));
+        io.add_method("textDocument/hover",
+                      ServerCommand(HoverCommand(thread.clone())));
         io.add_method("shutdown", |_| Ok(Value::I64(0)));
         let exit_token = Arc::new(AtomicBool::new(false));
         let exit_token2 = exit_token.clone();
-        io.add_notification("exit", move |_| exit_token.store(true, atomic::Ordering::SeqCst));
-        io.add_notification("textDocument/didOpen", ServerCommand(TextDocumentDidOpen(thread.clone())));
-        io.add_notification("textDocument/didChange", ServerCommand(TextDocumentDidChange(thread)));
+        io.add_notification("exit",
+                            move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+        io.add_notification("textDocument/didOpen",
+                            ServerCommand(TextDocumentDidOpen(thread.clone())));
+        io.add_notification("textDocument/didChange",
+                            ServerCommand(TextDocumentDidChange(thread)));
 
         main_loop(&mut io, exit_token2).unwrap();
     });
     if let Err(err) = handle.join() {
         let msg = err.downcast_ref::<&'static str>()
-                     .cloned()
-                     .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
-                     .unwrap_or("Any");
+            .cloned()
+            .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
+            .unwrap_or("Any");
         log_message(format!("Panic: `{}`", msg));
     }
 }
