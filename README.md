@@ -4,11 +4,10 @@ An extension for for [Visual Studio Code][] which provides syntax hightlighting 
 
 ## Installing the language server
 
-The language server is available at [crates.io][] and can be installed by running `cargo install gluon_language-server`.
+The language server is available at [crates.io][] and can be installed by running `cargo install gluon_language-server`. After installing the extension you will need to either make the language server executable available in `$PATH` or set the `gluon.language-server.path` option to exectuables path. 
 
 ```json
 {
-    // Specifies where the language server is found. By default this looks for "gluon_language-server" in $PATH
     "gluon.language-server.path": "gluon_language-server"
 }
 ```
