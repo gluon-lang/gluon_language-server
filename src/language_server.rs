@@ -38,7 +38,7 @@ pub struct TextDocumentItem {
      * change, including undo/redo).
      */
     pub version: u64,
-    
+
     /**
      * The content of the opened text document.
      */
@@ -104,7 +104,9 @@ pub struct InitializeParams {
 }
 
 #[derive(Deserialize)]
-pub struct ClientCapabilities { _dummy: Option<()> }
+pub struct ClientCapabilities {
+    _dummy: Option<()>,
+}
 
 #[derive(Default, Serialize)]
 pub struct InitializeResult {
@@ -123,12 +125,96 @@ pub struct InitializeError {
 
 #[derive(Default, Serialize)]
 pub struct ServerCapabilities {
+    /**
+     * Defines how text documents are synced.
+     */
     #[serde(skip_serializing_if="Option::is_none")]
     #[serde(rename="textDocumentSync")]
     pub text_document_sync: Option<TextDocumentSyncKind>,
+    /**
+     * The server provides hover support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="hoverProvider")]
+    pub hover_provider: Option<bool>,
+    /**
+     * The server provides completion support.
+     */
     #[serde(skip_serializing_if="Option::is_none")]
     #[serde(rename="completionProvider")]
     pub completion_provider: Option<CompletionOptions>,
+    /**
+     * The server provides signature help support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="signatureHelpProvider")]
+    pub signature_help_provider: Option<SignatureHelpOptions>,
+    /**
+     * The server provides goto definition support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="definitionProvider")]
+    pub definition_provider: Option<bool>,
+    /**
+     * The server provides find references support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="referencesProvider")]
+    pub references_provider: Option<bool>,
+    /**
+     * The server provides document highlight support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="documentHighlightProvider")]
+    pub document_highlight_provider: Option<bool>,
+    /**
+     * The server provides document symbol support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="documentSymbolProvider")]
+    pub document_symbol_provider: Option<bool>,
+    /**
+     * The server provides workspace symbol support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="workspaceSymbolProvider")]
+    pub workspace_symbol_provider: Option<bool>,
+    /**
+     * The server provides code actions.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="codeActionProvider")]
+    pub code_action_provider: Option<bool>,
+    /**
+     * The server provides code lens.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="codeLensProvider")]
+    pub code_lens_provider: Option<CodeLensOptions>,
+    /**
+     * The server provides document formatting.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="documentFormattingProvider")]
+    pub document_formatting_provider: Option<bool>,
+    /**
+     * The server provides document range formatting.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="documentRangeFormattingProvider")]
+    pub document_range_formatting_provider: Option<bool>,
+    /**
+     * The server provides document formatting on typing.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="documentOnTypeFormattingProvider")]
+    pub document_on_type_formatting_provider: Option<DocumentOnTypeFormattingOptions>,
+    /**
+     * The server provides rename support.
+     */
+    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(rename="renameProvider")]
+    pub rename_provider: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -154,6 +240,49 @@ pub struct CompletionOptions {
     pub resolve_provider: Option<bool>,
     #[serde(rename="triggerCharacters")]
     pub trigger_characters: Vec<String>,
+}
+
+/**
+ * Signature help options.
+ */
+#[derive(Serialize)]
+pub struct SignatureHelpOptions {
+    /**
+     * The characters that trigger signature help automatically.
+     */
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    #[serde(rename="triggerCharacters")]
+    pub trigger_characters: Vec<String>,
+}
+
+/**
+ * Code Lens options.
+ */
+#[derive(Serialize)]
+pub struct CodeLensOptions {
+    /**
+     * Code lens has a resolve provider as well.
+     */
+    #[serde(rename="resolveProvider")]
+    pub resolve_provider: Option<bool>,
+}
+
+/**
+ * Format document on type options
+ */
+#[derive(Serialize)]
+pub struct DocumentOnTypeFormattingOptions {
+    /**
+     * A character on which formatting should be triggered, like `}`.
+     */
+    #[serde(rename="firstTriggerCharacter")]
+    pub first_trigger_character: String,
+    /**
+     * More trigger characters.
+     */
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    #[serde(rename="moreTriggerCharacter")]
+    pub more_trigger_character: Vec<String>,
 }
 
 #[derive(Default, Serialize)]
@@ -273,6 +402,52 @@ impl serde::Serialize for CompletionItemKind {
         where S: serde::Serializer
     {
         serializer.serialize_u8(*self as u8)
+    }
+}
+
+/**
+ * The result of a hove request.
+ */
+#[derive(Serialize)]
+pub struct Hover {
+    /**
+     * The hover's content
+     */
+    pub contents: Vec<MarkedString>,
+
+    /**
+     * An optional range
+     */
+    pub range: Option<Range>,
+}
+
+pub enum MarkedString {
+    String(String),
+    LanguageString {
+        language: String,
+        value: String,
+    },
+}
+
+impl serde::Serialize for MarkedString {
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: serde::Serializer
+    {
+        match *self {
+            MarkedString::String(ref s) => serializer.serialize_str(s),
+            MarkedString::LanguageString { ref language, ref value } => {
+                #[derive(Serialize)]
+                struct Variant<'s> {
+                    language: &'s str,
+                    value: &'s str,
+                }
+                Variant {
+                        language: language,
+                        value: value,
+                    }
+                    .serialize(serializer)
+            }
+        }
     }
 }
 
