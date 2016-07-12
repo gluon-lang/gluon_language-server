@@ -4,5 +4,6 @@ Cargo.lock
 out
 server
 node_modules
+*.bk
 
 .vscode
