@@ -1,23 +1,52 @@
+use std::collections::HashMap;
 use serde;
+use serde::de::Error;
 use serde_json::Value;
 
 #[derive(Deserialize)]
+pub struct CancelParams {
+    /**
+     * The request id to cancel.
+     */
+    pub id: String,
+}
+
+#[derive(Deserialize)]
 pub struct DidChangeTextDocumentParams {
+    /**
+     * The document that did change. The version number points
+     * to the version after all provided content changes have
+     * been applied.
+     */
     #[serde(rename="textDocument")]
     pub text_document: VersionedTextDocumentIdentifier,
+    /**
+     * The actual content changes.
+     */
     #[serde(rename="contentChanges")]
     pub content_changes: Vec<TextDocumentContentChangeEvent>,
 }
 
+/// Text documents are identified using a URI. On the protocol level, URIs are passed as strings. The corresponding JSON structure looks like this:
 #[derive(Deserialize)]
 pub struct TextDocumentIdentifier {
+    /**
+     * The text document's URI.
+     */
     pub uri: String,
 }
 
+/// An identifier to denote a specific version of a text document.
 #[derive(Deserialize)]
 pub struct VersionedTextDocumentIdentifier {
-    pub version: u64,
+    /**
+     * The text document's URI.
+     */
     pub uri: String,
+    /**
+     * The version number of this document.
+     */
+    pub version: u64,
 }
 
 #[derive(Deserialize)]
@@ -54,30 +83,135 @@ pub struct DidOpenTextDocumentParams {
     pub text_document: TextDocumentItem,
 }
 
+/**
+ * An event describing a change to a text document. If range and rangeLength are omitted
+ * the new text is considered to be the full content of the document.
+ */
 #[derive(Deserialize)]
 pub struct TextDocumentContentChangeEvent {
+    /**
+     * The range of the document that changed.
+     */
     pub range: Option<Range>,
+    /**
+     * The length of the range that got replaced.
+     */
     #[serde(rename="rangeLength")]
     pub range_length: Option<u64>,
+    /**
+     * The new text of the document.
+     */
     pub text: String,
 }
 
+#[derive(Deserialize)]
+pub struct DidCloseTextDocumentParams {
+    /**
+     * The document that was closed.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+pub struct DidSaveTextDocumentParams {
+    /**
+     * The document that was saved.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+}
+
+#[derive(Deserialize)]
+pub struct DidChangeWatchedFilesParams {
+    /**
+     * The actual file events.
+     */
+    pub changes: Vec<FileEvent>,
+}
+
+/**
+ * The file event type.
+ */
+pub enum FileChangeType {
+    /**
+     * The file got created.
+     */
+    Created = 1,
+    /**
+     * The file got changed.
+     */
+    Changed = 2,
+    /**
+     * The file got deleted.
+     */
+    Deleted = 3
+}
+
+impl serde::Deserialize for FileChangeType {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: serde::Deserializer
+    {
+        Ok(match try!(u8::deserialize(deserializer)) {
+            1 => FileChangeType::Created,
+            2 => FileChangeType::Changed,
+            3 => FileChangeType::Deleted,
+            _ => return Err(D::Error::invalid_value("Expected a value of 1, 2 or 3 to deserialze to FileChangeType")),
+        })
+    }
+}
+
+/**
+ * An event describing a file change.
+ */
+#[derive(Deserialize)]
+pub struct FileEvent {
+    /**
+     * The file's URI.
+     */
+    pub uri: String,
+    /**
+     * The change type.
+     */
+    pub typ: FileChangeType,
+}
+
+/// Position in a text document expressed as zero-based line and character offset.
 #[derive(Copy, Clone, Default, Deserialize, Serialize)]
 pub struct Position {
+    /// Line position in a document (zero-based).
     pub line: u64,
+    /// Character offset on a line in a document (zero-based).
     pub character: u64,
 }
 
 #[derive(Copy, Clone, Default, Deserialize, Serialize)]
 pub struct Range {
+    /// The range's start position.
     pub start: Position,
+    /// The range's end position.
     pub end: Position,
 }
 
+/// Represents a location inside a resource, such as a line inside a text file.
+pub struct Location {
+    pub uri: String,
+    pub range: Range,
+}
+
+
+
+/// A parameter literal used in requests to pass a text document and a position inside that document.
 #[derive(Deserialize)]
 pub struct TextDocumentPositionParams {
+    /**
+     * The text document.
+     */
     #[serde(rename="textDocument")]
     pub text_document: TextDocumentIdentifier,
+    /**
+     * The position inside the text document.
+     */
     pub position: Position,
 }
 
@@ -217,10 +351,23 @@ pub struct ServerCapabilities {
     pub rename_provider: Option<bool>,
 }
 
+/**
+ * Defines how the host (editor) should sync document changes to the language server.
+ */
 #[derive(Clone, Copy)]
 pub enum TextDocumentSyncKind {
+    /**
+     * Documents should not be synced at all.
+     */
     None = 0,
+    /**
+     * Documents are synced by always sending the full content of the document.
+     */
     Full = 1,
+    /**
+     * Documents are synced by sending the full content on open. After that only
+     * incremental updates to the document are sent.
+     */
     Incremental = 2,
 }
 
@@ -232,12 +379,21 @@ impl serde::Serialize for TextDocumentSyncKind {
     }
 }
 
-
+/**
+ * Completion options.
+ */
 #[derive(Default, Serialize)]
 pub struct CompletionOptions {
+    /**
+     * The server provides support to resolve additional information for a completion item.
+     */
     #[serde(skip_serializing_if="Option::is_none")]
     #[serde(rename="resolveProvider")]
     pub resolve_provider: Option<bool>,
+
+    /**
+     * The characters that trigger completion automatically.
+     */
     #[serde(rename="triggerCharacters")]
     pub trigger_characters: Vec<String>,
 }
@@ -285,11 +441,29 @@ pub struct DocumentOnTypeFormattingOptions {
     pub more_trigger_character: Vec<String>,
 }
 
+/// A textual edit applicable to a text document.
 #[derive(Default, Serialize)]
 pub struct TextEdit {
+    /**
+     * The range of the text document to be manipulated. To insert
+     * text into a document create a range where start === end.
+     */
     pub range: Range,
+    /**
+     * The string to be inserted. For delete operations use an
+     * empty string.
+     */
     #[serde(rename="newText")]
     pub new_text: String,
+}
+
+/// A workspace edit represents changes to many resources managed in the workspace.
+#[derive(Default, Serialize)]
+pub struct WorkspaceEdit {
+    /**
+     * Holds changes to existing resources.
+     */
+    pub changes: HashMap<String, Vec<TextEdit>>,
 }
 
 /**
@@ -451,6 +625,318 @@ impl serde::Serialize for MarkedString {
     }
 }
 
+/**
+ * Signature help represents the signature of something
+ * callable. There can be multiple signature but only one
+ * active and only one active parameter.
+ */
+#[derive(Serialize)]
+pub struct SignatureHelp {
+    /**
+     * One or more signatures.
+     */
+    pub signatures: Vec<SignatureInformation>,
+
+    /**
+     * The active signature.
+     */
+    #[serde(rename="activeSignature")]
+    pub active_signature: Option<u64>,
+
+    /**
+     * The active parameter of the active signature.
+     */
+    #[serde(rename="activeParameter")]
+    pub active_parameter: Option<u64>,
+}
+
+/**
+ * Represents the signature of something callable. A signature
+ * can have a label, like a function-name, a doc-comment, and
+ * a set of parameters.
+ */
+#[derive(Serialize)]
+pub struct SignatureInformation {
+    /**
+     * The label of this signature. Will be shown in
+     * the UI.
+     */
+    pub label: String,
+
+    /**
+     * The human-readable doc-comment of this signature. Will be shown
+     * in the UI but can be omitted.
+     */
+    pub documentation: String,
+
+    /**
+     * The parameters of this signature.
+     */
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub parameters: Vec<ParameterInformation>,
+}
+
+/**
+ * Represents a parameter of a callable-signature. A parameter can
+ * have a label and a doc-comment.
+ */
+#[derive(Serialize)]
+pub struct ParameterInformation {
+    /**
+     * The label of this signature. Will be shown in
+     * the UI.
+     */
+    pub label: String,
+
+    /**
+     * The human-readable doc-comment of this signature. Will be shown
+     * in the UI but can be omitted.
+     */
+    #[serde(skip_serializing_if="String::is_empty")]
+    pub documentation: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReferenceParams {
+    /**
+     * The text document.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+    /**
+     * The position inside the text document.
+     */
+    pub position: Position,
+
+    pub context: ReferenceContext,
+}
+
+#[derive(Deserialize)]
+pub struct ReferenceContext {
+    /**
+     * Include the declaration of the current symbol.
+     */
+    #[serde(rename="includeDeclaration")]
+    pub include_declaration: bool,
+}
+
+/**
+ * A document highlight is a range inside a text document which deserves
+ * special attention. Usually a document highlight is visualized by changing
+ * the background color of its range.
+ */
+#[derive(Serialize)]
+pub struct DocumentHighlight {
+    /**
+     * The range this highlight applies to.
+     */
+    pub range: Range,
+
+    /**
+     * The highlight kind, default is DocumentHighlightKind.Text.
+     */
+    pub kind: Option<DocumentHighlightKind>,
+}
+
+/**
+ * A document highlight kind.
+ */
+#[derive(Copy, Clone)]
+pub enum DocumentHighlightKind {
+    /**
+     * A textual occurrance.
+     */
+    Text = 1,
+
+    /**
+     * Read-access of a symbol, like reading a variable.
+     */
+    Read = 2,
+
+    /**
+     * Write-access of a symbol, like writing to a variable.
+     */
+    Write = 3
+}
+
+impl serde::Serialize for DocumentHighlightKind {
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: serde::Serializer
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DocumentSymbolParams {
+    /**
+     * The text document.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+}
+
+/**
+ * Represents information about programming constructs like variables, classes,
+ * interfaces etc.
+ */
+pub struct SymbolInformation {
+    /**
+     * The name of this symbol.
+     */
+    pub name: String,
+
+    /**
+     * The kind of this symbol.
+     */
+    pub kind: SymbolKind,
+
+    /**
+     * The location of this symbol.
+     */
+    pub location: Location,
+
+    /**
+     * The name of the symbol containing this symbol.
+     */
+    #[serde(rename="containerName")]
+    pub container_name: String,
+}
+
+/**
+ * A symbol kind.
+ */
+#[derive(Copy, Clone)]
+pub enum SymbolKind {
+    File = 1,
+    Module = 2,
+    Namespace = 3,
+    Package = 4,
+    Class = 5,
+    Method = 6,
+    Property = 7,
+    Field = 8,
+    Constructor = 9,
+    Enum = 10,
+    Interface = 11,
+    Function = 12,
+    Variable = 13,
+    Constant = 14,
+    String = 15,
+    Number = 16,
+    Boolean = 17,
+    Array = 18,
+}
+
+impl serde::Serialize for SymbolKind {
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: serde::Serializer
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+/**
+ * The parameters of a Workspace Symbol Request.
+ */
+#[derive(Deserialize)]
+pub struct WorkspaceSymbolParams {
+    /**
+     * A non-empty query string
+     */
+    pub query: String,
+}
+
+/**
+ * Params for the CodeActionRequest
+ */
+#[derive(Deserialize)]
+pub struct CodeActionParams {
+    /**
+     * The document in which the command was invoked.
+     */
+    pub text_document: TextDocumentIdentifier,
+
+    /**
+     * The range for which the command was invoked.
+     */
+    pub range: Range,
+
+    /**
+     * Context carrying additional information.
+     */
+    pub context: CodeActionContext,
+}
+
+/**
+ * Contains additional diagnostic information about the context in which
+ * a code action is run.
+ */
+#[derive(Deserialize)]
+pub struct CodeActionContext {
+    /**
+     * An array of diagnostics.
+     */
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Deserialize)]
+pub struct CodeLensParams {
+    /**
+     * The document to request code lens for.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+}
+
+/**
+ * A code lens represents a command that should be shown along with
+ * source text, like the number of references, a way to run tests, etc.
+ *
+ * A code lens is _unresolved_ when no command is associated to it. For performance
+ * reasons the creation of a code lens and resolving should be done in two stages.
+ */
+#[derive(Serialize)]
+pub struct CodeLens {
+    /**
+     * The range in which this code lens is valid. Should only span a single line.
+     */
+    pub range: Range,
+
+    /**
+     * The command this code lens represents.
+     */
+    pub command: Option<Command>,
+
+    /**
+     * A data entry field that is preserved on a code lens item between
+     * a code lens and a code lens resolve request.
+     */
+    pub data: Option<Value>,
+}
+
+#[derive(Deserialize)]
+pub struct RenameParams {
+    /**
+     * The document to format.
+     */
+    #[serde(rename="textDocument")]
+    pub text_document: TextDocumentIdentifier,
+
+    /**
+     * The position at which this request was sent.
+     */
+    pub position: Position,
+
+    /**
+     * The new name of the symbol. If the given name is not valid the
+     * request must return a [ResponseError](#ResponseError) with an
+     * appropriate message set.
+     */
+    #[serde(rename="newName")]
+    pub new_name: String,
+}
+
 #[derive(Serialize)]
 pub struct ShowMessageParams {
     /**
@@ -466,6 +952,34 @@ pub struct ShowMessageParams {
 }
 
 #[derive(Serialize)]
+pub struct ShowMessageRequestParams {
+    /**
+     * The message type. See {@link MessageType}
+     */
+    #[serde(rename="type")]
+    pub typ: MessageType,
+
+    /**
+     * The actual message
+     */
+    pub message: String,
+
+    /**
+     * The message action items to present.
+     */
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub actions: Vec<MessageActionItem>,
+}
+
+#[derive(Serialize)]
+pub struct MessageActionItem {
+    /**
+     * A short title like 'Retry', 'Open Log' etc.
+     */
+    pub title: String,
+}
+
+#[derive(Serialize)]
 pub struct LogMessageParams {
     /**
      * The message type. See {@link MessageType}
@@ -477,6 +991,14 @@ pub struct LogMessageParams {
      * The actual message
      */
     pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct DidChangeConfigurationParams {
+    /**
+     * The actual changed settings
+     */
+    pub settings: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -520,7 +1042,7 @@ pub struct PublishDiagnosticsParams {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 pub struct Diagnostic {
     /**
      * The range at which the message applies
@@ -570,10 +1092,43 @@ pub enum DiagnosticSeverity {
     Hint = 4,
 }
 
+impl serde::Deserialize for DiagnosticSeverity {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: serde::Deserializer
+    {
+        Ok(match try!(u8::deserialize(deserializer)) {
+            1 => DiagnosticSeverity::Error,
+            2 => DiagnosticSeverity::Warning,
+            3 => DiagnosticSeverity::Information,
+            4 => DiagnosticSeverity::Hint,
+            _ => return Err(D::Error::invalid_value("Expected a value of 1, 2, 3 or 4 to deserialze to DiagnosticSeverity")),
+        })
+    }
+}
+
 impl serde::Serialize for DiagnosticSeverity {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
         where S: serde::Serializer
     {
         serializer.serialize_u8(*self as u8)
     }
+}
+
+/// Represents a reference to a command. Provides a title which will be used to represent a command in the UI and, optionally, an array of arguments which will be passed to the command handler function when invoked.
+#[derive(Default, Serialize)]
+pub struct Command {
+    /**
+     * Title of the command, like `save`.
+     */
+    pub title: String,
+    /**
+     * The identifier of the actual command handler.
+     */
+    pub command: String,
+    /**
+     * Arguments that the command handler should be
+     * invoked with.
+     */
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub arguments: Vec<Value>,
 }
