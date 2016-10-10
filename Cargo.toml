@@ -8,11 +8,11 @@ license = "MIT"
 repository = "https://github.com/Marwes/gluon_language-server"
 
 [build-dependencies.serde_codegen]
-version = "0.7.9"
+version = "0.8.0"
 optional = true
 
 [dependencies.jsonrpc-core]
-version = "2.0.7"
+version = "3.0.0"
 default-features = false
 
 [dependencies]
@@ -20,12 +20,8 @@ log = "0.3.6"
 env_logger = "0.3.3"
 url = "1.2.0"
 
-serde = "0.7.9"
-serde_json = "0.7.1"
-
-[dependencies.serde_macros]
-version = "0.7.9"
-optional = true
+serde = "0.8-11"
+serde_json = "0.8.0"
 
 [dependencies.gluon]
 version = "0.2.2"
@@ -33,4 +29,4 @@ default-features = false
 
 [features]
 default = ["serde_codegen", "jsonrpc-core/default"]
-nightly = ["serde_macros", "jsonrpc-core/nightly"]
+nightly = ["jsonrpc-core/nightly"]
