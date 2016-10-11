@@ -8,6 +8,14 @@ repository = "https://github.com/gluon-lang/gluon_language-server"
 
 [workspace]
 
+[[bin]]
+name = "debugger"
+path = "src/debugger.rs"
+
+[[bin]]
+name = "gluon_language-server"
+path = "src/main.rs"
+
 [dependencies]
 log = "0.3.6"
 env_logger = "0.3.3"
@@ -21,9 +29,9 @@ serde = "0.9.6"
 serde_json = "0.9.0"
 
 languageserver-types = "0.7.0"
+debugserver-types = "0.2.0"
 
 [dependencies.gluon]
-git = "https://github.com/gluon-lang/gluon"
-branch = "master"
+version = "0.3.0"
 # Don't include the repl
 default-features = false

@@ -40,6 +40,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Condvar, Mutex};
@@ -75,8 +76,8 @@ fn log_message(message: String) {
     debug!("{}", message);
     let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
                     serde_json::to_value(&LogMessageParams {
-                            typ: MessageType::Log,
-                            message: message,
+                        typ: MessageType::Log,
+                        message: message,
                         })
                         .unwrap());
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
@@ -128,16 +129,16 @@ impl LanguageServerCommand for Initialize {
             import.add_path(path);
         }
         Ok(InitializeResult {
-                capabilities: ServerCapabilities {
-                    text_document_sync: Some(TextDocumentSyncKind::Full),
-                    completion_provider: Some(CompletionOptions {
-                        resolve_provider: Some(true),
-                        trigger_characters: vec![".".into()],
-                    }),
-                    hover_provider: Some(true),
-                    ..ServerCapabilities::default()
-                },
-            })
+            capabilities: ServerCapabilities {
+                text_document_sync: Some(TextDocumentSyncKind::Full),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(true),
+                    trigger_characters: vec![".".into()],
+                }),
+                hover_provider: Some(true),
+                ..ServerCapabilities::default()
+            },
+        })
             .into_future()
             .boxed()
     }
@@ -156,50 +157,50 @@ impl LanguageServerCommand for Completion {
                change: TextDocumentPositionParams)
                -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
         (|| -> Result<_, _> {
-                let thread = &self.0;
+        let thread = &self.0;
                 let module = strip_file_prefix_with_thread(thread, &change.text_document.uri);
-                let import = thread.get_macros().get("import").expect("Import macro");
+        let import = thread.get_macros().get("import").expect("Import macro");
                 let import = import.downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
-                let importer = import.importer.0.lock().unwrap();
-                let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
-                    ServerError {
-                        message: format!("Module `{}` is not defined", module),
-                        data: None,
-                    }
-                }));
+        let importer = import.importer.0.lock().unwrap();
+        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
+            ServerError {
+                message: format!("Module `{}` is not defined", module),
+                data: None,
+            }
+        }));
 
-                let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
-                    .ok_or_else(|| {
-                        ServerError {
-                            message: format!("Position ({}, {}) is out of range",
-                                             change.position.line,
-                                             change.position.character),
-                            data: None,
-                        }
-                    }));
-                let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-                let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
+        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+            .ok_or_else(|| {
+                ServerError {
+                    message: format!("Position ({}, {}) is out of range",
+                                     change.position.line,
+                                     change.position.character),
+                    data: None,
+                }
+            }));
+        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+        let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
 
-                let mut items: Vec<_> = suggestions.into_iter()
-                    .map(|ident| {
-                        // Remove the `:Line x, Row y suffix`
-                        let name: &str = ident.name.as_ref();
-                        let label = String::from(name.split(':')
-                            .next()
-                            .unwrap_or(ident.name.as_ref()));
-                        CompletionItem {
-                            label: label,
-                            detail: Some(format!("{}", ident.typ)),
-                            kind: Some(CompletionItemKind::Variable),
-                            ..CompletionItem::default()
-                        }
-                    })
-                    .collect();
+        let mut items: Vec<_> = suggestions.into_iter()
+            .map(|ident| {
+                // Remove the `:Line x, Row y suffix`
+                let name: &str = ident.name.as_ref();
+                let label = String::from(name.split(':')
+                    .next()
+                    .unwrap_or(ident.name.as_ref()));
+                CompletionItem {
+                    label: label,
+                    detail: Some(format!("{}", ident.typ)),
+                    kind: Some(CompletionItemKind::Variable),
+                    ..CompletionItem::default()
+                }
+            })
+            .collect();
 
-                items.sort_by(|l, r| l.label.cmp(&r.label));
+        items.sort_by(|l, r| l.label.cmp(&r.label));
 
-                Ok(items)
+        Ok(items)
             })()
             .into_future()
             .boxed()
@@ -217,30 +218,30 @@ impl LanguageServerCommand for HoverCommand {
     type Error = ();
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
         (|| -> Result<_, _> {
-                let thread = &self.0;
+        let thread = &self.0;
                 let module = strip_file_prefix_with_thread(thread, &change.text_document.uri);
-                let import = thread.get_macros().get("import").expect("Import macro");
+        let import = thread.get_macros().get("import").expect("Import macro");
                 let import = import.downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
-                let importer = import.importer.0.lock().unwrap();
-                let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
-                    ServerError {
-                        message: format!("Module `{}` is not defined", module),
-                        data: None,
-                    }
-                }));
+        let importer = import.importer.0.lock().unwrap();
+        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
+            ServerError {
+                message: format!("Module `{}` is not defined", module),
+                data: None,
+            }
+        }));
 
-                let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
-                    .ok_or_else(|| {
-                        ServerError {
-                            message: format!("Position ({}, {}) is out of range",
-                                             change.position.line,
-                                             change.position.character),
-                            data: None,
-                        }
-                    }));
-                let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-                completion::find(&*thread.get_env(), expr, byte_pos)
+        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+            .ok_or_else(|| {
+                ServerError {
+                    message: format!("Position ({}, {}) is out of range",
+                                     change.position.line,
+                                     change.position.character),
+                    data: None,
+                }
+            }));
+        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+        completion::find(&*thread.get_env(), expr, byte_pos)
             .map(|typ| {
                 Hover {
                     contents: vec![MarkedString::String(format!("{}", typ))],
@@ -424,13 +425,13 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
     fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
         where T: fmt::Display,
     {
-        Diagnostic {
-            message: format!("{}", err.value),
-            severity: Some(DiagnosticSeverity::Error),
-            range: span_to_range(&err.span),
-            ..Diagnostic::default()
-        }
-    }
+                            Diagnostic {
+                                message: format!("{}", err.value),
+                                severity: Some(DiagnosticSeverity::Error),
+                                range: span_to_range(&err.span),
+                                ..Diagnostic::default()
+                            }
+                }
 
     fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError>> {
         let mut result = s.replace(".", "/");
@@ -460,17 +461,17 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
                 }
                 GluonError::Parse(err) => {
                     (module_name_to_file(&err.source_name),
-                     err.errors()
-                         .into_iter()
+                    err.errors()
+                        .into_iter()
                          .map(into_diagnostic)
                          .collect())
-                }
+                            }
                 err => {
                     (filename.clone(),
-                     vec![Diagnostic {
-                              message: format!("{}", err),
-                              severity: Some(DiagnosticSeverity::Error),
-                              ..Diagnostic::default()
+                    vec![Diagnostic {
+                             message: format!("{}", err),
+                             severity: Some(DiagnosticSeverity::Error),
+                             ..Diagnostic::default()
                           }])
                 }
             }
@@ -483,7 +484,7 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
                     }}"#,
                     serde_json::to_value(&PublishDiagnosticsParams {
                             uri: source_name,
-                            diagnostics: diagnostics,
+                        diagnostics: diagnostics,
                         })
                         .unwrap());
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
@@ -492,7 +493,7 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
 pub fn run() {
     ::env_logger::init().unwrap();
 
-    let thread = new_vm();
+        let thread = new_vm();
     let work_queue = Arc::new(UniqueQueue {
         queue: Mutex::new(VecDeque::new()),
         new_work: Condvar::new(),
@@ -503,26 +504,32 @@ pub fn run() {
         let thread = thread.clone();
         thread::spawn(move || {
 
-            let import = Import::new(CheckImporter::new());
-            thread.get_macros().insert("import".into(), import);
+        let import = Import::new(CheckImporter::new());
+        thread.get_macros().insert("import".into(), import);
 
-            let mut io = IoHandler::new();
+        let mut io = IoHandler::new();
             io.add_async_method("initialize", ServerCommand(Initialize(thread.clone())));
             io.add_async_method("textDocument/completion",
-                                ServerCommand(Completion(thread.clone())));
+                      ServerCommand(Completion(thread.clone())));
             io.add_async_method("textDocument/hover",
-                                ServerCommand(HoverCommand(thread.clone())));
+                      ServerCommand(HoverCommand(thread.clone())));
             io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
-            let exit_token = Arc::new(AtomicBool::new(false));
-            let exit_token2 = exit_token.clone();
-            io.add_notification("exit",
-                                move |_| exit_token.store(true, atomic::Ordering::SeqCst));
-            io.add_notification("textDocument/didOpen",
-                                ServerCommand(TextDocumentDidOpen(thread.clone())));
-            io.add_notification("textDocument/didChange",
+        let exit_token = Arc::new(AtomicBool::new(false));
+        let exit_token2 = exit_token.clone();
+        io.add_notification("exit",
+                            move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+        io.add_notification("textDocument/didOpen",
+                            ServerCommand(TextDocumentDidOpen(thread.clone())));
+        io.add_notification("textDocument/didChange",
                                 ServerCommand(TextDocumentDidChange(work_queue.clone())));
-
-            main_loop(&mut io, exit_token2).unwrap();
+        let input = io::stdin();
+        main_loop(input.lock(),
+                  io::stdout(),
+                  &mut io,
+                  exit_token2,
+                  |s| Ok(s),
+                  |s| Ok(s))
+            .unwrap();
         })
     };
 
