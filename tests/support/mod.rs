@@ -16,7 +16,7 @@ use serde_json::{Value, to_value, from_str, from_value};
 
 use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
-use gluon_language_server::read_message;
+use gluon_language_server::rpc::read_message;
 
 
 pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
@@ -83,9 +83,11 @@ pub fn send_rpc<F, T>(f: F) -> T
           T: Deserialize,
 {
     let args: Vec<_> = env::args().collect();
-    let server_path =
-        Path::new(&args[0][..]).parent().expect("folder").join("gluon_language-server");
-
+    let server_path = Path::new(&args[0][..])
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("folder")
+        .join("gluon_language-server");
     let mut child = Command::new(server_path)
         .arg("--quiet")
         .stdin(Stdio::piped())

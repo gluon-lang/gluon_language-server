@@ -22,6 +22,7 @@ serde_json = "0.8.0"
 languageserver-types =  "0.4.0"
 
 [dependencies.gluon]
-version = "0.2.2"
+git = "https://github.com/Marwes/gluon"
+branch = "debugger"
 # Don't include the repl
 default-features = false

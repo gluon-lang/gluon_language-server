@@ -14,8 +14,9 @@ extern crate url;
 
 extern crate languageserver_types;
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, MethodCommand, MethodResult, NotificationCommand,
-                   Params, Value};
+pub mod rpc;
+
+use jsonrpc_core::{IoHandler, NotificationCommand, Params, Value};
 use serde_json::value::{from_value, to_value};
 
 use gluon::base::ast::SpannedExpr;
@@ -32,16 +33,43 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
-use std::error::Error as StdError;
 use std::fs;
-use std::io;
-use std::io::{Read, BufRead, Write};
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
 
 use languageserver_types::*;
+
+use rpc::*;
+
+impl<T> NotificationCommand for ServerCommand<T>
+    where T: LanguageServerNotification,
+{
+    fn execute(&self, param: Params) {
+        match param {
+            Params::Map(ref map) => {
+                match from_value(Value::Object(map.clone())) {
+                    Ok(value) => {
+                        self.0.execute(value);
+                    }
+                    Err(_) => log_message(format!("Invalid parameters: {:?}", map)),
+                }
+            }
+            _ => log_message(format!("Invalid parameters: {:?}", param)),
+        }
+    }
+}
+
+fn log_message(message: String) {
+    debug!("{}", message);
+    let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
+                    to_value(&LogMessageParams {
+                        typ: MessageType::Log,
+                        message: message,
+                    }));
+    print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+}
 
 #[derive(Clone)]
 pub struct CheckImporter(pub Arc<Mutex<FnvMap<String, (source::Lines, SpannedExpr<Symbol>)>>>);
@@ -71,79 +99,6 @@ impl Importer for CheckImporter {
         try!(vm.global_env()
             .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0)));
         Ok(())
-    }
-}
-
-struct ServerError<E> {
-    message: String,
-    data: Option<E>,
-}
-
-trait LanguageServerCommand: Send + Sync {
-    type Param: serde::Deserialize;
-    type Output: serde::Serialize;
-    type Error: serde::Serialize;
-    fn execute(&self, param: Self::Param) -> Result<Self::Output, ServerError<Self::Error>>;
-
-    fn invalid_params(&self) -> Option<Self::Error>;
-}
-
-trait LanguageServerNotification: Send + Sync {
-    type Param: serde::Deserialize;
-    fn execute(&self, param: Self::Param);
-}
-
-struct ServerCommand<T>(T);
-
-impl<T> NotificationCommand for ServerCommand<T>
-    where T: LanguageServerNotification,
-{
-    fn execute(&self, param: Params) {
-        match param {
-            Params::Map(ref map) => {
-                match from_value(Value::Object(map.clone())) {
-                    Ok(value) => {
-                        self.0.execute(value);
-                    }
-                    Err(_) => log_message(format!("Invalid parameters: {:?}", map)),
-                }
-            }
-            _ => log_message(format!("Invalid parameters: {:?}", param)),
-        }
-    }
-}
-
-impl<T> MethodCommand for ServerCommand<T>
-    where T: LanguageServerCommand,
-{
-    fn execute(&self, param: Params) -> MethodResult {
-        match param {
-            Params::Map(ref map) => {
-                match from_value(Value::Object(map.clone())) {
-                    Ok(value) => {
-                        let result = match self.0.execute(value) {
-                            Ok(value) => Ok(to_value(&value)),
-                            Err(error) => {
-                                Err(Error {
-                                    code: ErrorCode::InternalError,
-                                    message: error.message,
-                                    data: error.data.as_ref().map(to_value),
-                                })
-                            }
-                        };
-                        return MethodResult::Sync(result);
-                    }
-                    Err(_) => (),
-                }
-            }
-            _ => (),
-        }
-        let data = self.0.invalid_params();
-        MethodResult::Sync(Err(Error {
-            code: ErrorCode::InvalidParams,
-            message: format!("Invalid params: {:?}", param),
-            data: data.as_ref().map(to_value),
-        }))
     }
 }
 
@@ -396,7 +351,6 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
             match err {
                 GluonError::Typecheck(err) => {
                     err.errors()
-                        .errors
                         .into_iter()
                         .map(|err| {
                             Diagnostic {
@@ -410,7 +364,6 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                 }
                 GluonError::Parse(err) => {
                     err.errors()
-                        .errors
                         .into_iter()
                         .map(|err| {
                             let p = Position {
@@ -446,60 +399,6 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                         diagnostics: diagnostics,
                     }));
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
-}
-
-fn log_message(message: String) {
-    debug!("{}", message);
-    let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
-                    to_value(&LogMessageParams {
-                        typ: MessageType::Log,
-                        message: message,
-                    }));
-    print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
-}
-
-pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
-    where R: BufRead + Read,
-{
-    let mut header = String::new();
-    let n = try!(reader.read_line(&mut header));
-    if n == 0 {
-        // EOF
-        return Ok(None);
-    }
-    if header.starts_with("Content-Length: ") {
-        let content_length = {
-            let len = header["Content-Length:".len()..].trim();
-            debug!("{}", len);
-            try!(len.parse::<usize>())
-        };
-        while header != "\r\n" {
-            header.clear();
-            try!(reader.read_line(&mut header));
-        }
-        let mut content = vec![0; content_length];
-        try!(reader.read_exact(&mut content));
-        Ok(Some(try!(String::from_utf8(content))))
-    } else {
-        Err(format!("Invalid message: `{}`", header).into())
-    }
-}
-
-fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<StdError>> {
-    let stdin = io::stdin();
-    while !exit_token.load(atomic::Ordering::SeqCst) {
-        match try!(read_message(stdin.lock())) {
-            Some(json) => {
-                debug!("Handle: {}", json);
-                if let Some(response) = io.handle_request_sync(&json) {
-                    print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
-                    try!(io::stdout().flush());
-                }
-            }
-            None => return Ok(()),
-        }
-    }
-    Ok(())
 }
 
 pub fn run() {

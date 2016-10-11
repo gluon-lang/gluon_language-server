@@ -2,11 +2,40 @@
 
 import * as path from 'path';
 
+
+import * as vscode from 'vscode';
 import { workspace, Disposable, ExtensionContext } from 'vscode';
 import { LanguageClient, LanguageClientOptions, SettingMonitor, ServerOptions, TransportKind } from 'vscode-languageclient';
 import { Trace } from 'vscode-jsonrpc';
 
+function activateDebugger(context: ExtensionContext) {
+
+	let disposable = vscode.commands.registerCommand('extension.getProgramName', () => {
+		return vscode.window.showInputBox({
+			placeHolder: "Please enter the name of a text file in the workspace folder",
+			value: "main.glu"
+		});
+	});
+	context.subscriptions.push(disposable);
+	
+	const initialConfigurations = [
+		{
+			name: 'Gluon-Debug',
+			type: 'gluon',
+			request: 'launch',
+			program: '${workspaceRoot}/${command.AskForProgramName}',
+			stopOnEntry: true
+		}
+	]
+
+	context.subscriptions.push(vscode.commands.registerCommand('extension.provideInitialDebugConfigurations', () => {
+		return JSON.stringify(initialConfigurations);
+	}));
+}
+
 export function activate(context: ExtensionContext) {
+	
+	activateDebugger(context);
 
 	let config = workspace.getConfiguration("gluon");
 	let serverPath = config.get("language-server.path", "gluon_language-server");
