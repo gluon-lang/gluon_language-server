@@ -54,12 +54,24 @@
 				"type": "gluon",
 				"label": "Gluon Debug",
 
-				"program": "./out/src/debugger.js",
-				"runtime": "node",
+				"program": "./target/debug/debugger",
 
 				"variables": {
 					"AskForProgramName": "extension.getProgramName"
 				},
+				
+				"configurationSnippets": [
+					{
+						"label": "Gluon Debug: Launch",
+						"description": "A new configuration for launching a mock debug program",
+						"body": {
+							"type": "gluon",
+							"request": "launch",
+							"name": "{{2:Launch Program}}",
+							"program": "${workspaceRoot}/{{1:Program}}"
+						}
+					}
+				],
 
 				"configurationAttributes": {
 					"launch": {

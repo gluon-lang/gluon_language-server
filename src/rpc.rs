@@ -1,5 +1,5 @@
 use std::error::Error as StdError;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool};
 
@@ -20,7 +20,9 @@ pub trait LanguageServerCommand: Send + Sync + 'static {
     type Error: serde::Serialize;
     fn execute(&self, param: Self::Param) -> BoxFuture<Self::Output, ServerError<Self::Error>>;
 
-    fn invalid_params(&self) -> Option<Self::Error>;
+    fn invalid_params(&self) -> Option<Self::Error> {
+        None
+    }
 }
 
 pub trait LanguageServerNotification: Send + Sync + 'static {
@@ -105,15 +107,30 @@ pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
     }
 }
 
-pub fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<StdError>> {
-    let stdin = io::stdin();
+pub fn main_loop<R, W, F, G>(mut input: R,
+                             mut output: W,
+                             io: &IoHandler,
+                             exit_token: Arc<AtomicBool>,
+                             mut map_request: F,
+                             mut map_response: G)
+                             -> Result<(), Box<StdError>>
+    where R: BufRead,
+          W: Write,
+          F: FnMut(String) -> Result<String, Box<StdError>>,
+          G: FnMut(String) -> Result<String, Box<StdError>>,
+{
     while !exit_token.load(atomic::Ordering::SeqCst) {
-        match try!(read_message(stdin.lock())) {
+        match try!(read_message(&mut input)) {
             Some(json) => {
+                let json = try!(map_request(json));
                 debug!("Handle: {}", json);
                 if let Some(response) = io.handle_request_sync(&json) {
-                    print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
-                    try!(io::stdout().flush());
+                    let response = try!(map_response(response));
+                    try!(write!(output,
+                                "Content-Length: {}\r\n\r\n{}",
+                                response.len(),
+                                response));
+                    try!(output.flush());
                 }
             }
             None => return Ok(()),
