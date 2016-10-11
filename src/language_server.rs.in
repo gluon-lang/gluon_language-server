@@ -146,18 +146,21 @@ pub enum FileChangeType {
     /**
      * The file got deleted.
      */
-    Deleted = 3
+    Deleted = 3,
 }
 
 impl serde::Deserialize for FileChangeType {
     fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
-        where D: serde::Deserializer
+        where D: serde::Deserializer,
     {
         Ok(match try!(u8::deserialize(deserializer)) {
             1 => FileChangeType::Created,
             2 => FileChangeType::Changed,
             3 => FileChangeType::Deleted,
-            _ => return Err(D::Error::invalid_value("Expected a value of 1, 2 or 3 to deserialze to FileChangeType")),
+            _ => {
+                return Err(D::Error::invalid_value("Expected a value of 1, 2 or 3 to deserialze \
+                                                    to FileChangeType"))
+            }
         })
     }
 }
@@ -374,7 +377,7 @@ pub enum TextDocumentSyncKind {
 
 impl serde::Serialize for TextDocumentSyncKind {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
@@ -574,7 +577,7 @@ pub enum CompletionItemKind {
 
 impl serde::Serialize for CompletionItemKind {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
@@ -598,15 +601,12 @@ pub struct Hover {
 
 pub enum MarkedString {
     String(String),
-    LanguageString {
-        language: String,
-        value: String,
-    },
+    LanguageString { language: String, value: String },
 }
 
 impl serde::Serialize for MarkedString {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         match *self {
             MarkedString::String(ref s) => serializer.serialize_str(s),
@@ -757,12 +757,12 @@ pub enum DocumentHighlightKind {
     /**
      * Write-access of a symbol, like writing to a variable.
      */
-    Write = 3
+    Write = 3,
 }
 
 impl serde::Serialize for DocumentHighlightKind {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
@@ -831,7 +831,7 @@ pub enum SymbolKind {
 
 impl serde::Serialize for SymbolKind {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
@@ -1024,7 +1024,7 @@ pub enum MessageType {
 
 impl serde::Serialize for MessageType {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
@@ -1095,21 +1095,24 @@ pub enum DiagnosticSeverity {
 
 impl serde::Deserialize for DiagnosticSeverity {
     fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
-        where D: serde::Deserializer
+        where D: serde::Deserializer,
     {
         Ok(match try!(u8::deserialize(deserializer)) {
             1 => DiagnosticSeverity::Error,
             2 => DiagnosticSeverity::Warning,
             3 => DiagnosticSeverity::Information,
             4 => DiagnosticSeverity::Hint,
-            _ => return Err(D::Error::invalid_value("Expected a value of 1, 2, 3 or 4 to deserialze to DiagnosticSeverity")),
+            _ => {
+                return Err(D::Error::invalid_value("Expected a value of 1, 2, 3 or 4 to \
+                                                    deserialze to DiagnosticSeverity"))
+            }
         })
     }
 }
 
 impl serde::Serialize for DiagnosticSeverity {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-        where S: serde::Serializer
+        where S: serde::Serializer,
     {
         serializer.serialize_u8(*self as u8)
     }
