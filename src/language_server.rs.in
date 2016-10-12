@@ -4,7 +4,7 @@ use serde;
 use serde::de::Error;
 use serde_json::Value;
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CancelParams {
     /**
      * The request id to cancel.
@@ -12,7 +12,7 @@ pub struct CancelParams {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidChangeTextDocumentParams {
     /**
      * The document that did change. The version number points
@@ -29,7 +29,7 @@ pub struct DidChangeTextDocumentParams {
 }
 
 /// Text documents are identified using a URI. On the protocol level, URIs are passed as strings. The corresponding JSON structure looks like this:
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct TextDocumentIdentifier {
     /**
      * The text document's URI.
@@ -38,7 +38,7 @@ pub struct TextDocumentIdentifier {
 }
 
 /// An identifier to denote a specific version of a text document.
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct VersionedTextDocumentIdentifier {
     /**
      * The text document's URI.
@@ -50,7 +50,7 @@ pub struct VersionedTextDocumentIdentifier {
     pub version: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct TextDocumentItem {
     /**
      * The text document's URI.
@@ -75,7 +75,7 @@ pub struct TextDocumentItem {
     pub text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidOpenTextDocumentParams {
     /**
      * The document that was opened.
@@ -88,7 +88,7 @@ pub struct DidOpenTextDocumentParams {
  * An event describing a change to a text document. If range and rangeLength are omitted
  * the new text is considered to be the full content of the document.
  */
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct TextDocumentContentChangeEvent {
     /**
      * The range of the document that changed.
@@ -105,7 +105,7 @@ pub struct TextDocumentContentChangeEvent {
     pub text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidCloseTextDocumentParams {
     /**
      * The document that was closed.
@@ -114,7 +114,7 @@ pub struct DidCloseTextDocumentParams {
     pub text_document: TextDocumentIdentifier,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidSaveTextDocumentParams {
     /**
      * The document that was saved.
@@ -123,7 +123,7 @@ pub struct DidSaveTextDocumentParams {
     pub text_document: TextDocumentIdentifier,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidChangeWatchedFilesParams {
     /**
      * The actual file events.
@@ -134,6 +134,7 @@ pub struct DidChangeWatchedFilesParams {
 /**
  * The file event type.
  */
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum FileChangeType {
     /**
      * The file got created.
@@ -165,10 +166,18 @@ impl serde::Deserialize for FileChangeType {
     }
 }
 
+impl serde::Serialize for FileChangeType {
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
+        where S: serde::Serializer,
+    {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
 /**
  * An event describing a file change.
  */
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct FileEvent {
     /**
      * The file's URI.
@@ -181,7 +190,7 @@ pub struct FileEvent {
 }
 
 /// Position in a text document expressed as zero-based line and character offset.
-#[derive(Copy, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Copy, Clone, Default, Deserialize, Serialize)]
 pub struct Position {
     /// Line position in a document (zero-based).
     pub line: u64,
@@ -189,7 +198,7 @@ pub struct Position {
     pub character: u64,
 }
 
-#[derive(Copy, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Copy, Clone, Default, Deserialize, Serialize)]
 pub struct Range {
     /// The range's start position.
     pub start: Position,
@@ -206,7 +215,7 @@ pub struct Location {
 
 
 /// A parameter literal used in requests to pass a text document and a position inside that document.
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct TextDocumentPositionParams {
     /**
      * The text document.
@@ -219,7 +228,7 @@ pub struct TextDocumentPositionParams {
     pub position: Position,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct InitializeParams {
     /**
      * The process Id of the parent process that started
@@ -241,17 +250,17 @@ pub struct InitializeParams {
     pub capabilities: ClientCapabilities,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ClientCapabilities {
     _dummy: Option<()>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct InitializeError {
     /**
      * Indicates whether the client should retry to send the
@@ -261,7 +270,7 @@ pub struct InitializeError {
     pub retry: bool,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct ServerCapabilities {
     /**
      * Defines how text documents are synced.
@@ -358,7 +367,7 @@ pub struct ServerCapabilities {
 /**
  * Defines how the host (editor) should sync document changes to the language server.
  */
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TextDocumentSyncKind {
     /**
      * Documents should not be synced at all.
@@ -386,7 +395,7 @@ impl serde::Serialize for TextDocumentSyncKind {
 /**
  * Completion options.
  */
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct CompletionOptions {
     /**
      * The server provides support to resolve additional information for a completion item.
@@ -405,7 +414,7 @@ pub struct CompletionOptions {
 /**
  * Signature help options.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct SignatureHelpOptions {
     /**
      * The characters that trigger signature help automatically.
@@ -418,7 +427,7 @@ pub struct SignatureHelpOptions {
 /**
  * Code Lens options.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CodeLensOptions {
     /**
      * Code lens has a resolve provider as well.
@@ -430,7 +439,7 @@ pub struct CodeLensOptions {
 /**
  * Format document on type options
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DocumentOnTypeFormattingOptions {
     /**
      * A character on which formatting should be triggered, like `}`.
@@ -446,7 +455,7 @@ pub struct DocumentOnTypeFormattingOptions {
 }
 
 /// A textual edit applicable to a text document.
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct TextEdit {
     /**
      * The range of the text document to be manipulated. To insert
@@ -462,7 +471,7 @@ pub struct TextEdit {
 }
 
 /// A workspace edit represents changes to many resources managed in the workspace.
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct WorkspaceEdit {
     /**
      * Holds changes to existing resources.
@@ -474,7 +483,7 @@ pub struct WorkspaceEdit {
  * Represents a collection of [completion items](#CompletionItem) to be presented
  * in the editor.
  */
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct CompletionList {
     /**
      * This list it not complete. Further typing should result in recomputing
@@ -488,7 +497,7 @@ pub struct CompletionList {
     pub items: Vec<CompletionItem>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct CompletionItem {
     /**
      * The label of this completion item. By default
@@ -553,7 +562,7 @@ pub struct CompletionItem {
 /**
  * The kind of a completion entry.
  */
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CompletionItemKind {
     Text = 1,
     Method = 2,
@@ -584,9 +593,9 @@ impl serde::Serialize for CompletionItemKind {
 }
 
 /**
- * The result of a hove request.
+ * The result of a hover request.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Hover {
     /**
      * The hover's content
@@ -599,9 +608,34 @@ pub struct Hover {
     pub range: Option<Range>,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum MarkedString {
     String(String),
     LanguageString { language: String, value: String },
+}
+
+impl serde::Deserialize for MarkedString {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: serde::Deserializer,
+    {
+        String::deserialize(deserializer)
+            .map(MarkedString::String)
+            .or_else(|_| {
+                use std::borrow::Cow;
+
+                #[derive(Deserialize, Serialize)]
+                struct Variant<'s> {
+                    language: Cow<'s, str>,
+                    value: Cow<'s, str>,
+                }
+                Variant::deserialize(deserializer).map(|variant| {
+                    MarkedString::LanguageString {
+                        language: variant.language.into_owned(),
+                        value: variant.value.into_owned(),
+                    }
+                })
+            })
+    }
 }
 
 impl serde::Serialize for MarkedString {
@@ -631,7 +665,7 @@ impl serde::Serialize for MarkedString {
  * callable. There can be multiple signature but only one
  * active and only one active parameter.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct SignatureHelp {
     /**
      * One or more signatures.
@@ -656,7 +690,7 @@ pub struct SignatureHelp {
  * can have a label, like a function-name, a doc-comment, and
  * a set of parameters.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct SignatureInformation {
     /**
      * The label of this signature. Will be shown in
@@ -681,7 +715,7 @@ pub struct SignatureInformation {
  * Represents a parameter of a callable-signature. A parameter can
  * have a label and a doc-comment.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ParameterInformation {
     /**
      * The label of this signature. Will be shown in
@@ -697,7 +731,7 @@ pub struct ParameterInformation {
     pub documentation: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ReferenceParams {
     /**
      * The text document.
@@ -712,7 +746,7 @@ pub struct ReferenceParams {
     pub context: ReferenceContext,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ReferenceContext {
     /**
      * Include the declaration of the current symbol.
@@ -726,7 +760,7 @@ pub struct ReferenceContext {
  * special attention. Usually a document highlight is visualized by changing
  * the background color of its range.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DocumentHighlight {
     /**
      * The range this highlight applies to.
@@ -742,7 +776,7 @@ pub struct DocumentHighlight {
 /**
  * A document highlight kind.
  */
-#[derive(Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum DocumentHighlightKind {
     /**
      * A textual occurrance.
@@ -760,6 +794,22 @@ pub enum DocumentHighlightKind {
     Write = 3,
 }
 
+impl serde::Deserialize for DocumentHighlightKind {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: serde::Deserializer,
+    {
+        Ok(match try!(u8::deserialize(deserializer)) {
+            1 => DocumentHighlightKind::Text,
+            2 => DocumentHighlightKind::Read,
+            3 => DocumentHighlightKind::Write,
+            _ => {
+                return Err(D::Error::invalid_value("Expected a value of 1, 2, or 3 to \
+                                                    deserialze to DocumentHighlightKiny"))
+            }
+        })
+    }
+}
+
 impl serde::Serialize for DocumentHighlightKind {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
         where S: serde::Serializer,
@@ -768,7 +818,7 @@ impl serde::Serialize for DocumentHighlightKind {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DocumentSymbolParams {
     /**
      * The text document.
@@ -807,7 +857,7 @@ pub struct SymbolInformation {
 /**
  * A symbol kind.
  */
-#[derive(Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum SymbolKind {
     File = 1,
     Module = 2,
@@ -840,7 +890,7 @@ impl serde::Serialize for SymbolKind {
 /**
  * The parameters of a Workspace Symbol Request.
  */
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct WorkspaceSymbolParams {
     /**
      * A non-empty query string
@@ -851,7 +901,7 @@ pub struct WorkspaceSymbolParams {
 /**
  * Params for the CodeActionRequest
  */
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CodeActionParams {
     /**
      * The document in which the command was invoked.
@@ -873,7 +923,7 @@ pub struct CodeActionParams {
  * Contains additional diagnostic information about the context in which
  * a code action is run.
  */
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CodeActionContext {
     /**
      * An array of diagnostics.
@@ -881,7 +931,7 @@ pub struct CodeActionContext {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CodeLensParams {
     /**
      * The document to request code lens for.
@@ -897,7 +947,7 @@ pub struct CodeLensParams {
  * A code lens is _unresolved_ when no command is associated to it. For performance
  * reasons the creation of a code lens and resolving should be done in two stages.
  */
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct CodeLens {
     /**
      * The range in which this code lens is valid. Should only span a single line.
@@ -916,7 +966,7 @@ pub struct CodeLens {
     pub data: Option<Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct RenameParams {
     /**
      * The document to format.
@@ -938,7 +988,7 @@ pub struct RenameParams {
     pub new_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ShowMessageParams {
     /**
      * The message type. See {@link MessageType}
@@ -952,7 +1002,7 @@ pub struct ShowMessageParams {
     pub message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct ShowMessageRequestParams {
     /**
      * The message type. See {@link MessageType}
@@ -972,7 +1022,7 @@ pub struct ShowMessageRequestParams {
     pub actions: Vec<MessageActionItem>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct MessageActionItem {
     /**
      * A short title like 'Retry', 'Open Log' etc.
@@ -980,7 +1030,7 @@ pub struct MessageActionItem {
     pub title: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct LogMessageParams {
     /**
      * The message type. See {@link MessageType}
@@ -994,7 +1044,7 @@ pub struct LogMessageParams {
     pub message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct DidChangeConfigurationParams {
     /**
      * The actual changed settings
@@ -1002,7 +1052,7 @@ pub struct DidChangeConfigurationParams {
     pub settings: Value,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MessageType {
     /**
      * An error message.
@@ -1022,6 +1072,23 @@ pub enum MessageType {
     Log = 4,
 }
 
+impl serde::Deserialize for MessageType {
+    fn deserialize<D>(deserializer: &mut D) -> Result<Self, D::Error>
+        where D: serde::Deserializer,
+    {
+        Ok(match try!(u8::deserialize(deserializer)) {
+            1 => MessageType::Error,
+            2 => MessageType::Warning,
+            3 => MessageType::Info,
+            4 => MessageType::Log,
+            _ => {
+                return Err(D::Error::invalid_value("Expected a value of 1, 2, 3 or 4 to \
+                                                    deserialze to MessageType"))
+            }
+        })
+    }
+}
+
 impl serde::Serialize for MessageType {
     fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
         where S: serde::Serializer,
@@ -1030,7 +1097,7 @@ impl serde::Serialize for MessageType {
     }
 }
 
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Serialize)]
 pub struct PublishDiagnosticsParams {
     /**
      * The URI for which diagnostic information is reported.
@@ -1043,7 +1110,7 @@ pub struct PublishDiagnosticsParams {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Default, Deserialize, Serialize)]
 pub struct Diagnostic {
     /**
      * The range at which the message applies
@@ -1073,7 +1140,7 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum DiagnosticSeverity {
     /**
      * Reports an error.
@@ -1119,7 +1186,7 @@ impl serde::Serialize for DiagnosticSeverity {
 }
 
 /// Represents a reference to a command. Provides a title which will be used to represent a command in the UI and, optionally, an array of arguments which will be passed to the command handler function when invoked.
-#[derive(Default, Serialize)]
+#[derive(Debug, PartialEq, Default, Deserialize, Serialize)]
 pub struct Command {
     /**
      * Title of the command, like `save`.
