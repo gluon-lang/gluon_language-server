@@ -12,7 +12,7 @@ extern crate env_logger;
 extern crate gluon;
 extern crate url;
 
-pub mod language_server;
+extern crate vscode_languageserver_types;
 
 use jsonrpc_core::{Error, ErrorCode, IoHandler, MethodCommand, MethodResult, NotificationCommand,
                    Params, Value};
@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
 
-use language_server::*;
+use vscode_languageserver_types::*;
 
 #[derive(Clone)]
 pub struct CheckImporter(pub Arc<Mutex<FnvMap<String, (source::Lines, SpannedExpr<Symbol>)>>>);

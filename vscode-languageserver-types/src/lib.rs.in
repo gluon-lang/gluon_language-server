@@ -1,6 +1,5 @@
 
 use std::collections::HashMap;
-use serde;
 use serde::de::Error;
 use serde_json::Value;
 
