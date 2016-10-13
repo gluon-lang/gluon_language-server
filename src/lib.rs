@@ -461,7 +461,6 @@ fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<
             // EOF
             return Ok(());
         }
-        debug!("{}", header);
         if header.starts_with("Content-Length: ") {
             let content_length = {
                 let len = header["Content-Length:".len()..].trim();
@@ -475,10 +474,13 @@ fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<
             let mut content = vec![0; content_length];
             try!(stdin.lock().read_exact(&mut content));
             let json = try!(str::from_utf8(&content));
+            debug!("Handle: {}", json);
             if let Some(response) = io.handle_request_sync(json) {
                 print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
                 try!(io::stdout().flush());
             }
+        } else {
+            return Err(format!("Invalid message: {}", header).into());
         }
     }
     Ok(())
