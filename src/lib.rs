@@ -35,7 +35,7 @@ use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, 
 use std::error::Error as StdError;
 use std::fs;
 use std::io;
-use std::io::{Read, Write};
+use std::io::{Read, BufRead, Write};
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic;
@@ -444,6 +444,7 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
 }
 
 fn log_message(message: String) {
+    debug!("{}", message);
     let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
                     to_value(&LogMessageParams {
                         typ: MessageType::Log,
@@ -452,35 +453,45 @@ fn log_message(message: String) {
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
+pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
+    where R: BufRead + Read,
+{
+    let mut header = String::new();
+    let n = try!(reader.read_line(&mut header));
+    if n == 0 {
+        // EOF
+        return Ok(None);
+    }
+    if header.starts_with("Content-Length: ") {
+        let content_length = {
+            let len = header["Content-Length:".len()..].trim();
+            debug!("{}", len);
+            try!(len.parse::<usize>())
+        };
+        while header != "\r\n" {
+            header.clear();
+            try!(reader.read_line(&mut header));
+        }
+        let mut content = vec![0; content_length];
+        try!(reader.read_exact(&mut content));
+        Ok(Some(try!(String::from_utf8(content))))
+    } else {
+        Err(format!("Invalid message: `{}`", header).into())
+    }
+}
+
 fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<StdError>> {
     let stdin = io::stdin();
     while !exit_token.load(atomic::Ordering::SeqCst) {
-        let mut header = String::new();
-        let n = try!(stdin.read_line(&mut header));
-        if n == 0 {
-            // EOF
-            return Ok(());
-        }
-        if header.starts_with("Content-Length: ") {
-            let content_length = {
-                let len = header["Content-Length:".len()..].trim();
-                debug!("{}", len);
-                try!(len.parse::<usize>())
-            };
-            while header != "\r\n" {
-                header.clear();
-                try!(io::stdin().read_line(&mut header));
+        match try!(read_message(stdin.lock())) {
+            Some(json) => {
+                debug!("Handle: {}", json);
+                if let Some(response) = io.handle_request_sync(&json) {
+                    print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
+                    try!(io::stdout().flush());
+                }
             }
-            let mut content = vec![0; content_length];
-            try!(stdin.lock().read_exact(&mut content));
-            let json = try!(str::from_utf8(&content));
-            debug!("Handle: {}", json);
-            if let Some(response) = io.handle_request_sync(json) {
-                print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
-                try!(io::stdout().flush());
-            }
-        } else {
-            return Err(format!("Invalid message: {}", header).into());
+            None => return Ok(()),
         }
     }
     Ok(())
