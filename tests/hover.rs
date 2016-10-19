@@ -8,7 +8,23 @@ extern crate serde;
 
 mod support;
 
-use vscode_languageserver_types::{Hover, MarkedString, Position};
+use std::io::Write;
+
+use vscode_languageserver_types::{Hover, MarkedString, Position, TextDocumentPositionParams,
+                                  TextDocumentIdentifier};
+
+fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
+    where W: Write,
+{
+    let hover = support::method_call("textDocument/hover",
+                                     id,
+                                     TextDocumentPositionParams {
+                                         text_document: TextDocumentIdentifier { uri: uri.into() },
+                                         position: position,
+                                     });
+
+    support::write_message(stdin, hover).unwrap();
+}
 
 const STREAM_SOURCE: &'static str = r#"
 let prelude = import "std/prelude.glu"
@@ -38,13 +54,13 @@ fn simple_hover() {
 
         support::did_open(stdin, "test", "123");
 
-        support::hover(stdin,
-                       2,
-                       "test",
-                       Position {
-                           line: 0,
-                           character: 2,
-                       });
+        hover(stdin,
+              2,
+              "test",
+              Position {
+                  line: 0,
+                  character: 2,
+              });
     });
 
     assert_eq!(hover,
@@ -63,13 +79,13 @@ test
 "#;
         support::did_open(stdin, "test", src);
 
-        support::hover(stdin,
-                       2,
-                       "test",
-                       Position {
-                           line: 2,
-                           character: 2,
-                       });
+        hover(stdin,
+              2,
+              "test",
+              Position {
+                  line: 2,
+                  character: 2,
+              });
     });
 
     assert_eq!(hover,
@@ -85,13 +101,13 @@ fn stream() {
 
         support::did_open(stdin, "stream", STREAM_SOURCE);
 
-        support::hover(stdin,
-                       2,
-                       "stream",
-                       Position {
-                           line: 13,
-                           character: 29,
-                       });
+        hover(stdin,
+              2,
+              "stream",
+              Position {
+                  line: 13,
+                  character: 29,
+              });
     });
 
     assert_eq!(hover,

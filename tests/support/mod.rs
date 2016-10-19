@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::ser::Serializer;
 use serde_json::{Value, to_value, from_str, from_value};
 
-use vscode_languageserver_types::{DidOpenTextDocumentParams, Position, TextDocumentIdentifier,
-                                  TextDocumentItem, TextDocumentPositionParams};
+use vscode_languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
 use gluon_language_server::read_message;
 
@@ -77,19 +76,6 @@ pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
                                 });
 
     write_message(stdin, did_open).unwrap();
-}
-
-pub fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-    where W: Write,
-{
-    let hover = method_call("textDocument/hover",
-                            id,
-                            TextDocumentPositionParams {
-                                text_document: TextDocumentIdentifier { uri: uri.into() },
-                                position: position,
-                            });
-
-    write_message(stdin, hover).unwrap();
 }
 
 pub fn send_rpc<F, T>(f: F) -> T
