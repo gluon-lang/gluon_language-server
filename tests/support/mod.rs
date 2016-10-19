@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::ser::Serializer;
 use serde_json::{Value, to_value, from_str, from_value};
 
+use vscode_languageserver_types::{DidOpenTextDocumentParams, Position, TextDocumentIdentifier,
+                                  TextDocumentItem, TextDocumentPositionParams};
+
 use gluon_language_server::read_message;
 
 
@@ -60,6 +63,35 @@ pub fn notification<T>(method: &str, value: T) -> Call
     })
 }
 
+pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
+    where W: Write,
+{
+    let did_open = notification("textDocument/didOpen",
+                                DidOpenTextDocumentParams {
+                                    text_document: TextDocumentItem {
+                                        uri: uri.into(),
+                                        language_id: "gluon".into(),
+                                        text: text.into(),
+                                        version: 1,
+                                    },
+                                });
+
+    write_message(stdin, did_open).unwrap();
+}
+
+pub fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
+    where W: Write,
+{
+    let hover = method_call("textDocument/hover",
+                            id,
+                            TextDocumentPositionParams {
+                                text_document: TextDocumentIdentifier { uri: uri.into() },
+                                position: position,
+                            });
+
+    write_message(stdin, hover).unwrap();
+}
+
 pub fn send_rpc<F, T>(f: F) -> T
     where F: FnOnce(&mut Write),
           T: Deserialize,
@@ -99,7 +131,7 @@ pub fn send_rpc<F, T>(f: F) -> T
         }
     }
     value.unwrap_or_else(|| {
-        panic!("Could not find the value in:\n`{}`",
+        panic!("Could not find the retrieve the expected response out of:\n`{}`",
                str::from_utf8(&result.stdout).expect("UTF8"))
     })
 }

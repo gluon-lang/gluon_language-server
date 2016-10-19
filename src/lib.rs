@@ -271,7 +271,9 @@ impl LanguageServerCommand for HoverCommand {
             })
             .map_err(|()| {
                 ServerError {
-                    message: "Could not find a type for hover".into(),
+                    message: format!("Completion not found at: Line {}, Column {}",
+                                     change.position.line,
+                                     change.position.character),
                     data: None,
                 }
             })
