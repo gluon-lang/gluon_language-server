@@ -211,7 +211,7 @@ impl LanguageServerCommand for Completion {
         let byte_pos = line_pos + BytePos::from(change.position.character as usize);
         let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
 
-        let items: Vec<_> = suggestions.into_iter()
+        let mut items: Vec<_> = suggestions.into_iter()
             .map(|ident| {
                 // Remove the `:Line x, Row y suffix`
                 let name: &str = ident.name.as_ref();
@@ -226,6 +226,9 @@ impl LanguageServerCommand for Completion {
                 }
             })
             .collect();
+
+        items.sort_by(|l, r| l.label.cmp(&r.label));
+
         Ok(items)
     }
 
