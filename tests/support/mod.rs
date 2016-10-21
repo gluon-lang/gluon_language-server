@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::ser::Serializer;
 use serde_json::{Value, to_value, from_str, from_value};
 
-use vscode_languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
+use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
 use gluon_language_server::read_message;
 
@@ -69,9 +69,9 @@ pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
                                 DidOpenTextDocumentParams {
                                     text_document: TextDocumentItem {
                                         uri: uri.into(),
-                                        language_id: "gluon".into(),
+                                        language_id: Some("gluon".into()),
                                         text: text.into(),
-                                        version: 1,
+                                        version: Some(1),
                                     },
                                 });
 

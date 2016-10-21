@@ -1,6 +1,6 @@
 
 extern crate gluon_language_server;
-extern crate vscode_languageserver_types;
+extern crate languageserver_types;
 
 extern crate jsonrpc_core;
 extern crate serde_json;
@@ -10,8 +10,8 @@ mod support;
 
 use std::io::Write;
 
-use vscode_languageserver_types::{CompletionItem, CompletionItemKind, Position,
-                                  TextDocumentIdentifier, TextDocumentPositionParams};
+use languageserver_types::{CompletionItem, CompletionItemKind, Position, TextDocumentIdentifier,
+                           TextDocumentPositionParams};
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
     where W: Write,

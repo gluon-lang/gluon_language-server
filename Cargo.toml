@@ -11,22 +11,17 @@ repository = "https://github.com/Marwes/gluon_language-server"
 [dependencies]
 log = "0.3.6"
 env_logger = "0.3.3"
+
 url = "1.2.0"
 
-jsonrpc-core = { version = "3.0.0",  default-features = false }
+jsonrpc-core = "3.0.0"
 
 serde = "0.8.11"
 serde_json = "0.8.0"
 
-[dependencies.vscode-languageserver-types]
-path = "vscode-languageserver-types"
-version = "0.1.0"
-default-features = false
+languageserver-types =  "0.4.0"
 
 [dependencies.gluon]
 version = "0.2.2"
+# Don't include the repl
 default-features = false
-
-[features]
-default = ["jsonrpc-core/default", "vscode-languageserver-types/default"]
-nightly = ["jsonrpc-core/nightly", "vscode-languageserver-types/nightly"]
