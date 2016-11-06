@@ -1,6 +1,6 @@
 [package]
 name = "gluon_language-server"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Markus Westerlind <marwes91@gmail.com>"]
 description = "Language server providing completion for gluon"
 license = "MIT"
