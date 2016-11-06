@@ -1,28 +1,78 @@
+#![cfg_attr(feature = "serde_macros", feature(custom_derive, plugin))]
+#![cfg_attr(feature = "serde_macros", plugin(serde_macros))]
 
-pub mod language_server;
+extern crate serde;
+extern crate serde_json;
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, MethodCommand, NotificationCommand, Params, Value};
+extern crate jsonrpc_core;
+
+#[macro_use]
+extern crate log;
+extern crate env_logger;
+extern crate gluon;
+extern crate url;
+
+extern crate languageserver_types;
+
+use jsonrpc_core::{Error, ErrorCode, IoHandler, MethodCommand, MethodResult, NotificationCommand,
+                   Params, Value};
 use serde_json::value::{from_value, to_value};
 
-use gluon::base::ast;
+use gluon::base::ast::SpannedExpr;
+use gluon::base::fnv::FnvMap;
 use gluon::base::metadata::Metadata;
+use gluon::base::pos::{self, BytePos, Line, Span};
+use gluon::base::source;
 use gluon::base::symbol::Symbol;
 use gluon::check::completion;
-use gluon::import::{CheckImporter, Import};
+use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
+use gluon::vm::macros::Error as MacroError;
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
 use std::error::Error as StdError;
+use std::fs;
 use std::io;
-use std::io::{Read, Write};
+use std::io::{Read, BufRead, Write};
 use std::str;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
 
-use language_server::*;
+use languageserver_types::*;
+
+#[derive(Clone)]
+pub struct CheckImporter(pub Arc<Mutex<FnvMap<String, (source::Lines, SpannedExpr<Symbol>)>>>);
+impl CheckImporter {
+    pub fn new() -> CheckImporter {
+        CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
+    }
+}
+impl Importer for CheckImporter {
+    fn import(&self,
+              compiler: &mut Compiler,
+              vm: &Thread,
+              module_name: &str,
+              input: &str,
+              expr: SpannedExpr<Symbol>)
+              -> Result<(), MacroError> {
+        use gluon::compiler_pipeline::*;
+
+        let macro_value = MacroValue { expr: expr };
+        let TypecheckValue { expr, typ } =
+            try!(macro_value.typecheck(compiler, vm, module_name, input));
+
+        let lines = source::Lines::new(input);
+        self.0.lock().unwrap().insert(module_name.into(), (lines, expr));
+        let metadata = Metadata::default();
+        // Insert a global to ensure the globals type can be looked up
+        try!(vm.global_env()
+            .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0)));
+        Ok(())
+    }
+}
 
 struct ServerError<E> {
     message: String,
@@ -46,7 +96,7 @@ trait LanguageServerNotification: Send + Sync {
 struct ServerCommand<T>(T);
 
 impl<T> NotificationCommand for ServerCommand<T>
-    where T: LanguageServerNotification
+    where T: LanguageServerNotification,
 {
     fn execute(&self, param: Params) {
         match param {
@@ -64,23 +114,24 @@ impl<T> NotificationCommand for ServerCommand<T>
 }
 
 impl<T> MethodCommand for ServerCommand<T>
-    where T: LanguageServerCommand
+    where T: LanguageServerCommand,
 {
-    fn execute(&self, param: Params) -> Result<Value, Error> {
+    fn execute(&self, param: Params) -> MethodResult {
         match param {
             Params::Map(ref map) => {
                 match from_value(Value::Object(map.clone())) {
                     Ok(value) => {
-                        return self.0
-                            .execute(value)
-                            .map(|value| to_value(&value))
-                            .map_err(|error| {
-                                Error {
+                        let result = match self.0.execute(value) {
+                            Ok(value) => Ok(to_value(&value)),
+                            Err(error) => {
+                                Err(Error {
                                     code: ErrorCode::InternalError,
                                     message: error.message,
                                     data: error.data.as_ref().map(to_value),
-                                }
-                            })
+                                })
+                            }
+                        };
+                        return MethodResult::Sync(result);
                     }
                     Err(_) => (),
                 }
@@ -88,11 +139,11 @@ impl<T> MethodCommand for ServerCommand<T>
             _ => (),
         }
         let data = self.0.invalid_params();
-        Err(Error {
+        MethodResult::Sync(Err(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {:?}", param),
             data: data.as_ref().map(to_value),
-        })
+        }))
     }
 }
 
@@ -118,8 +169,7 @@ impl LanguageServerCommand for Initialize {
                     trigger_characters: vec![".".into()],
                 }),
                 hover_provider: Some(true),
-                ..
-                ServerCapabilities::default()
+                ..ServerCapabilities::default()
             },
         })
     }
@@ -138,29 +188,34 @@ impl LanguageServerCommand for Completion {
                change: TextDocumentPositionParams)
                -> Result<Vec<CompletionItem>, ServerError<()>> {
         let thread = &self.0;
-        let module = change.text_document.uri;
+        let module = strip_file_prefix(thread, &change.text_document.uri);
         let import = thread.get_macros().get("import").expect("Import macro");
         let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
         let importer = import.importer.0.lock().unwrap();
-        let expr = try!(importer.get(&module).ok_or_else(|| {
+        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
             ServerError {
                 message: format!("Module `{}` is not defined", module),
                 data: None,
             }
         }));
-        let suggestions = completion::suggest(&ast::EmptyEnv::new(),
-                                              expr,
-                                              ast::Location {
-                                                  row: (change.position.line + 1) as i32,
-                                                  column: change.position.character as i32,
-                                                  absolute: 0,
-                                              });
-        let items: Vec<_> = suggestions.into_iter()
+
+        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+            .ok_or_else(|| {
+                ServerError {
+                    message: format!("Position ({}, {}) is out of range",
+                                     change.position.line,
+                                     change.position.character),
+                    data: None,
+                }
+            }));
+        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+        let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
+
+        let mut items: Vec<_> = suggestions.into_iter()
             .map(|ident| {
                 // Remove the `:Line x, Row y suffix`
-                let label = String::from(ident.name
-                    .as_ref()
-                    .split(':')
+                let name: &str = ident.name.as_ref();
+                let label = String::from(name.split(':')
                     .next()
                     .unwrap_or(ident.name.as_ref()));
                 CompletionItem {
@@ -171,6 +226,9 @@ impl LanguageServerCommand for Completion {
                 }
             })
             .collect();
+
+        items.sort_by(|l, r| l.label.cmp(&r.label));
+
         Ok(items)
     }
 
@@ -186,23 +244,28 @@ impl LanguageServerCommand for HoverCommand {
     type Error = ();
     fn execute(&self, change: TextDocumentPositionParams) -> Result<Hover, ServerError<()>> {
         let thread = &self.0;
-        let module = change.text_document.uri;
+        let module = strip_file_prefix(thread, &change.text_document.uri);
         let import = thread.get_macros().get("import").expect("Import macro");
         let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
         let importer = import.importer.0.lock().unwrap();
-        let expr = try!(importer.get(&module).ok_or_else(|| {
+        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
             ServerError {
                 message: format!("Module `{}` is not defined", module),
                 data: None,
             }
         }));
-        completion::find(&ast::EmptyEnv::new(),
-                         expr,
-                         ast::Location {
-                             row: (change.position.line + 1) as i32,
-                             column: change.position.character as i32,
-                             absolute: 0,
-                         })
+
+        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+            .ok_or_else(|| {
+                ServerError {
+                    message: format!("Position ({}, {}) is out of range",
+                                     change.position.line,
+                                     change.position.character),
+                    data: None,
+                }
+            }));
+        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+        completion::find(&*thread.get_env(), expr, byte_pos)
             .map(|typ| {
                 Hover {
                     contents: vec![MarkedString::String(format!("{}", typ))],
@@ -211,7 +274,9 @@ impl LanguageServerCommand for HoverCommand {
             })
             .map_err(|()| {
                 ServerError {
-                    message: "Could not find a type for hover".into(),
+                    message: format!("Completion not found at: Line {}, Column {}",
+                                     change.position.line,
+                                     change.position.character),
                     data: None,
                 }
             })
@@ -222,13 +287,13 @@ impl LanguageServerCommand for HoverCommand {
     }
 }
 
-fn location_to_position(loc: &ast::Location) -> Position {
+fn location_to_position(loc: &pos::Location) -> Position {
     Position {
-        line: loc.row as u64 + 1,
-        character: loc.column as u64,
+        line: loc.line.to_usize() as u64 + 1,
+        character: loc.column.to_usize() as u64,
     }
 }
-fn span_to_range(span: &ast::Span) -> Range {
+fn span_to_range(span: &Span<pos::Location>) -> Range {
     Range {
         start: location_to_position(&span.start),
         end: location_to_position(&span.end),
@@ -257,25 +322,59 @@ impl LanguageServerNotification for TextDocumentDidChange {
     }
 }
 
+fn strip_file_prefix(thread: &Thread, filename: &str) -> String {
+    let import = thread.get_macros()
+        .get("import")
+        .expect("Import macro");
+    let import = import.downcast_ref::<Import<CheckImporter>>()
+        .expect("Check importer");
+    let paths = import.paths.read().unwrap();
+
+    let file = url::percent_encoding::percent_decode(filename.as_bytes()).decode_utf8_lossy();
+    let url = url::Url::parse(&file).ok();
+    let name = url.and_then(|url| url.to_file_path().ok())
+        .and_then(|path| fs::canonicalize(path).ok());
+    let name = match name {
+        Some(name) => name,
+        None => return filename.to_string(),
+    };
+
+    for path in &*paths {
+        let canonicalized = fs::canonicalize(path).ok();
+
+        let result = canonicalized.as_ref()
+            .and_then(|path| name.strip_prefix(path).ok())
+            .and_then(|path| path.to_str());
+        if let Some(path) = result {
+            return path.to_string();
+        }
+    }
+    filename.to_string()
+}
+
 fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()> {
     use gluon::compiler_pipeline::*;
 
-    let name = filename_to_module(filename);
+    let filename = strip_file_prefix(thread, filename);
+    let name = filename_to_module(&filename);
     let mut compiler = Compiler::new();
     // The parser may find parse errors but still produce an expression
     // For that case still typecheck the expression but return the parse error afterwards
-    let (expr, parse_result): (_, GluonResult<()>) =
+    let (mut expr, parse_result): (_, GluonResult<()>) =
         match compiler.parse_partial_expr(&name, fileinput) {
             Ok(expr) => (expr, Ok(())),
             Err((None, err)) => return Err(err.into()),
             Err((Some(expr), err)) => (expr, Err(err.into())),
         };
-    let MacroValue(mut expr) = try!(expr.expand_macro(&mut compiler, thread, &name));
+    try!(expr.expand_macro(&mut compiler, thread, &name));
     let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
         Ok(typ) => {
             let metadata = Metadata::default();
             try!(thread.global_env()
-                .set_global(Symbol::new(filename), typ, metadata, GluonValue::Int(0)));
+                .set_global(Symbol::from(&filename[..]),
+                            typ,
+                            metadata,
+                            GluonValue::Int(0)));
             Ok(())
         }
         Err(err) => Err(err),
@@ -284,7 +383,9 @@ fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()
     let import = import.downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
-    importer.insert(filename.into(), expr);
+
+    let lines = source::Lines::new(fileinput);
+    importer.insert(filename.into(), (lines, expr));
     result.or(parse_result)
 }
 
@@ -308,12 +409,13 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                         .collect()
                 }
                 GluonError::Parse(err) => {
-                    err.errors
+                    err.errors()
+                        .errors
                         .into_iter()
                         .map(|err| {
                             let p = Position {
-                                line: err.position.line as u64 - 1,
-                                character: err.position.column as u64,
+                                line: err.span.start.line.to_usize() as u64 - 1,
+                                character: err.span.start.column.to_usize() as u64,
                             };
                             Diagnostic {
                                 message: format!("{}", err),
@@ -347,6 +449,7 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
 }
 
 fn log_message(message: String) {
+    debug!("{}", message);
     let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
                     to_value(&LogMessageParams {
                         typ: MessageType::Log,
@@ -355,39 +458,51 @@ fn log_message(message: String) {
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
+pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
+    where R: BufRead + Read,
+{
+    let mut header = String::new();
+    let n = try!(reader.read_line(&mut header));
+    if n == 0 {
+        // EOF
+        return Ok(None);
+    }
+    if header.starts_with("Content-Length: ") {
+        let content_length = {
+            let len = header["Content-Length:".len()..].trim();
+            debug!("{}", len);
+            try!(len.parse::<usize>())
+        };
+        while header != "\r\n" {
+            header.clear();
+            try!(reader.read_line(&mut header));
+        }
+        let mut content = vec![0; content_length];
+        try!(reader.read_exact(&mut content));
+        Ok(Some(try!(String::from_utf8(content))))
+    } else {
+        Err(format!("Invalid message: `{}`", header).into())
+    }
+}
+
 fn main_loop(io: &mut IoHandler, exit_token: Arc<AtomicBool>) -> Result<(), Box<StdError>> {
     let stdin = io::stdin();
     while !exit_token.load(atomic::Ordering::SeqCst) {
-        let mut header = String::new();
-        let n = try!(stdin.read_line(&mut header));
-        if n == 0 {
-            // EOF
-            return Ok(());
-        }
-        debug!("{}", header);
-        if header.starts_with("Content-Length: ") {
-            let content_length = {
-                let len = header["Content-Length:".len()..].trim();
-                debug!("{}", len);
-                try!(len.parse::<usize>())
-            };
-            while header != "\r\n" {
-                header.clear();
-                try!(io::stdin().read_line(&mut header));
+        match try!(read_message(stdin.lock())) {
+            Some(json) => {
+                debug!("Handle: {}", json);
+                if let Some(response) = io.handle_request_sync(&json) {
+                    print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
+                    try!(io::stdout().flush());
+                }
             }
-            let mut content = vec![0; content_length];
-            try!(stdin.lock().read_exact(&mut content));
-            let json = try!(str::from_utf8(&content));
-            if let Some(response) = io.handle_request(json) {
-                print!("Content-Length: {}\r\n\r\n{}", response.len(), response);
-                try!(io::stdout().flush());
-            }
+            None => return Ok(()),
         }
     }
     Ok(())
 }
 
-fn main() {
+pub fn run() {
     ::env_logger::init().unwrap();
     let handle = ::std::thread::spawn(|| {
         let thread = new_vm();
