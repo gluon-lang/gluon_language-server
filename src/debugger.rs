@@ -71,6 +71,20 @@ impl LanguageServerCommand for LaunchHandler {
     }
 }
 
+pub struct DisconnectHandler {
+    exit_token: Arc<AtomicBool>,
+}
+
+impl LanguageServerCommand for DisconnectHandler {
+    type Param = DisconnectArguments;
+    type Output = Option<Value>;
+    type Error = ();
+    fn execute(&self, _args: Value) -> Result<Option<Value>, ServerError<()>> {
+        self.exit_token.store(true, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
 
 // Translate debug server messages into jsonrpc-2.0
 fn translate_request(message: String) -> Result<String, Box<StdError>> {
@@ -149,6 +163,9 @@ pub fn main() {
                                 seq: seq,
                             }));
         io.add_async_method("launch", ServerCommand(LaunchHandler));
+        io.add_method("disconnect",
+                      ServerCommand(DisconnectHandler { exit_token: exit_token.clone() }));
+
         spawn(move || {
             let read = BufReader::new(&*stream);
             main_loop(read,
