@@ -1,5 +1,5 @@
 use std::error::Error as StdError;
-use std::io::{BufRead, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool};
@@ -8,7 +8,7 @@ use jsonrpc_core::{Error, ErrorCode, IoHandler, RpcMethodSimple, Params, Value};
 use futures::{self, BoxFuture, Future, IntoFuture};
 
 use serde;
-use serde_json::{from_value, to_value};
+use serde_json::{from_value, to_value, to_string};
 
 pub struct ServerError<E> {
     pub message: String,
@@ -137,6 +137,19 @@ pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
     } else {
         Err(format!("Invalid message: `{}`", header).into())
     }
+}
+
+pub fn write_message<W, T>(mut output: W, value: &T) -> io::Result<()>
+    where W: Write,
+          T: serde::Serialize,
+{
+    let response = to_string(&value).unwrap();
+    try!(write!(output,
+                "Content-Length: {}\r\n\r\n{}",
+                response.len(),
+                response));
+    try!(output.flush());
+    Ok(())
 }
 
 pub fn main_loop<R, W, F, G>(mut input: R,
