@@ -29,8 +29,7 @@ pub struct InitializeHandler {
     seq: Arc<AtomicUsize>,
 }
 
-impl LanguageServerCommand for InitializeHandler {
-    type Param = InitializeRequestArguments;
+impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
     type Output = Option<Capabilities>;
     type Error = ();
     fn execute(&self,
@@ -62,8 +61,7 @@ impl LanguageServerCommand for InitializeHandler {
 
 pub struct LaunchHandler;
 
-impl LanguageServerCommand for LaunchHandler {
-    type Param = Value;
+impl LanguageServerCommand<Value> for LaunchHandler {
     type Output = Option<Value>;
     type Error = ();
     fn execute(&self, _args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
@@ -75,13 +73,12 @@ pub struct DisconnectHandler {
     exit_token: Arc<AtomicBool>,
 }
 
-impl LanguageServerCommand for DisconnectHandler {
-    type Param = DisconnectArguments;
+impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
     type Output = Option<Value>;
     type Error = ();
-    fn execute(&self, _args: Value) -> Result<Option<Value>, ServerError<()>> {
+    fn execute(&self, _args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
         self.exit_token.store(true, Ordering::SeqCst);
-        Ok(None)
+        Ok(None).into_future().boxed()
     }
 }
 
@@ -158,13 +155,15 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                            ServerCommand(InitializeHandler {
+                            ServerCommand::new(InitializeHandler {
                                 stream: stream.clone(),
                                 seq: seq,
                             }));
-        io.add_async_method("launch", ServerCommand(LaunchHandler));
-        io.add_method("disconnect",
-                      ServerCommand(DisconnectHandler { exit_token: exit_token.clone() }));
+        io.add_async_method("launch", ServerCommand::new(LaunchHandler));
+        io.add_async_method("disconnect",
+                            ServerCommand::new(DisconnectHandler {
+                                exit_token: exit_token.clone(),
+                            }));
 
         spawn(move || {
             let read = BufReader::new(&*stream);

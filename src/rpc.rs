@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::io::{BufRead, Read, Write};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool};
 
@@ -14,26 +15,57 @@ pub struct ServerError<E> {
     pub data: Option<E>,
 }
 
-pub trait LanguageServerCommand: Send + Sync + 'static {
-    type Param: serde::Deserialize;
+pub trait LanguageServerCommand<P>: Send + Sync + 'static
+    where P: serde::Deserialize,
+{
     type Output: serde::Serialize;
     type Error: serde::Serialize;
-    fn execute(&self, param: Self::Param) -> BoxFuture<Self::Output, ServerError<Self::Error>>;
+    fn execute(&self, param: P) -> BoxFuture<Self::Output, ServerError<Self::Error>>;
 
     fn invalid_params(&self) -> Option<Self::Error> {
         None
     }
 }
 
-pub trait LanguageServerNotification: Send + Sync + 'static {
-    type Param: serde::Deserialize;
-    fn execute(&self, param: Self::Param);
+impl<F, P, O, E> LanguageServerCommand<P> for F
+    where F: Fn(P) -> BoxFuture<O, ServerError<E>> + Send + Sync + 'static,
+          P: serde::Deserialize,
+          O: serde::Serialize,
+          E: serde::Serialize,
+{
+    type Output = O;
+    type Error = E;
+
+    fn execute(&self, param: P) -> BoxFuture<Self::Output, ServerError<Self::Error>> {
+        self(param)
+    }
 }
 
-pub struct ServerCommand<T>(pub T);
+pub trait LanguageServerNotification<P>: Send + Sync + 'static
+    where P: serde::Deserialize,
+{
+    fn execute(&self, param: P);
+}
 
-impl<T> RpcMethodSimple for ServerCommand<T>
-    where T: LanguageServerCommand,
+impl<F, P> LanguageServerNotification<P> for F
+    where F: Fn(P) + Send + Sync + 'static,
+          P: serde::Deserialize + 'static,
+{
+    fn execute(&self, param: P) {
+        self(param)
+    }
+}
+pub struct ServerCommand<T, P>(pub T, PhantomData<fn(P)>);
+
+impl<T, P> ServerCommand<T, P> {
+    pub fn new(command: T) -> ServerCommand<T, P> {
+        ServerCommand(command, PhantomData)
+    }
+}
+
+impl<P, T> RpcMethodSimple for ServerCommand<T, P>
+    where T: LanguageServerCommand<P>,
+          P: serde::Deserialize + 'static,
 {
     fn call(&self, param: Params) -> BoxFuture<Value, Error> {
         match param {
