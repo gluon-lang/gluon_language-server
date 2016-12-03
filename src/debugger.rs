@@ -59,7 +59,12 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
                     data: None,
                 }
             })
-            .map(|_| None)
+            .map(|_| {
+                Some(Capabilities {
+                    supports_configuration_done_request: Some(true),
+                    ..Capabilities::default()
+                })
+            })
             .into_future()
             .boxed()
     }
@@ -116,7 +121,7 @@ impl LaunchHandler {
                                           all_threads_stopped: Some(true),
                                           reason: "breakpoint".into(),
                                           text: None,
-                                          thread_id: None,
+                                          thread_id: Some(1),
                                       },
                                       event: "stopped".to_string(),
                                       seq: debugger.seq(),
@@ -189,7 +194,7 @@ fn translate_request(message: String) -> Result<String, Box<StdError>> {
     Ok(message)
 }
 
-fn translate_response(message: String) -> Result<String, Box<StdError>> {
+fn translate_response(debugger: &Debugger, message: String) -> Result<String, Box<StdError>> {
     use serde_json::Value;
     let mut data: Value = try!(serde_json::from_str(&message));
     if data.is_object() {
@@ -205,8 +210,8 @@ fn translate_response(message: String) -> Result<String, Box<StdError>> {
         let error = data.remove("error");
 
         let mut map = vec![("success".to_string(), Value::Bool(result.is_some())),
-                           ("request_seq".to_string(), seq.clone()),
-                           ("seq".to_string(), seq),
+                           ("request_seq".to_string(), seq),
+                           ("seq".to_string(), Value::from(debugger.seq())),
                            ("type".to_owned(), Value::String("response".to_string()))];
 
         if let Some(result) = result {
@@ -251,7 +256,7 @@ pub fn main() {
         let stream = Arc::new(stream.unwrap());
 
         let exit_token = Arc::new(AtomicBool::new(false));
-        let seq = Arc::new(AtomicUsize::new(0));
+        let seq = Arc::new(AtomicUsize::new(1));
 
         let thread = gluon::new_vm();
 
@@ -265,67 +270,122 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                      ServerCommand::new(InitializeHandler {
-                          stream: stream.clone(),
-                          seq: seq.clone(),
-                      }));
+                            ServerCommand::new(InitializeHandler {
+                                stream: stream.clone(),
+                                seq: seq.clone(),
+                            }));
+
+        let configuration_done =
+            move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
+                Ok(()).into_future().boxed()
+            };
+        io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+
         io.add_async_method("launch",
-                      ServerCommand::new(LaunchHandler {
-                          debugger: debugger.clone(),
-                          thread: thread,
-                          stream: stream.clone(),
-                          seq: seq.clone(),
-                      }));
+                            ServerCommand::new(LaunchHandler {
+                                debugger: debugger.clone(),
+                                thread: thread,
+                                stream: stream.clone(),
+                                seq: seq.clone(),
+                            }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
                             }));
         {
             let debugger = debugger.clone();
-            let set_break =
-                move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
+            let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
                 let mut breakpoint_map = debugger.breakpoints.lock().unwrap();
-                let breakpoints = args.breakpoints
-                    .iter()
-                    .flat_map(|bs| bs.iter().map(|breakpoint| Line::from(breakpoint.line as usize)))
-                    .collect();
+                let breakpoints =
+                    args.breakpoints
+                        .iter()
+                        .flat_map(|bs| {
+                            bs.iter().map(|breakpoint| Line::from(breakpoint.line as usize))
+                        })
+                        .collect();
                 if let Some(path) = args.source.path {
                     breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
                                           breakpoints);
                 }
                 Ok(SetBreakpointsResponseBody {
-                    breakpoints: args.breakpoints
-                        .into_iter()
-                        .flat_map(|bs| bs)
-                        .map(|breakpoint| {
-                            Breakpoint {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                id: None,
-                                line: Some(breakpoint.line),
-                                message: None,
-                                source: None,
-                                verified: true,
-                            }
-                        })
-                        .collect(),
-                }).into_future().boxed()
+                        breakpoints: args.breakpoints
+                            .into_iter()
+                            .flat_map(|bs| bs)
+                            .map(|breakpoint| {
+                                Breakpoint {
+                                    column: None,
+                                    end_column: None,
+                                    end_line: None,
+                                    id: None,
+                                    line: Some(breakpoint.line),
+                                    message: None,
+                                    source: None,
+                                    verified: true,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .into_future()
+                    .boxed()
             };
 
             io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
         }
 
-        let threads = move |_: Value| -> Result<ThreadsResponseBody, ServerError<()>> {
+        let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
             Ok(ThreadsResponseBody {
-                threads: vec![Thread {
-                                  id: 0,
-                                  name: "main".to_string(),
-                              }],
-            })
+                    threads: vec![Thread {
+                                      id: 1,
+                                      name: "main".to_string(),
+                                  }],
+                })
+                .into_future()
+                .boxed()
         };
 
-        io.add_method("threads", ServerCommand::new(threads));
+        io.add_async_method("threads", ServerCommand::new(threads));
+
+        let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
+            Ok(StackTraceResponseBody {
+                    stack_frames: vec![StackFrame {
+                                           column: 0,
+                                           end_column: None,
+                                           end_line: None,
+                                           id: 0,
+                                           line: 0,
+                                           module_id: None,
+                                           name: "main".to_string(),
+                                           source: None,
+                                       }],
+                    total_frames: Some(1),
+                })
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
+
+        let scopes = move |_: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
+            Ok(ScopesResponseBody {
+                    scopes: vec![Scope {
+                                     column: None,
+                                     end_column: None,
+                                     end_line: None,
+                                     expensive: false,
+                                     indexed_variables: None,
+                                     line: None,
+                                     name: "Locals".to_string(),
+                                     named_variables: None,
+                                     source: Some(Source {
+                                         name: Some("main".to_string()),
+                                         ..Source::default()
+                                     }),
+                                     variables_reference: 0,
+                                 }],
+                })
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("scopes", ServerCommand::new(scopes));
 
         {
             let debugger = debugger.clone();
@@ -337,7 +397,6 @@ pub fn main() {
             io.add_async_method("continue", ServerCommand::new(cont));
         }
 
-
         spawn(move || {
             let read = BufReader::new(&*stream);
             main_loop(read,
@@ -345,7 +404,7 @@ pub fn main() {
                       &io,
                       exit_token,
                       translate_request,
-                      translate_response)
+                      |body| translate_response(&debugger, body))
                 .unwrap()
         });
     }
