@@ -28,7 +28,7 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::vm::api::{OpaqueValue, Hole};
-use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
+use gluon::vm::thread::{DebugInfo, RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, filename_to_module};
 
 use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, main_loop,
@@ -107,6 +107,8 @@ impl LaunchHandler {
             let stack_info = debug_info.stack_info(0).unwrap();
             if let Some(line) = stack_info.line() {
                 if debugger.should_break(stack_info.source_name(), line) {
+                    debugger.store_stack_trace(&debug_info);
+
                     debugger.send_event(StoppedEvent {
                         body: StoppedEventBody {
                             all_threads_stopped: Some(true),
@@ -223,9 +225,14 @@ fn translate_response(debugger: &Debugger, message: String) -> Result<String, Bo
     Ok(message)
 }
 
-pub struct Debugger {
+struct SourceData {
+    source: Option<Source>,
+    breakpoints: HashSet<Line>,
+}
+
+struct Debugger {
     stream: Arc<TcpStream>,
-    breakpoints: Mutex<HashMap<String, HashSet<Line>>>,
+    sources: Mutex<HashMap<String, SourceData>>,
     continue_barrier: Barrier,
     seq: Arc<AtomicUsize>,
     lines_start_at_1: AtomicBool,
@@ -233,6 +240,8 @@ pub struct Debugger {
     // action could be received by visual code before the continue response which causes it to not recognize
     // the stopped action
     do_continue: AtomicBool,
+
+    stack_trace: Mutex<Vec<StackFrame>>,
 }
 
 impl Debugger {
@@ -241,9 +250,9 @@ impl Debugger {
     }
 
     fn should_break(&self, source_name: &str, line: Line) -> bool {
-        let breakpoints = self.breakpoints.lock().expect("breakpoints mutex is poisoned");
-        breakpoints.get(source_name)
-            .map_or(false, |lines| lines.contains(&line))
+        let sources = self.sources.lock().expect("sources mutex is poisoned");
+        sources.get(source_name)
+            .map_or(false, |source| source.breakpoints.contains(&line))
     }
 
     fn line(&self, line: i64) -> Line {
@@ -255,6 +264,29 @@ impl Debugger {
         where T: serde::Serialize,
     {
         write_message(&*self.stream, &value).unwrap();
+    }
+
+    // Stores the stackstack trace so it can be returned in later requests
+    fn store_stack_trace(&self, info: &DebugInfo) {
+        let mut vec = self.stack_trace.lock().unwrap();
+        vec.clear();
+        let mut i = 0;
+
+        let sources = self.sources.lock().unwrap();
+        while let Some(stack_info) = info.stack_info(i) {
+            vec.push(StackFrame {
+                column: 0,
+                end_column: None,
+                end_line: None,
+                id: 0,
+                line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
+                module_id: None,
+                name: "main".to_string(),
+                source: sources.get(stack_info.source_name())
+                    .and_then(|source| source.source.clone()),
+            });
+            i += 1;
+        }
     }
 }
 
@@ -272,11 +304,12 @@ pub fn main() {
 
         let debugger = Arc::new(Debugger {
             stream: stream.clone(),
-            breakpoints: Mutex::new(HashMap::new()),
+            sources: Mutex::new(HashMap::new()),
             continue_barrier: Barrier::new(2),
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
             do_continue: AtomicBool::new(false),
+            stack_trace: Mutex::new(Vec::new()),
         });
 
         let mut io = IoHandler::new();
@@ -308,14 +341,22 @@ pub fn main() {
         {
             let debugger = debugger.clone();
             let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
-                let mut breakpoint_map = debugger.breakpoints.lock().unwrap();
                 let breakpoints = args.breakpoints
                     .iter()
                     .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
                     .collect();
-                if let Some(path) = args.source.path {
-                    breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
-                                          breakpoints);
+
+                let opt = args.source
+                    .path
+                    .as_ref()
+                    .map(|path| filename_to_module(path.trim_right_matches(".glu")));
+                if let Some(path) = opt {
+                    let mut sources = debugger.sources.lock().unwrap();
+                    sources.insert(path,
+                                   SourceData {
+                                       source: Some(args.source.clone()),
+                                       breakpoints: breakpoints,
+                                   });
                 }
 
                 Ok(SetBreakpointsResponseBody {
@@ -356,24 +397,19 @@ pub fn main() {
 
         io.add_async_method("threads", ServerCommand::new(threads));
 
-        let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
-            Ok(StackTraceResponseBody {
-                    stack_frames: vec![StackFrame {
-                                           column: 0,
-                                           end_column: None,
-                                           end_line: None,
-                                           id: 0,
-                                           line: 0,
-                                           module_id: None,
-                                           name: "main".to_string(),
-                                           source: None,
-                                       }],
-                    total_frames: Some(1),
-                })
-                .into_future()
-                .boxed()
-        };
-        io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
+        {
+            let debugger = debugger.clone();
+            let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
+                let stack_frames = (*debugger.stack_trace.lock().unwrap()).clone();
+                Ok(StackTraceResponseBody {
+                        total_frames: Some(stack_frames.len() as i64),
+                        stack_frames: stack_frames,
+                    })
+                    .into_future()
+                    .boxed()
+            };
+            io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
+        }
 
         let scopes = move |_: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
             Ok(ScopesResponseBody {
