@@ -27,6 +27,7 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::vm::api::{OpaqueValue, Hole};
+use gluon::vm::Error as VmError;
 use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, filename_to_module};
 
@@ -104,13 +105,23 @@ impl LaunchHandler {
 
         let debugger = self.debugger.clone();
         self.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
-            let breakpoints = debugger.breakpoints.lock().expect("breakpoints mutex is poisoned");
             let stack_info = debug_info.stack_info(0).unwrap();
             if let Some(line) = stack_info.line() {
-                if breakpoints.get(stack_info.source_name())
-                    .map_or(false, |lines| lines.contains(&line)) {
+                if debugger.should_break(stack_info.source_name(), line) {
                     let mut continue_exection = debugger.continue_mutex.lock().unwrap();
                     *continue_exection = false;
+                    write_message(&*debugger.stream,
+                                  &StoppedEvent {
+                                      body: StoppedEventBody {
+                                          all_threads_stopped: Some(true),
+                                          reason: "breakpoint".into(),
+                                          text: None,
+                                          thread_id: None,
+                                      },
+                                      event: "stopped".to_string(),
+                                      seq: debugger.seq(),
+                                      type_: "event".to_string(),
+                                  }).map_err(|err| VmError::Message(format!("{}", err)))?;
                     while !*continue_exection {
                         continue_exection = debugger.continue_var.wait(continue_exection).unwrap();
                     }
@@ -166,7 +177,7 @@ fn translate_request(message: String) -> Result<String, Box<StdError>> {
                     .or_else(|| c.as_i64().map(Value::from))
             })
             .expect("seq");
-        let arguments = data.remove("arguments").expect("arguments");
+        let arguments = data.remove("arguments").unwrap_or(Value::Object(Default::default()));
         let map = vec![("method".to_string(), Value::String(command)),
                        ("id".to_string(), seq),
                        ("params".to_string(), arguments),
@@ -212,11 +223,24 @@ fn translate_response(message: String) -> Result<String, Box<StdError>> {
     Ok(message)
 }
 
-#[derive(Default)]
 pub struct Debugger {
+    stream: Arc<TcpStream>,
     breakpoints: Mutex<HashMap<String, HashSet<Line>>>,
     continue_mutex: Mutex<bool>,
     continue_var: Condvar,
+    seq: Arc<AtomicUsize>,
+}
+
+impl Debugger {
+    fn seq(&self) -> i64 {
+        self.seq.fetch_add(1, Ordering::SeqCst) as i64
+    }
+
+    fn should_break(&self, source_name: &str, line: Line) -> bool {
+        let breakpoints = self.breakpoints.lock().expect("breakpoints mutex is poisoned");
+        breakpoints.get(source_name)
+            .map_or(false, |lines| lines.contains(&line))
+    }
 }
 
 pub fn main() {
@@ -231,21 +255,27 @@ pub fn main() {
 
         let thread = gluon::new_vm();
 
-        let debugger = Arc::new(Debugger::default());
+        let debugger = Arc::new(Debugger {
+            stream: stream.clone(),
+            breakpoints: Mutex::new(HashMap::new()),
+            continue_mutex: Mutex::new(false),
+            continue_var: Condvar::new(),
+            seq: seq.clone(),
+        });
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                            ServerCommand::new(InitializeHandler {
-                                stream: stream.clone(),
-                                seq: seq.clone(),
-                            }));
+                      ServerCommand::new(InitializeHandler {
+                          stream: stream.clone(),
+                          seq: seq.clone(),
+                      }));
         io.add_async_method("launch",
-                            ServerCommand::new(LaunchHandler {
-                                debugger: debugger.clone(),
-                                thread: thread,
-                                stream: stream.clone(),
-                                seq: seq.clone(),
-                            }));
+                      ServerCommand::new(LaunchHandler {
+                          debugger: debugger.clone(),
+                          thread: thread,
+                          stream: stream.clone(),
+                          seq: seq.clone(),
+                      }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -253,23 +283,49 @@ pub fn main() {
         {
             let debugger = debugger.clone();
             let set_break =
-                move |args: SetBreakpointsArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                    let mut breakpoint_map = debugger.breakpoints.lock().unwrap();
-                    let breakpoints = args.breakpoints
-                        .iter()
-                        .flat_map(|bs| {
-                            bs.iter().map(|breakpoint| Line::from(breakpoint.line as usize))
+                move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
+                let mut breakpoint_map = debugger.breakpoints.lock().unwrap();
+                let breakpoints = args.breakpoints
+                    .iter()
+                    .flat_map(|bs| bs.iter().map(|breakpoint| Line::from(breakpoint.line as usize)))
+                    .collect();
+                if let Some(path) = args.source.path {
+                    breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
+                                          breakpoints);
+                }
+                Ok(SetBreakpointsResponseBody {
+                    breakpoints: args.breakpoints
+                        .into_iter()
+                        .flat_map(|bs| bs)
+                        .map(|breakpoint| {
+                            Breakpoint {
+                                column: None,
+                                end_column: None,
+                                end_line: None,
+                                id: None,
+                                line: Some(breakpoint.line),
+                                message: None,
+                                source: None,
+                                verified: true,
+                            }
                         })
-                        .collect();
-                    if let Some(path) = args.source.path {
-                        breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
-                                              breakpoints);
-                    }
-                    Ok(None).into_future().boxed()
-                };
+                        .collect(),
+                }).into_future().boxed()
+            };
 
             io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
         }
+
+        let threads = move |_: Value| -> Result<ThreadsResponseBody, ServerError<()>> {
+            Ok(ThreadsResponseBody {
+                threads: vec![Thread {
+                                  id: 0,
+                                  name: "main".to_string(),
+                              }],
+            })
+        };
+
+        io.add_method("threads", ServerCommand::new(threads));
 
         {
             let debugger = debugger.clone();

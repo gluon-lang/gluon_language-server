@@ -68,10 +68,13 @@ impl<P, T> RpcMethodSimple for ServerCommand<T, P>
           P: serde::Deserialize + 'static,
 {
     fn call(&self, param: Params) -> BoxFuture<Value, Error> {
-        match param {
-            Params::Map(ref map) => {
-                match from_value(Value::Object(map.clone())) {
-                    Ok(value) => {
+        let value = match param {
+            Params::Map(map) => Value::Object(map),
+            Params::Array(arr) => Value::Array(arr),
+            Params::None => Value::Null,
+        };
+        match from_value(value.clone()) {
+            Ok(value) => {
                         return self.0
                             .execute(value)
                             .then(|result| match result {
@@ -95,19 +98,16 @@ impl<P, T> RpcMethodSimple for ServerCommand<T, P>
                                 }
                             })
                             .boxed()
-                    }
-                    Err(_) => (),
-                }
             }
-            _ => (),
+            Err(_) => (),
         }
         let data = self.0.invalid_params();
         futures::failed(Error {
-                code: ErrorCode::InvalidParams,
-                message: format!("Invalid params: {:?}", param),
+            code: ErrorCode::InvalidParams,
+            message: format!("Invalid params: {:?}", value),
                 data: data.as_ref()
                     .map(|v| to_value(v).expect("error data could not be serialized")),
-            })
+        })
             .boxed()
     }
 }
@@ -139,11 +139,18 @@ pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
     }
 }
 
-pub fn write_message<W, T>(mut output: W, value: &T) -> io::Result<()>
+pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>
     where W: Write,
           T: serde::Serialize,
 {
     let response = to_string(&value).unwrap();
+    write_message_str(output, &response)
+}
+
+pub fn write_message_str<W>(mut output: W, response: &str) -> io::Result<()>
+    where W: Write,
+{
+    debug!("Respond: {}", response);
     try!(write!(output,
                 "Content-Length: {}\r\n\r\n{}",
                 response.len(),
@@ -171,10 +178,7 @@ pub fn main_loop<R, W, F, G>(mut input: R,
                 debug!("Handle: {}", json);
                 if let Some(response) = io.handle_request_sync(&json) {
                     let response = try!(map_response(response));
-                    try!(write!(output,
-                                "Content-Length: {}\r\n\r\n{}",
-                                response.len(),
-                                response));
+                    try!(write_message_str(&mut output, &response));
                     try!(output.flush());
                 }
             }
