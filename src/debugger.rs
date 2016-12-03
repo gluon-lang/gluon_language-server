@@ -4,6 +4,7 @@ extern crate futures;
 extern crate jsonrpc_core;
 extern crate serde;
 extern crate serde_json;
+extern crate log;
 
 extern crate gluon_language_server;
 extern crate gluon;
@@ -12,7 +13,7 @@ use std::error::Error as StdError;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::spawn;
 use std::collections::{HashMap, HashSet};
@@ -27,7 +28,6 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::vm::api::{OpaqueValue, Hole};
-use gluon::vm::Error as VmError;
 use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, filename_to_module};
 
@@ -47,25 +47,18 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
         self.debugger
             .lines_start_at_1
             .store(args.lines_start_at_1.unwrap_or(true), Ordering::Release);
-        let initialized = InitializedEvent {
+
+        self.debugger.send_event(InitializedEvent {
             body: None,
             event: "initialized".into(),
             seq: self.debugger.seq(),
             type_: "event".into(),
-        };
-        write_message(&*self.debugger.stream, &initialized)
-            .map_err(|err| {
-                ServerError {
-                    message: format!("Unable to write result to initialize: {}", err),
-                    data: None,
-                }
-            })
-            .map(|_| {
-                Some(Capabilities {
-                    supports_configuration_done_request: Some(true),
-                    ..Capabilities::default()
-                })
-            })
+        });
+
+        Ok(Some(Capabilities {
+                supports_configuration_done_request: Some(true),
+                ..Capabilities::default()
+            }))
             .into_future()
             .boxed()
     }
@@ -114,34 +107,35 @@ impl LaunchHandler {
             let stack_info = debug_info.stack_info(0).unwrap();
             if let Some(line) = stack_info.line() {
                 if debugger.should_break(stack_info.source_name(), line) {
-                    let mut continue_exection = debugger.continue_mutex.lock().unwrap();
-                    *continue_exection = false;
-                    write_message(&*debugger.stream,
-                                  &StoppedEvent {
-                                      body: StoppedEventBody {
-                                          all_threads_stopped: Some(true),
-                                          reason: "breakpoint".into(),
-                                          text: None,
-                                          thread_id: Some(1),
-                                      },
-                                      event: "stopped".to_string(),
-                                      seq: debugger.seq(),
-                                      type_: "event".to_string(),
-                                  }).map_err(|err| VmError::Message(format!("{}", err)))?;
-                    while !*continue_exection {
-                        continue_exection = debugger.continue_var.wait(continue_exection).unwrap();
-                    }
+                    debugger.send_event(StoppedEvent {
+                        body: StoppedEventBody {
+                            all_threads_stopped: Some(true),
+                            reason: "breakpoint".into(),
+                            text: None,
+                            thread_id: Some(1),
+                        },
+                        event: "stopped".to_string(),
+                        seq: debugger.seq(),
+                        type_: "event".to_string(),
+                    });
+
+                    debugger.continue_barrier.wait();
                 }
             }
             Ok(Async::Ready(()))
         })));
         self.thread.context().set_hook_mask(LINE_FLAG);
 
+        let debugger = self.debugger.clone();
         let thread = self.thread.clone();
         let seq = self.seq.clone();
         let stream = self.stream.clone();
         spawn(move || {
+            // Wait for the initialization to finish
+            debugger.continue_barrier.wait();
+
             let _result = Compiler::new()
+                .implicit_prelude(false)
                 .run_expr::<OpaqueValue<RootedThread, Hole>>(&thread, &module, &expr);
             let seq = seq.fetch_add(1, Ordering::SeqCst) as i64;
             let terminated = TerminatedEvent {
@@ -232,10 +226,13 @@ fn translate_response(debugger: &Debugger, message: String) -> Result<String, Bo
 pub struct Debugger {
     stream: Arc<TcpStream>,
     breakpoints: Mutex<HashMap<String, HashSet<Line>>>,
-    continue_mutex: Mutex<bool>,
-    continue_var: Condvar,
+    continue_barrier: Barrier,
     seq: Arc<AtomicUsize>,
     lines_start_at_1: AtomicBool,
+    // When continuing the response must be sent before actually conituing execution otherwise the `stopped`
+    // action could be received by visual code before the continue response which causes it to not recognize
+    // the stopped action
+    do_continue: AtomicBool,
 }
 
 impl Debugger {
@@ -252,6 +249,12 @@ impl Debugger {
     fn line(&self, line: i64) -> Line {
         Line::from((line as usize)
             .saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize))
+    }
+
+    fn send_event<T>(&self, value: T)
+        where T: serde::Serialize,
+    {
+        write_message(&*self.stream, &value).unwrap();
     }
 }
 
@@ -270,21 +273,26 @@ pub fn main() {
         let debugger = Arc::new(Debugger {
             stream: stream.clone(),
             breakpoints: Mutex::new(HashMap::new()),
-            continue_mutex: Mutex::new(false),
-            continue_var: Condvar::new(),
+            continue_barrier: Barrier::new(2),
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
+            do_continue: AtomicBool::new(false),
         });
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
                             ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
-        let configuration_done =
-            move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
-                Ok(()).into_future().boxed()
-            };
-        io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+        {
+            let debugger = debugger.clone();
+            let configuration_done =
+                move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
+                    // Notify the launched thread that it can start executing
+                    debugger.continue_barrier.wait();
+                    Ok(()).into_future().boxed()
+                };
+            io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+        }
 
         io.add_async_method("launch",
                             ServerCommand::new(LaunchHandler {
@@ -309,6 +317,7 @@ pub fn main() {
                     breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
                                           breakpoints);
                 }
+
                 Ok(SetBreakpointsResponseBody {
                         breakpoints: args.breakpoints
                             .into_iter()
@@ -391,20 +400,29 @@ pub fn main() {
 
         {
             let debugger = debugger.clone();
-            let cont = move |_: ContinueArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                *debugger.continue_mutex.lock().unwrap() = true;
-                debugger.continue_var.notify_one();
-                Ok(None).into_future().boxed()
-            };
+            let cont =
+                move |_: ContinueArguments| -> BoxFuture<ContinueResponseBody, ServerError<()>> {
+                    debugger.do_continue.store(true, Ordering::Release);
+                    Ok(ContinueResponseBody { all_threads_continued: Some(true) })
+                        .into_future()
+                        .boxed()
+                };
             io.add_async_method("continue", ServerCommand::new(cont));
         }
-
         spawn(move || {
             let read = BufReader::new(&*stream);
+            let post_request_action = || {
+                if debugger.do_continue.load(Ordering::Acquire) {
+                    debugger.do_continue.store(false, Ordering::Release);
+                    debugger.continue_barrier.wait();
+                }
+                Ok(())
+            };
             main_loop(read,
                       &*stream,
                       &io,
                       exit_token,
+                      post_request_action,
                       translate_request,
                       |body| translate_response(&debugger, body))
                 .unwrap()

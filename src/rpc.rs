@@ -159,15 +159,17 @@ pub fn write_message_str<W>(mut output: W, response: &str) -> io::Result<()>
     Ok(())
 }
 
-pub fn main_loop<R, W, F, G>(mut input: R,
-                             mut output: W,
-                             io: &IoHandler,
-                             exit_token: Arc<AtomicBool>,
-                             mut map_request: F,
-                             mut map_response: G)
-                             -> Result<(), Box<StdError>>
+pub fn main_loop<R, W, P, F, G>(mut input: R,
+                                mut output: W,
+                                io: &IoHandler,
+                                exit_token: Arc<AtomicBool>,
+                                mut post_request_action: P,
+                                mut map_request: F,
+                                mut map_response: G)
+                                -> Result<(), Box<StdError>>
     where R: BufRead,
           W: Write,
+          P: FnMut() -> Result<(), Box<StdError>>,
           F: FnMut(String) -> Result<String, Box<StdError>>,
           G: FnMut(String) -> Result<String, Box<StdError>>,
 {
@@ -181,6 +183,7 @@ pub fn main_loop<R, W, F, G>(mut input: R,
                     try!(write_message_str(&mut output, &response));
                     try!(output.flush());
                 }
+                post_request_action()?;
             }
             None => return Ok(()),
         }
