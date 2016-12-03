@@ -35,24 +35,25 @@ use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerErr
                                  write_message};
 
 pub struct InitializeHandler {
-    stream: Arc<TcpStream>,
-    seq: Arc<AtomicUsize>,
+    debugger: Arc<Debugger>,
 }
 
 impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
     type Output = Option<Capabilities>;
     type Error = ();
     fn execute(&self,
-               _args: InitializeRequestArguments)
+               args: InitializeRequestArguments)
                -> BoxFuture<Option<Capabilities>, ServerError<Self::Error>> {
-
+        self.debugger
+            .lines_start_at_1
+            .store(args.lines_start_at_1.unwrap_or(true), Ordering::Release);
         let initialized = InitializedEvent {
             body: None,
             event: "initialized".into(),
-            seq: self.seq.fetch_add(1, Ordering::SeqCst) as i64,
+            seq: self.debugger.seq(),
             type_: "event".into(),
         };
-        write_message(&*self.stream, &initialized)
+        write_message(&*self.debugger.stream, &initialized)
             .map_err(|err| {
                 ServerError {
                     message: format!("Unable to write result to initialize: {}", err),
@@ -234,6 +235,7 @@ pub struct Debugger {
     continue_mutex: Mutex<bool>,
     continue_var: Condvar,
     seq: Arc<AtomicUsize>,
+    lines_start_at_1: AtomicBool,
 }
 
 impl Debugger {
@@ -245,6 +247,11 @@ impl Debugger {
         let breakpoints = self.breakpoints.lock().expect("breakpoints mutex is poisoned");
         breakpoints.get(source_name)
             .map_or(false, |lines| lines.contains(&line))
+    }
+
+    fn line(&self, line: i64) -> Line {
+        Line::from((line as usize)
+            .saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize))
     }
 }
 
@@ -266,14 +273,12 @@ pub fn main() {
             continue_mutex: Mutex::new(false),
             continue_var: Condvar::new(),
             seq: seq.clone(),
+            lines_start_at_1: AtomicBool::new(true),
         });
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                            ServerCommand::new(InitializeHandler {
-                                stream: stream.clone(),
-                                seq: seq.clone(),
-                            }));
+                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
         let configuration_done =
             move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
@@ -296,13 +301,10 @@ pub fn main() {
             let debugger = debugger.clone();
             let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
                 let mut breakpoint_map = debugger.breakpoints.lock().unwrap();
-                let breakpoints =
-                    args.breakpoints
-                        .iter()
-                        .flat_map(|bs| {
-                            bs.iter().map(|breakpoint| Line::from(breakpoint.line as usize))
-                        })
-                        .collect();
+                let breakpoints = args.breakpoints
+                    .iter()
+                    .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
+                    .collect();
                 if let Some(path) = args.source.path {
                     breakpoint_map.insert(filename_to_module(path.trim_right_matches(".glu")),
                                           breakpoints);
