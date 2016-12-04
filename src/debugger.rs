@@ -28,8 +28,8 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::vm::api::{OpaqueValue, Hole};
-use gluon::vm::thread::{DebugInfo, RootedThread, ThreadInternal, LINE_FLAG};
-use gluon::{Compiler, filename_to_module};
+use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
+use gluon::{Compiler, Error as GluonError, filename_to_module};
 
 use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, main_loop,
                                  write_message};
@@ -66,9 +66,6 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
 
 pub struct LaunchHandler {
     debugger: Arc<Debugger>,
-    thread: RootedThread,
-    stream: Arc<TcpStream>,
-    seq: Arc<AtomicUsize>,
 }
 
 impl LanguageServerCommand<Value> for LaunchHandler {
@@ -103,11 +100,10 @@ impl LaunchHandler {
         };
 
         let debugger = self.debugger.clone();
-        self.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
+        self.debugger.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
             let stack_info = debug_info.stack_info(0).unwrap();
             if let Some(line) = stack_info.line() {
                 if debugger.should_break(stack_info.source_name(), line) {
-                    debugger.store_stack_trace(&debug_info);
 
                     debugger.send_event(StoppedEvent {
                         body: StoppedEventBody {
@@ -120,33 +116,59 @@ impl LaunchHandler {
                         seq: debugger.seq(),
                         type_: "event".to_string(),
                     });
-
-                    debugger.continue_barrier.wait();
+                    return Ok(Async::NotReady);
                 }
             }
             Ok(Async::Ready(()))
         })));
-        self.thread.context().set_hook_mask(LINE_FLAG);
+        self.debugger.thread.context().set_hook_mask(LINE_FLAG);
 
         let debugger = self.debugger.clone();
-        let thread = self.thread.clone();
-        let seq = self.seq.clone();
-        let stream = self.stream.clone();
         spawn(move || {
+            use gluon::vm::future::FutureValue;
             // Wait for the initialization to finish
             debugger.continue_barrier.wait();
 
-            let _result = Compiler::new()
+            let mut run_future = Compiler::new()
                 .implicit_prelude(false)
-                .run_expr::<OpaqueValue<RootedThread, Hole>>(&thread, &module, &expr);
-            let seq = seq.fetch_add(1, Ordering::SeqCst) as i64;
+                .run_expr_async::<OpaqueValue<RootedThread, Hole>>(&debugger.thread,
+                                                                   &module,
+                                                                   &expr)
+                .map(|_| ());
+            let mut result = match run_future {
+                FutureValue::Value(_) => Ok(Async::Ready(())),
+                _ => Ok(Async::NotReady),
+            };
+            loop {
+                match result {
+                    Ok(Async::NotReady) => {
+                        debugger.continue_barrier.wait();
+                    }
+                    Ok(Async::Ready(())) => break,
+                    Err(err) => {
+                        let output = OutputEvent {
+                            body: OutputEventBody {
+                                category: Some("telemetry".into()),
+                                output: format!("{}", err),
+                                data: None,
+                            },
+                            event: "output".into(),
+                            seq: debugger.seq(),
+                            type_: "event".into(),
+                        };
+                        write_message(&*debugger.stream, &output).unwrap();
+                        break;
+                    }
+                }
+                result = run_future.poll().map_err(GluonError::from);
+            }
             let terminated = TerminatedEvent {
                 body: None,
                 event: "terminated".into(),
-                seq: seq,
+                seq: debugger.seq(),
                 type_: "event".into(),
             };
-            write_message(&*stream, &terminated).unwrap();
+            write_message(&*debugger.stream, &terminated).unwrap();
         });
         Ok(None)
     }
@@ -231,6 +253,7 @@ struct SourceData {
 }
 
 struct Debugger {
+    thread: RootedThread,
     stream: Arc<TcpStream>,
     sources: Mutex<HashMap<String, SourceData>>,
     continue_barrier: Barrier,
@@ -240,8 +263,6 @@ struct Debugger {
     // action could be received by visual code before the continue response which causes it to not recognize
     // the stopped action
     do_continue: AtomicBool,
-
-    stack_trace: Mutex<Vec<StackFrame>>,
 }
 
 impl Debugger {
@@ -265,29 +286,6 @@ impl Debugger {
     {
         write_message(&*self.stream, &value).unwrap();
     }
-
-    // Stores the stackstack trace so it can be returned in later requests
-    fn store_stack_trace(&self, info: &DebugInfo) {
-        let mut vec = self.stack_trace.lock().unwrap();
-        vec.clear();
-        let mut i = 0;
-
-        let sources = self.sources.lock().unwrap();
-        while let Some(stack_info) = info.stack_info(i) {
-            vec.push(StackFrame {
-                column: 0,
-                end_column: None,
-                end_line: None,
-                id: 0,
-                line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
-                module_id: None,
-                name: "main".to_string(),
-                source: sources.get(stack_info.source_name())
-                    .and_then(|source| source.source.clone()),
-            });
-            i += 1;
-        }
-    }
 }
 
 pub fn main() {
@@ -300,16 +298,14 @@ pub fn main() {
         let exit_token = Arc::new(AtomicBool::new(false));
         let seq = Arc::new(AtomicUsize::new(1));
 
-        let thread = gluon::new_vm();
-
         let debugger = Arc::new(Debugger {
+            thread: gluon::new_vm(),
             stream: stream.clone(),
             sources: Mutex::new(HashMap::new()),
             continue_barrier: Barrier::new(2),
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
             do_continue: AtomicBool::new(false),
-            stack_trace: Mutex::new(Vec::new()),
         });
 
         let mut io = IoHandler::new();
@@ -328,12 +324,7 @@ pub fn main() {
         }
 
         io.add_async_method("launch",
-                            ServerCommand::new(LaunchHandler {
-                                debugger: debugger.clone(),
-                                thread: thread,
-                                stream: stream.clone(),
-                                seq: seq.clone(),
-                            }));
+                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -400,10 +391,37 @@ pub fn main() {
         {
             let debugger = debugger.clone();
             let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
-                let stack_frames = (*debugger.stack_trace.lock().unwrap()).clone();
+                let mut frames = Vec::new();
+                let mut i = 0;
+
+                let sources = debugger.sources.lock().unwrap();
+                let context = debugger.thread.context();
+                let info = context.debug_info();
+
+                while let Some(stack_info) = info.stack_info(i) {
+                    if info.stack_info(i + 1).is_none() {
+                        // Skip the top level scope
+                        break;
+                    }
+
+                    frames.push(StackFrame {
+                        column: 0,
+                        end_column: None,
+                        end_line: None,
+                        id: 0,
+                        line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
+                        module_id: None,
+                        name: stack_info.function_name().unwrap_or("<unknown>").to_string(),
+                        source: sources.get(stack_info.source_name())
+                            .and_then(|source| source.source.clone()),
+                    });
+
+                    i += 1;
+                }
+
                 Ok(StackTraceResponseBody {
-                        total_frames: Some(stack_frames.len() as i64),
-                        stack_frames: stack_frames,
+                        total_frames: Some(frames.len() as i64),
+                        stack_frames: frames,
                     })
                     .into_future()
                     .boxed()
@@ -411,28 +429,43 @@ pub fn main() {
             io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
         }
 
-        let scopes = move |_: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
-            Ok(ScopesResponseBody {
-                    scopes: vec![Scope {
-                                     column: None,
-                                     end_column: None,
-                                     end_line: None,
-                                     expensive: false,
-                                     indexed_variables: None,
-                                     line: None,
-                                     name: "Locals".to_string(),
-                                     named_variables: None,
-                                     source: Some(Source {
-                                         name: Some("main".to_string()),
-                                         ..Source::default()
-                                     }),
-                                     variables_reference: 0,
-                                 }],
-                })
-                .into_future()
-                .boxed()
-        };
-        io.add_async_method("scopes", ServerCommand::new(scopes));
+        {
+            let debugger = debugger.clone();
+            let scopes = move |_: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
+                let mut scopes = Vec::new();
+                let mut i = 0;
+
+                let sources = debugger.sources.lock().unwrap();
+                let context = debugger.thread.context();
+                let info = context.debug_info();
+
+                while let Some(stack_info) = info.stack_info(i) {
+                    if info.stack_info(i + 1).is_none() {
+                        // Skip the top level scope
+                        break;
+                    }
+                    scopes.push(Scope {
+                        column: None,
+                        end_column: None,
+                        end_line: None,
+                        expensive: false,
+                        indexed_variables: None,
+                        line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                        name: "Locals".to_string(),
+                        named_variables: Some(stack_info.locals().count() as i64),
+                        source: sources.get(stack_info.source_name())
+                            .and_then(|source| source.source.clone()),
+                        variables_reference: 1,
+                    });
+
+                    i += 1;
+                }
+                Ok(ScopesResponseBody { scopes: scopes })
+                    .into_future()
+                    .boxed()
+            };
+            io.add_async_method("scopes", ServerCommand::new(scopes));
+        }
 
         {
             let debugger = debugger.clone();
@@ -445,6 +478,34 @@ pub fn main() {
                 };
             io.add_async_method("continue", ServerCommand::new(cont));
         }
+
+        {
+            let debugger = debugger.clone();
+            let cont =
+                move |_: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
+                    let context = debugger.thread.context();
+                    let info = context.debug_info();
+                    let stack_info = info.stack_info(0).unwrap();
+
+                    let variables = stack_info.locals()
+                        .map(|local| {
+                            Variable {
+                                evaluate_name: None,
+                                indexed_variables: None,
+                                kind: None,
+                                name: String::from(local.name.declared_name()),
+                                named_variables: None,
+                                type_: None,
+                                value: "".to_string(),
+                                variables_reference: 0,
+                            }
+                        })
+                        .collect();
+                    Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
+                };
+            io.add_async_method("variables", ServerCommand::new(cont));
+        }
+
         spawn(move || {
             let read = BufReader::new(&*stream);
             let post_request_action = || {
