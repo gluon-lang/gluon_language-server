@@ -56,9 +56,9 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
         });
 
         Ok(Some(Capabilities {
-                supports_configuration_done_request: Some(true),
-                ..Capabilities::default()
-            }))
+            supports_configuration_done_request: Some(true),
+            ..Capabilities::default()
+        }))
             .into_future()
             .boxed()
     }
@@ -310,7 +310,7 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+                      ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
         {
             let debugger = debugger.clone();
@@ -324,7 +324,7 @@ pub fn main() {
         }
 
         io.add_async_method("launch",
-                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
+                      ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -351,23 +351,23 @@ pub fn main() {
                 }
 
                 Ok(SetBreakpointsResponseBody {
-                        breakpoints: args.breakpoints
-                            .into_iter()
-                            .flat_map(|bs| bs)
-                            .map(|breakpoint| {
-                                Breakpoint {
-                                    column: None,
-                                    end_column: None,
-                                    end_line: None,
-                                    id: None,
-                                    line: Some(breakpoint.line),
-                                    message: None,
-                                    source: None,
-                                    verified: true,
-                                }
-                            })
-                            .collect(),
-                    })
+                    breakpoints: args.breakpoints
+                        .into_iter()
+                        .flat_map(|bs| bs)
+                        .map(|breakpoint| {
+                            Breakpoint {
+                                column: None,
+                                end_column: None,
+                                end_line: None,
+                                id: None,
+                                line: Some(breakpoint.line),
+                                message: None,
+                                source: None,
+                                verified: true,
+                            }
+                        })
+                        .collect(),
+                })
                     .into_future()
                     .boxed()
             };
@@ -377,11 +377,11 @@ pub fn main() {
 
         let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
             Ok(ThreadsResponseBody {
-                    threads: vec![Thread {
-                                      id: 1,
-                                      name: "main".to_string(),
-                                  }],
-                })
+                threads: vec![Thread {
+                                  id: 1,
+                                  name: "main".to_string(),
+                              }],
+            })
                 .into_future()
                 .boxed()
         };
@@ -408,7 +408,7 @@ pub fn main() {
                         column: 0,
                         end_column: None,
                         end_line: None,
-                        id: 0,
+                        id: i as i64,
                         line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
                         module_id: None,
                         name: stack_info.function_name().unwrap_or("<unknown>").to_string(),
@@ -420,9 +420,9 @@ pub fn main() {
                 }
 
                 Ok(StackTraceResponseBody {
-                        total_frames: Some(frames.len() as i64),
-                        stack_frames: frames,
-                    })
+                    total_frames: Some(frames.len() as i64),
+                    stack_frames: frames,
+                })
                     .into_future()
                     .boxed()
             };
@@ -431,19 +431,14 @@ pub fn main() {
 
         {
             let debugger = debugger.clone();
-            let scopes = move |_: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
+            let scopes = move |args: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
                 let mut scopes = Vec::new();
-                let mut i = 0;
 
                 let sources = debugger.sources.lock().unwrap();
                 let context = debugger.thread.context();
                 let info = context.debug_info();
 
-                while let Some(stack_info) = info.stack_info(i) {
-                    if info.stack_info(i + 1).is_none() {
-                        // Skip the top level scope
-                        break;
-                    }
+                if let Some(stack_info) = info.stack_info(args.frame_id as usize) {
                     scopes.push(Scope {
                         column: None,
                         end_column: None,
@@ -455,10 +450,8 @@ pub fn main() {
                         named_variables: Some(stack_info.locals().count() as i64),
                         source: sources.get(stack_info.source_name())
                             .and_then(|source| source.source.clone()),
-                        variables_reference: 1,
+                        variables_reference: args.frame_id + 1,
                     });
-
-                    i += 1;
                 }
                 Ok(ScopesResponseBody { scopes: scopes })
                     .into_future()
@@ -482,25 +475,39 @@ pub fn main() {
         {
             let debugger = debugger.clone();
             let cont =
-                move |_: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
+                move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
                     let context = debugger.thread.context();
-                    let info = context.debug_info();
-                    let stack_info = info.stack_info(0).unwrap();
-
-                    let variables = stack_info.locals()
+                    let mut variables: Vec<_> = {
+                        let info = context.debug_info();
+                        info.stack_info((args.variables_reference - 1) as usize)
+                            .iter()
+                            .flat_map(|stack_info| {
+                                stack_info.locals()
                         .map(|local| {
-                            Variable {
-                                evaluate_name: None,
-                                indexed_variables: None,
-                                kind: None,
+                                        Variable {
+                                            evaluate_name: None,
+                                            indexed_variables: None,
+                                            kind: None,
                                 name: String::from(local.name.declared_name()),
-                                named_variables: None,
-                                type_: None,
-                                value: "".to_string(),
-                                variables_reference: 0,
-                            }
-                        })
-                        .collect();
+                                            named_variables: None,
+                                            type_: None,
+                                            value: "".to_string(),
+                                            variables_reference: 0,
+                                        }
+                                    })
+                            })
+                            .collect()
+                    };
+                    let frames = context.stack.get_frames();
+                    let frame_index = frames.len()
+                        .overflowing_sub(args.variables_reference as usize)
+                        .0;
+                    if let Some(frame) = frames.get(frame_index) {
+                        for (var, value) in variables.iter_mut()
+                            .zip(&context.stack.get_values()[frame.offset as usize..]) {
+                            var.value = format!("{:?}", value);
+                        }
+                    }
                     Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
                 };
             io.add_async_method("variables", ServerCommand::new(cont));
