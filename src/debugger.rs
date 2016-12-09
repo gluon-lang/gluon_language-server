@@ -28,7 +28,7 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::vm::api::{OpaqueValue, Hole};
-use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
+use gluon::vm::thread::{DebugInfo, RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
 
 use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, main_loop,
@@ -56,9 +56,9 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
         });
 
         Ok(Some(Capabilities {
-            supports_configuration_done_request: Some(true),
-            ..Capabilities::default()
-        }))
+                supports_configuration_done_request: Some(true),
+                ..Capabilities::default()
+            }))
             .into_future()
             .boxed()
     }
@@ -130,7 +130,6 @@ impl LaunchHandler {
             debugger.continue_barrier.wait();
 
             let mut run_future = Compiler::new()
-                .implicit_prelude(false)
                 .run_expr_async::<OpaqueValue<RootedThread, Hole>>(&debugger.thread,
                                                                    &module,
                                                                    &expr)
@@ -286,6 +285,60 @@ impl Debugger {
     {
         write_message(&*self.stream, &value).unwrap();
     }
+
+    fn variables(&self, info: &DebugInfo, reference: i64) -> Vec<Variable> {
+        let mk_variable = |name: &str| {
+            Variable {
+                evaluate_name: None,
+                indexed_variables: None,
+                kind: None,
+                name: String::from(name),
+                named_variables: None,
+                type_: None,
+                value: "".to_string(),
+                variables_reference: 0,
+            }
+        };
+        let variable_ref = translate_reference(reference);
+        let stack_info = info.stack_info(variable_ref.stack_index);
+        match variable_ref.typ {
+            VariableType::Local => {
+                stack_info.iter()
+                    .flat_map(|stack_info| {
+                        stack_info.locals().map(|local| mk_variable(local.name.declared_name()))
+                    })
+                    .collect()
+            }
+            VariableType::Upvar => {
+                stack_info.iter()
+                    .flat_map(|stack_info| {
+                        stack_info.upvars().iter().map(|upvar| mk_variable(&upvar.name))
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+enum VariableType {
+    Local,
+    Upvar,
+}
+
+struct VariableReference {
+    stack_index: usize,
+    typ: VariableType,
+}
+
+fn translate_reference(reference: i64) -> VariableReference {
+    VariableReference {
+        stack_index: ((reference - 1) / 2) as usize,
+        typ: if reference % 2 == 1 {
+            VariableType::Local
+        } else {
+            VariableType::Upvar
+        },
+    }
 }
 
 pub fn main() {
@@ -310,7 +363,7 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                      ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
         {
             let debugger = debugger.clone();
@@ -324,7 +377,7 @@ pub fn main() {
         }
 
         io.add_async_method("launch",
-                      ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
+                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -351,23 +404,23 @@ pub fn main() {
                 }
 
                 Ok(SetBreakpointsResponseBody {
-                    breakpoints: args.breakpoints
-                        .into_iter()
-                        .flat_map(|bs| bs)
-                        .map(|breakpoint| {
-                            Breakpoint {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                id: None,
-                                line: Some(breakpoint.line),
-                                message: None,
-                                source: None,
-                                verified: true,
-                            }
-                        })
-                        .collect(),
-                })
+                        breakpoints: args.breakpoints
+                            .into_iter()
+                            .flat_map(|bs| bs)
+                            .map(|breakpoint| {
+                                Breakpoint {
+                                    column: None,
+                                    end_column: None,
+                                    end_line: None,
+                                    id: None,
+                                    line: Some(breakpoint.line),
+                                    message: None,
+                                    source: None,
+                                    verified: true,
+                                }
+                            })
+                            .collect(),
+                    })
                     .into_future()
                     .boxed()
             };
@@ -377,11 +430,11 @@ pub fn main() {
 
         let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
             Ok(ThreadsResponseBody {
-                threads: vec![Thread {
-                                  id: 1,
-                                  name: "main".to_string(),
-                              }],
-            })
+                    threads: vec![Thread {
+                                      id: 1,
+                                      name: "main".to_string(),
+                                  }],
+                })
                 .into_future()
                 .boxed()
         };
@@ -420,9 +473,9 @@ pub fn main() {
                 }
 
                 Ok(StackTraceResponseBody {
-                    total_frames: Some(frames.len() as i64),
-                    stack_frames: frames,
-                })
+                        total_frames: Some(frames.len() as i64),
+                        stack_frames: frames,
+                    })
                     .into_future()
                     .boxed()
             };
@@ -450,7 +503,20 @@ pub fn main() {
                         named_variables: Some(stack_info.locals().count() as i64),
                         source: sources.get(stack_info.source_name())
                             .and_then(|source| source.source.clone()),
-                        variables_reference: args.frame_id + 1,
+                        variables_reference: (args.frame_id + 1) * 2 - 1,
+                    });
+                    scopes.push(Scope {
+                        column: None,
+                        end_column: None,
+                        end_line: None,
+                        expensive: false,
+                        indexed_variables: None,
+                        line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                        name: "Upvars".to_string(),
+                        named_variables: Some(stack_info.locals().count() as i64),
+                        source: sources.get(stack_info.source_name())
+                            .and_then(|source| source.source.clone()),
+                        variables_reference: (args.frame_id + 1) * 2,
                     });
                 }
                 Ok(ScopesResponseBody { scopes: scopes })
@@ -477,36 +543,23 @@ pub fn main() {
             let cont =
                 move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
                     let context = debugger.thread.context();
-                    let mut variables: Vec<_> = {
-                        let info = context.debug_info();
-                        info.stack_info((args.variables_reference - 1) as usize)
-                            .iter()
-                            .flat_map(|stack_info| {
-                                stack_info.locals()
-                        .map(|local| {
-                                        Variable {
-                                            evaluate_name: None,
-                                            indexed_variables: None,
-                                            kind: None,
-                                name: String::from(local.name.declared_name()),
-                                            named_variables: None,
-                                            type_: None,
-                                            value: "".to_string(),
-                                            variables_reference: 0,
-                                        }
-                                    })
-                            })
-                            .collect()
-                    };
+                    let info = context.debug_info();
+                    let mut variables: Vec<_> = debugger.variables(&info, args.variables_reference);
                     let frames = context.stack.get_frames();
+                    let variable = translate_reference(args.variables_reference);
                     let frame_index = frames.len()
-                        .overflowing_sub(args.variables_reference as usize)
+                        .overflowing_sub(variable.stack_index + 1)
                         .0;
-                    if let Some(frame) = frames.get(frame_index) {
-                        for (var, value) in variables.iter_mut()
-                            .zip(&context.stack.get_values()[frame.offset as usize..]) {
-                            var.value = format!("{:?}", value);
+                    match variable.typ {
+                        VariableType::Local => {
+                            if let Some(frame) = frames.get(frame_index) {
+                                for (var, value) in variables.iter_mut()
+                                    .zip(&context.stack.get_values()[frame.offset as usize..]) {
+                                    var.value = format!("{:?}", value);
+                                }
+                            }
                         }
+                        VariableType::Upvar => (),
                     }
                     Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
                 };
