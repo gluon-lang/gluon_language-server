@@ -11,4 +11,4 @@ let test b y =
 
 
 2
-test True ()
+test True 2
