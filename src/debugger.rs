@@ -9,6 +9,7 @@ extern crate log;
 extern crate gluon_language_server;
 extern crate gluon;
 
+use std::cell::RefCell;
 use std::error::Error as StdError;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -187,12 +188,15 @@ impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
 }
 
 // Translate debug server messages into jsonrpc-2.0
-fn translate_request(message: String) -> Result<String, Box<StdError>> {
+fn translate_request(message: String,
+                     current_command: &RefCell<String>)
+                     -> Result<String, Box<StdError>> {
     use serde_json::Value;
     let mut data: Value = try!(serde_json::from_str(&message));
     if data.is_object() {
         let data = data.as_object_mut().unwrap();
         let command = data.get("command").and_then(|c| c.as_str()).expect("command").to_string();
+        *current_command.borrow_mut() = command.clone();
         let seq = data.get("seq")
             .and_then(|c| {
                 c.as_str()
@@ -212,7 +216,10 @@ fn translate_request(message: String) -> Result<String, Box<StdError>> {
     Ok(message)
 }
 
-fn translate_response(debugger: &Debugger, message: String) -> Result<String, Box<StdError>> {
+fn translate_response(debugger: &Debugger,
+                      message: String,
+                      current_command: &str)
+                      -> Result<String, Box<StdError>> {
     use serde_json::Value;
     let mut data: Value = try!(serde_json::from_str(&message));
     if data.is_object() {
@@ -227,7 +234,8 @@ fn translate_response(debugger: &Debugger, message: String) -> Result<String, Bo
         let result = data.remove("result");
         let error = data.remove("error");
 
-        let mut map = vec![("success".to_string(), Value::Bool(result.is_some())),
+        let mut map = vec![("command".to_string(), Value::String(current_command.to_string())),
+                           ("success".to_string(), Value::Bool(result.is_some())),
                            ("request_seq".to_string(), seq),
                            ("seq".to_string(), Value::from(debugger.seq())),
                            ("type".to_owned(), Value::String("response".to_string()))];
@@ -345,7 +353,7 @@ pub fn main() {
     env_logger::init().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:4711").unwrap();
-    for stream in listener.incoming() {
+    if let Some(stream) = listener.incoming().next() {
         let stream = Arc::new(stream.unwrap());
 
         let exit_token = Arc::new(AtomicBool::new(false));
@@ -566,7 +574,7 @@ pub fn main() {
             io.add_async_method("variables", ServerCommand::new(cont));
         }
 
-        spawn(move || {
+        let handle = spawn(move || {
             let read = BufReader::new(&*stream);
             let post_request_action = || {
                 if debugger.do_continue.load(Ordering::Acquire) {
@@ -575,14 +583,19 @@ pub fn main() {
                 }
                 Ok(())
             };
+
+            // The response needs the command so we need extract it from the request and inject it in the response
+            let command = RefCell::new(String::new());
             main_loop(read,
                       &*stream,
                       &io,
                       exit_token,
                       post_request_action,
-                      translate_request,
-                      |body| translate_response(&debugger, body))
+                      |body| translate_request(body, &command),
+                      |body| translate_response(&debugger, body, &command.borrow()))
                 .unwrap()
         });
+
+        handle.join().unwrap();
     }
 }
