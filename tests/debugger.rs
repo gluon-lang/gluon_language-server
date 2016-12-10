@@ -15,7 +15,7 @@ mod support;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 
 use serde_json::{Value, from_str};
@@ -81,11 +81,9 @@ fn run_debugger<F>(f: F)
         }
     };
 
-    let value = read_message(&mut read).unwrap().unwrap();
-    let _: InitializedEvent = from_str(&value).unwrap();
+    let _: InitializedEvent = expect_message(&mut read);
 
-    let value = read_message(&mut read).unwrap().unwrap();
-    let initialize_response: InitializeResponse = from_str(&value).unwrap();
+    let initialize_response: InitializeResponse = expect_message(&mut read);
     assert!(initialize_response.success);
 
     f(&mut seq, &stream, &mut read);
@@ -101,22 +99,35 @@ fn run_debugger<F>(f: F)
     child.wait().unwrap();
 }
 
-#[test]
-fn launch() {
-    run_debugger(|seq, stream, mut read| {
-        request! {
-            stream,
-            Request,
-            "launch",
-            *seq,
-            Some(Value::Object(vec![("program".to_string(),
-                                     Value::String("tests/main.glu".to_string()))]
-                                    .into_iter()
-                                    .collect()))
-        };
+fn launch<W>(stream: W, seq: &mut i64, program: &str)
+    where W: Write,
+{
+    request! {
+        stream,
+        Request,
+        "launch",
+        *seq,
+        Some(Value::Object(vec![("program".to_string(),
+                                    Value::String(program.to_string()))]
+                                .into_iter()
+                                .collect()))
+    };
+}
 
-        let value = read_message(&mut read).unwrap().unwrap();
-        let launch_response: LaunchResponse = from_str(&value).unwrap();
+fn expect_message<M, R>(read: R) -> M
+    where M: serde::Deserialize,
+          R: BufRead,
+{
+    let value = read_message(read).unwrap().unwrap();
+    from_str(&value).unwrap()
+}
+
+#[test]
+fn launch_program() {
+    run_debugger(|seq, stream, mut read| {
+        launch(stream, seq, "tests/main.glu");
+
+        let launch_response: LaunchResponse = expect_message(&mut read);
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
@@ -127,30 +138,18 @@ fn launch() {
             *seq,
             None
         };
-        let value = read_message(&mut read).unwrap().unwrap();
-        let _: ConfigurationDoneResponse = from_str(&value).unwrap();
+        let _: ConfigurationDoneResponse = expect_message(&mut read);
 
-        let value = read_message(&mut read).unwrap().unwrap();
-        let _: TerminatedEvent = from_str(&value).unwrap();
+        let _: TerminatedEvent = expect_message(&mut read);
     });
 }
 
 #[test]
 fn infinite_loops_are_terminated() {
     run_debugger(|seq, stream, mut read| {
-        request! {
-            stream,
-            Request,
-            "launch",
-            *seq,
-            Some(Value::Object(vec![("program".to_string(),
-                                     Value::String("tests/infinite_loop.glu".to_string()))]
-                                    .into_iter()
-                                    .collect()))
-        };
+        launch(stream, seq, "tests/infinite_loop.glu");
 
-        let value = read_message(&mut read).unwrap().unwrap();
-        let launch_response: LaunchResponse = from_str(&value).unwrap();
+        let launch_response: LaunchResponse = expect_message(&mut read);
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
@@ -161,7 +160,6 @@ fn infinite_loops_are_terminated() {
             *seq,
             None
         };
-        let value = read_message(&mut read).unwrap().unwrap();
-        let _: ConfigurationDoneResponse = from_str(&value).unwrap();
+        let _: ConfigurationDoneResponse = expect_message(&mut read);
     });
 }
