@@ -17,6 +17,8 @@ name = "gluon_language-server"
 path = "src/main.rs"
 
 [dependencies]
+clap = "2.19.0"
+
 log = "0.3.6"
 env_logger = "0.3.3"
 

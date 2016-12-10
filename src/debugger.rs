@@ -1,3 +1,4 @@
+extern crate clap;
 extern crate debugserver_types;
 extern crate env_logger;
 extern crate futures;
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::spawn;
 use std::collections::{HashMap, HashSet};
 
+use clap::{App, Arg};
 use futures::{Async, BoxFuture, Future, IntoFuture};
 
 use jsonrpc_core::IoHandler;
@@ -57,9 +59,9 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
         });
 
         Ok(Some(Capabilities {
-                supports_configuration_done_request: Some(true),
-                ..Capabilities::default()
-            }))
+            supports_configuration_done_request: Some(true),
+            ..Capabilities::default()
+        }))
             .into_future()
             .boxed()
     }
@@ -352,7 +354,14 @@ fn translate_reference(reference: i64) -> VariableReference {
 pub fn main() {
     env_logger::init().unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:4711").unwrap();
+    let matches = App::new("debugger")
+        .version(env!("CARGO_PKG_VERSION"))
+        .arg(Arg::with_name("port").value_name("PORT").takes_value(true))
+        .get_matches();
+
+    let port = matches.value_of("port").unwrap_or("4711");
+
+    let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)[..]).unwrap();
     if let Some(stream) = listener.incoming().next() {
         let stream = Arc::new(stream.unwrap());
 
@@ -371,7 +380,7 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+                      ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
         {
             let debugger = debugger.clone();
@@ -385,7 +394,7 @@ pub fn main() {
         }
 
         io.add_async_method("launch",
-                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
+                      ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -412,23 +421,23 @@ pub fn main() {
                 }
 
                 Ok(SetBreakpointsResponseBody {
-                        breakpoints: args.breakpoints
-                            .into_iter()
-                            .flat_map(|bs| bs)
-                            .map(|breakpoint| {
-                                Breakpoint {
-                                    column: None,
-                                    end_column: None,
-                                    end_line: None,
-                                    id: None,
-                                    line: Some(breakpoint.line),
-                                    message: None,
-                                    source: None,
-                                    verified: true,
-                                }
-                            })
-                            .collect(),
-                    })
+                    breakpoints: args.breakpoints
+                        .into_iter()
+                        .flat_map(|bs| bs)
+                        .map(|breakpoint| {
+                            Breakpoint {
+                                column: None,
+                                end_column: None,
+                                end_line: None,
+                                id: None,
+                                line: Some(breakpoint.line),
+                                message: None,
+                                source: None,
+                                verified: true,
+                            }
+                        })
+                        .collect(),
+                })
                     .into_future()
                     .boxed()
             };
@@ -438,11 +447,11 @@ pub fn main() {
 
         let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
             Ok(ThreadsResponseBody {
-                    threads: vec![Thread {
-                                      id: 1,
-                                      name: "main".to_string(),
-                                  }],
-                })
+                threads: vec![Thread {
+                                  id: 1,
+                                  name: "main".to_string(),
+                              }],
+            })
                 .into_future()
                 .boxed()
         };
@@ -481,9 +490,9 @@ pub fn main() {
                 }
 
                 Ok(StackTraceResponseBody {
-                        total_frames: Some(frames.len() as i64),
-                        stack_frames: frames,
-                    })
+                    total_frames: Some(frames.len() as i64),
+                    stack_frames: frames,
+                })
                     .into_future()
                     .boxed()
             };
