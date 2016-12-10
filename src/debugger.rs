@@ -30,8 +30,10 @@ use serde_json::Value;
 use debugserver_types::*;
 
 use gluon::base::pos::Line;
+use gluon::base::types::ArcType;
+use gluon::vm::internal::ValuePrinter;
 use gluon::vm::api::{OpaqueValue, Hole};
-use gluon::vm::thread::{DebugInfo, RootedThread, ThreadInternal, LINE_FLAG};
+use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
 
 use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, main_loop,
@@ -59,9 +61,9 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
         });
 
         Ok(Some(Capabilities {
-            supports_configuration_done_request: Some(true),
-            ..Capabilities::default()
-        }))
+                supports_configuration_done_request: Some(true),
+                ..Capabilities::default()
+            }))
             .into_future()
             .boxed()
     }
@@ -296,33 +298,52 @@ impl Debugger {
         write_message(&*self.stream, &value).unwrap();
     }
 
-    fn variables(&self, info: &DebugInfo, reference: i64) -> Vec<Variable> {
-        let mk_variable = |name: &str| {
+    fn variables(&self, reference: i64) -> Vec<Variable> {
+        let context = self.thread.context();
+        let info = context.debug_info();
+        let variable_ref = translate_reference(reference);
+        let stack_info = info.stack_info(variable_ref.stack_index);
+        let frames = context.stack.get_frames();
+        let variable = translate_reference(reference);
+        let frame_index = frames.len()
+            .overflowing_sub(variable.stack_index + 1)
+            .0;
+        let frame = frames.get(frame_index).expect("frame");
+        let mk_variable = |name: &str, typ: &ArcType, value| {
             Variable {
                 evaluate_name: None,
                 indexed_variables: None,
                 kind: None,
                 name: String::from(name),
                 named_variables: None,
-                type_: None,
-                value: "".to_string(),
+                type_: Some(typ.to_string()),
+                value: format!("{}",
+                               ValuePrinter::new(&*self.thread.get_env(), typ, value)
+                                   .max_level(2)
+                                   .width(10000000)),
                 variables_reference: 0,
             }
         };
-        let variable_ref = translate_reference(reference);
-        let stack_info = info.stack_info(variable_ref.stack_index);
         match variable_ref.typ {
             VariableType::Local => {
+                let values = &context.stack.get_values()[frame.offset as usize..];
                 stack_info.iter()
                     .flat_map(|stack_info| {
-                        stack_info.locals().map(|local| mk_variable(local.name.declared_name()))
+                        stack_info.locals()
+                            .zip(values)
+                            .map(|(local, value)| {
+                                mk_variable(local.name.declared_name(), &local.typ, *value)
+                            })
                     })
                     .collect()
             }
             VariableType::Upvar => {
                 stack_info.iter()
                     .flat_map(|stack_info| {
-                        stack_info.upvars().iter().map(|upvar| mk_variable(&upvar.name))
+                        stack_info.upvars()
+                            .iter()
+                            .zip(frame.upvars())
+                            .map(|(info, value)| mk_variable(&info.name, &info.typ, *value))
                     })
                     .collect()
             }
@@ -380,7 +401,7 @@ pub fn main() {
 
         let mut io = IoHandler::new();
         io.add_async_method("initialize",
-                      ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
 
         {
             let debugger = debugger.clone();
@@ -394,7 +415,7 @@ pub fn main() {
         }
 
         io.add_async_method("launch",
-                      ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
+                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
         io.add_async_method("disconnect",
                             ServerCommand::new(DisconnectHandler {
                                 exit_token: exit_token.clone(),
@@ -421,23 +442,23 @@ pub fn main() {
                 }
 
                 Ok(SetBreakpointsResponseBody {
-                    breakpoints: args.breakpoints
-                        .into_iter()
-                        .flat_map(|bs| bs)
-                        .map(|breakpoint| {
-                            Breakpoint {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                id: None,
-                                line: Some(breakpoint.line),
-                                message: None,
-                                source: None,
-                                verified: true,
-                            }
-                        })
-                        .collect(),
-                })
+                        breakpoints: args.breakpoints
+                            .into_iter()
+                            .flat_map(|bs| bs)
+                            .map(|breakpoint| {
+                                Breakpoint {
+                                    column: None,
+                                    end_column: None,
+                                    end_line: None,
+                                    id: None,
+                                    line: Some(breakpoint.line),
+                                    message: None,
+                                    source: None,
+                                    verified: true,
+                                }
+                            })
+                            .collect(),
+                    })
                     .into_future()
                     .boxed()
             };
@@ -447,11 +468,11 @@ pub fn main() {
 
         let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
             Ok(ThreadsResponseBody {
-                threads: vec![Thread {
-                                  id: 1,
-                                  name: "main".to_string(),
-                              }],
-            })
+                    threads: vec![Thread {
+                                      id: 1,
+                                      name: "main".to_string(),
+                                  }],
+                })
                 .into_future()
                 .boxed()
         };
@@ -490,9 +511,9 @@ pub fn main() {
                 }
 
                 Ok(StackTraceResponseBody {
-                    total_frames: Some(frames.len() as i64),
-                    stack_frames: frames,
-                })
+                        total_frames: Some(frames.len() as i64),
+                        stack_frames: frames,
+                    })
                     .into_future()
                     .boxed()
             };
@@ -559,25 +580,7 @@ pub fn main() {
             let debugger = debugger.clone();
             let cont =
                 move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
-                    let context = debugger.thread.context();
-                    let info = context.debug_info();
-                    let mut variables: Vec<_> = debugger.variables(&info, args.variables_reference);
-                    let frames = context.stack.get_frames();
-                    let variable = translate_reference(args.variables_reference);
-                    let frame_index = frames.len()
-                        .overflowing_sub(variable.stack_index + 1)
-                        .0;
-                    match variable.typ {
-                        VariableType::Local => {
-                            if let Some(frame) = frames.get(frame_index) {
-                                for (var, value) in variables.iter_mut()
-                                    .zip(&context.stack.get_values()[frame.offset as usize..]) {
-                                    var.value = format!("{:?}", value);
-                                }
-                            }
-                        }
-                        VariableType::Upvar => (),
-                    }
+                    let variables: Vec<_> = debugger.variables(args.variables_reference);
                     Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
                 };
             io.add_async_method("variables", ServerCommand::new(cont));

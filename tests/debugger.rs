@@ -5,6 +5,7 @@ extern crate languageserver_types;
 extern crate jsonrpc_core;
 extern crate serde_json;
 extern crate serde;
+extern crate url;
 
 #[macro_use]
 extern crate lazy_static;
@@ -48,9 +49,8 @@ fn run_debugger<F>(f: F)
         *port += 1;
         *port
     };
-    let path = PathBuf::from(::std::env::var("OUT_DIR").unwrap());
+    let path = PathBuf::from(::std::env::args().next().unwrap());
     let debugger = path.parent()
-        .and_then(|path| path.parent())
         .and_then(|path| path.parent())
         .expect("debugger executable")
         .join("debugger");
