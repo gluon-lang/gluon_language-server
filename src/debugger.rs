@@ -30,8 +30,9 @@ use serde_json::Value;
 use debugserver_types::*;
 
 use gluon::base::pos::Line;
-use gluon::base::types::ArcType;
-use gluon::vm::internal::ValuePrinter;
+use gluon::base::resolve::remove_aliases_cow;
+use gluon::base::types::{ArcType, Type, arg_iter};
+use gluon::vm::internal::{Value as VmValue, ValuePrinter};
 use gluon::vm::api::{OpaqueValue, Hole};
 use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
@@ -121,6 +122,7 @@ impl LaunchHandler {
                         seq: debugger.seq(),
                         type_: "event".to_string(),
                     });
+                    debugger.variables.lock().unwrap().clear();
                     return Ok(Async::NotReady);
                 }
             }
@@ -263,10 +265,51 @@ struct SourceData {
     breakpoints: HashSet<Line>,
 }
 
+struct Variables {
+    map: HashMap<i64, (VmValue, ArcType)>,
+    reference: i64,
+}
+
+impl Variables {
+    fn clear(&mut self) {
+        self.map.clear();
+        self.reference = i32::max_value() as i64;
+    }
+
+    fn insert(&mut self, value: VmValue, typ: &ArcType) -> i64 {
+        match value {
+            VmValue::Array(_) |
+            VmValue::Data(_) |
+            VmValue::Closure(_) => {
+                self.reference -= 1;
+                self.map.insert(self.reference, (value, typ.clone()));
+                self.reference
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn indexed_variables(value: VmValue) -> Option<i64> {
+    match value {
+        VmValue::Array(ref array) => Some(array.len() as i64),
+        _ => None,
+    }
+}
+
+fn named_variables(value: VmValue) -> Option<i64> {
+    match value {
+        VmValue::Data(ref data) => Some(data.fields.len() as i64),
+        VmValue::Closure(ref closure) => Some(closure.upvars.len() as i64),
+        _ => None,
+    }
+}
+
 struct Debugger {
     thread: RootedThread,
     stream: Arc<TcpStream>,
     sources: Mutex<HashMap<String, SourceData>>,
+    variables: Mutex<Variables>,
     continue_barrier: Barrier,
     seq: Arc<AtomicUsize>,
     lines_start_at_1: AtomicBool,
@@ -303,49 +346,113 @@ impl Debugger {
         let info = context.debug_info();
         let variable_ref = translate_reference(reference);
         let stack_info = info.stack_info(variable_ref.stack_index);
-        let frames = context.stack.get_frames();
-        let variable = translate_reference(reference);
-        let frame_index = frames.len()
-            .overflowing_sub(variable.stack_index + 1)
-            .0;
-        let frame = frames.get(frame_index).expect("frame");
-        let mk_variable = |name: &str, typ: &ArcType, value| {
+
+        let mut variables = self.variables.lock().unwrap();
+        let variable = variables.map.get(&reference).cloned();
+
+        let mut mk_variable = |name: &str, typ: &ArcType, value| {
             Variable {
                 evaluate_name: None,
-                indexed_variables: None,
+                indexed_variables: indexed_variables(value),
                 kind: None,
                 name: String::from(name),
-                named_variables: None,
+                named_variables: named_variables(value),
                 type_: Some(typ.to_string()),
                 value: format!("{}",
                                ValuePrinter::new(&*self.thread.get_env(), typ, value)
                                    .max_level(2)
                                    .width(10000000)),
-                variables_reference: 0,
+                variables_reference: variables.insert(value, typ),
             }
         };
-        match variable_ref.typ {
-            VariableType::Local => {
-                let values = &context.stack.get_values()[frame.offset as usize..];
-                stack_info.iter()
-                    .flat_map(|stack_info| {
+        match stack_info {
+            Some(stack_info) => {
+                let frames = context.stack.get_frames();
+                let frame_index = frames.len()
+                    .overflowing_sub(variable_ref.stack_index + 1)
+                    .0;
+                let frame = frames.get(frame_index).expect("frame");
+                match variable_ref.typ {
+                    VariableType::Local => {
+                        let values = &context.stack.get_values()[frame.offset as usize..];
                         stack_info.locals()
                             .zip(values)
                             .map(|(local, value)| {
                                 mk_variable(local.name.declared_name(), &local.typ, *value)
                             })
-                    })
-                    .collect()
-            }
-            VariableType::Upvar => {
-                stack_info.iter()
-                    .flat_map(|stack_info| {
+                            .collect()
+                    }
+                    VariableType::Upvar => {
                         stack_info.upvars()
                             .iter()
                             .zip(frame.upvars())
                             .map(|(info, value)| mk_variable(&info.name, &info.typ, *value))
-                    })
-                    .collect()
+                            .collect()
+                    }
+                }
+            }
+            None => {
+                match variable {
+                    Some((value, typ)) => {
+                        let typ = remove_aliases_cow(&*self.thread.get_env(), &typ);
+                        match value {
+                            VmValue::Data(ref data) => {
+                                match **typ {
+                                    Type::Record(ref row) => {
+                                        data.fields
+                                            .iter()
+                                            .zip(row.row_iter())
+                                            .map(|(field, type_field)| {
+                                                mk_variable(type_field.name.declared_name(),
+                                                            &type_field.typ,
+                                                            *field)
+                                            })
+                                            .collect()
+                                    }
+                                    Type::Variant(ref row) => {
+                                        let type_field = row.row_iter()
+                                            .nth(data.tag as usize)
+                                            .expect("Variant tag is out of bounds");
+                                        data.fields
+                                            .into_iter()
+                                            .zip(arg_iter(&type_field.typ))
+                                            .map(|(field, typ)| mk_variable("", typ, *field))
+                                            .collect()
+                                    }
+                                    _ => vec![],
+                                }
+                            }
+                            VmValue::Closure(ref closure) => {
+                                closure.upvars
+                                    .iter()
+                                    .zip(&closure.function.debug_info.upvars)
+                                    .map(|(value, ref upvar_info)| {
+                                        mk_variable(&upvar_info.name, &upvar_info.typ, *value)
+                                    })
+                                    .collect()
+                            }
+                            VmValue::Array(ref array) => {
+                                let element_type = match **typ {
+                                    // Unpack the array type
+                                    Type::App(_, ref args) => args[0].clone(),
+                                    _ => Type::hole(),
+                                };
+                                let mut index = String::new();
+                                array.iter()
+                                    .enumerate()
+                                    .map(|(i, value)| {
+                                        use std::fmt::Write;
+                                        index.clear();
+                                        write!(index, "[{}]", i).unwrap();
+                                        mk_variable(&index, &element_type, value)
+                                    })
+                                    .collect()
+                            }
+                            _ => vec![],
+                        }
+                    }
+                    None => vec![],
+                }
             }
         }
     }
@@ -393,6 +500,10 @@ pub fn main() {
             thread: gluon::new_vm(),
             stream: stream.clone(),
             sources: Mutex::new(HashMap::new()),
+            variables: Mutex::new(Variables {
+                map: HashMap::new(),
+                reference: i32::max_value() as i64,
+            }),
             continue_barrier: Barrier::new(2),
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
@@ -580,7 +691,7 @@ pub fn main() {
             let debugger = debugger.clone();
             let cont =
                 move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
-                    let variables: Vec<_> = debugger.variables(args.variables_reference);
+                    let variables = debugger.variables(args.variables_reference);
                     Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
                 };
             io.add_async_method("variables", ServerCommand::new(cont));
