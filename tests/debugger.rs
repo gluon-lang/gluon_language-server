@@ -163,3 +163,43 @@ fn infinite_loops_are_terminated() {
         let _: ConfigurationDoneResponse = expect_message(&mut read);
     });
 }
+
+#[test]
+fn pause() {
+    run_debugger(|seq, stream, mut read| {
+        launch(stream, seq, "tests/infinite_loop.glu");
+
+        let launch_response: LaunchResponse = expect_message(&mut read);
+        assert_eq!(launch_response.request_seq, *seq);
+        assert!(launch_response.success);
+
+        request! {
+            stream,
+            ConfigurationDoneRequest,
+            "configurationDone",
+            *seq,
+            None
+        };
+        let _: ConfigurationDoneResponse = expect_message(&mut read);
+
+        request! {
+            stream,
+            PauseRequest,
+            "pause",
+            *seq,
+            PauseArguments { thread_id: 0, }
+        };
+        let _: PauseResponse = expect_message(&mut read);
+
+        let _: StoppedEvent = expect_message(&mut read);
+
+        request! {
+            stream,
+            ContinueRequest,
+            "continue",
+            *seq,
+            ContinueArguments { thread_id: 0, }
+        };
+        let _: ContinueResponse = expect_message(&mut read);
+    });
+}

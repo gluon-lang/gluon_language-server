@@ -33,7 +33,6 @@ use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{ArcType, Type, arg_iter};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
-use gluon::vm::api::{OpaqueValue, Hole};
 use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
 
@@ -107,39 +106,47 @@ impl LaunchHandler {
 
         let debugger = self.debugger.clone();
         self.debugger.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
-            let stack_info = debug_info.stack_info(0).unwrap();
-            if let Some(line) = stack_info.line() {
-                if debugger.should_break(stack_info.source_name(), line) {
-
-                    debugger.send_event(StoppedEvent {
-                        body: StoppedEventBody {
-                            all_threads_stopped: Some(true),
-                            reason: "breakpoint".into(),
-                            text: None,
-                            thread_id: Some(1),
-                        },
-                        event: "stopped".to_string(),
-                        seq: debugger.seq(),
-                        type_: "event".to_string(),
-                    });
-                    debugger.variables.lock().unwrap().clear();
-                    return Ok(Async::NotReady);
+            let reason = if debugger.pause.swap(false, Ordering::Relaxed) {
+                "pause"
+            } else {
+                let stack_info = debug_info.stack_info(0).unwrap();
+                match stack_info.line() {
+                    Some(line) if debugger.should_break(stack_info.source_name(), line) => {
+                        "breakpoint"
+                    }
+                    _ => return Ok(Async::Ready(())),
                 }
-            }
-            Ok(Async::Ready(()))
+            };
+            debugger.send_event(StoppedEvent {
+                body: StoppedEventBody {
+                    all_threads_stopped: Some(true),
+                    reason: reason.into(),
+                    text: None,
+                    thread_id: Some(1),
+                },
+                event: "stopped".to_string(),
+                seq: debugger.seq(),
+                type_: "event".to_string(),
+            });
+            debugger.variables.lock().unwrap().clear();
+            Ok(Async::NotReady)
         })));
-        self.debugger.thread.context().set_hook_mask(LINE_FLAG);
 
         let debugger = self.debugger.clone();
         spawn(move || {
+            use gluon::compiler_pipeline::*;
             use gluon::vm::future::FutureValue;
             // Wait for the initialization to finish
             debugger.continue_barrier.wait();
 
-            let mut run_future = Compiler::new()
-                .run_expr_async::<OpaqueValue<RootedThread, Hole>>(&debugger.thread,
-                                                                   &module,
-                                                                   &expr)
+            let mut compiler = Compiler::new();
+            let mut run_future = FutureValue::sync(expr.compile(&mut compiler, &debugger.thread, &module, &expr, None))
+                .and_then(|compile_value| {
+                    // Since we cannot yield while importing modules we don't enable pausing or
+                    // breakpoints until we start executing the main module
+                    debugger.thread.context().set_hook_mask(LINE_FLAG);
+                    compile_value.run_expr(&mut compiler, &debugger.thread, &module, &expr, ())
+                })
                 .map(|_| ());
             let mut result = match run_future {
                 FutureValue::Value(_) => Ok(Async::Ready(())),
@@ -317,6 +324,7 @@ struct Debugger {
     // action could be received by visual code before the continue response which causes it to not recognize
     // the stopped action
     do_continue: AtomicBool,
+    pause: AtomicBool,
 }
 
 impl Debugger {
@@ -508,6 +516,7 @@ pub fn main() {
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
             do_continue: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
         });
 
         let mut io = IoHandler::new();
@@ -685,6 +694,15 @@ pub fn main() {
                         .boxed()
                 };
             io.add_async_method("continue", ServerCommand::new(cont));
+        }
+
+        {
+            let debugger = debugger.clone();
+            let cont = move |_: PauseArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+                debugger.pause.store(true, Ordering::Release);
+                Ok(None).into_future().boxed()
+            };
+            io.add_async_method("pause", ServerCommand::new(cont));
         }
 
         {
