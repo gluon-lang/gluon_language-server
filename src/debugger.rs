@@ -13,6 +13,7 @@ extern crate gluon;
 use std::cell::RefCell;
 use std::error::Error as StdError;
 use std::fs::File;
+use std::collections::hash_map::Entry;
 use std::io::{BufReader, Read};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Barrier, Mutex};
@@ -605,7 +606,7 @@ pub fn main() {
                 let mut frames = Vec::new();
                 let mut i = 0;
 
-                let sources = debugger.sources.lock().unwrap();
+                let mut sources = debugger.sources.lock().unwrap();
                 let context = debugger.thread.context();
                 let info = context.debug_info();
 
@@ -615,6 +616,24 @@ pub fn main() {
                         break;
                     }
 
+                    let source = match sources.entry(stack_info.source_name().to_string()) {
+                        Entry::Occupied(entry) => entry.get().source.clone(),
+                        Entry::Vacant(entry) => {
+                            // If the source is not in the map, create it from the debug info
+                            let name = entry.key().to_string();
+                            let path = format!("{}.glu", name.replace(".", "/"));
+                            entry.insert(SourceData {
+                                    source: Some(Source {
+                                        path: Some(path),
+                                        name: Some(name),
+                                        ..Source::default()
+                                    }),
+                                    breakpoints: HashSet::new(),
+                                })
+                                .source
+                                .clone()
+                        }
+                    };
                     frames.push(StackFrame {
                         column: 0,
                         end_column: None,
@@ -623,8 +642,7 @@ pub fn main() {
                         line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
                         module_id: None,
                         name: stack_info.function_name().unwrap_or("<unknown>").to_string(),
-                        source: sources.get(stack_info.source_name())
-                            .and_then(|source| source.source.clone()),
+                        source: source,
                     });
 
                     i += 1;
