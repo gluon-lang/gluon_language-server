@@ -12,3 +12,5 @@ let test b y =
 
 2
 test True [1, 2, 3]
+3
+4
