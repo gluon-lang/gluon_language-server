@@ -11,6 +11,7 @@ extern crate gluon_language_server;
 extern crate gluon;
 
 use std::cell::RefCell;
+use std::cmp;
 use std::error::Error as StdError;
 use std::fs::File;
 use std::collections::hash_map::Entry;
@@ -107,15 +108,41 @@ impl LaunchHandler {
 
         let debugger = self.debugger.clone();
         self.debugger.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
-            let reason = if debugger.pause.swap(false, Ordering::Relaxed) {
-                "pause"
-            } else {
-                let stack_info = debug_info.stack_info(0).unwrap();
-                match stack_info.line() {
-                    Some(line) if debugger.should_break(stack_info.source_name(), line) => {
-                        "breakpoint"
+            let pause = debugger.pause.swap(NONE, Ordering::Acquire);
+            let reason = match pause {
+                PAUSE => "pause",
+                STEP_IN => "step",
+                STEP_OUT => {
+                    let step_data = debugger.step_data.lock().unwrap();
+                    if debug_info.stack_info_len() >= step_data.stack_frames {
+                        // Continue executing if we are in a deeper function call or on the same level
+                        debugger.pause.store(STEP_OUT, Ordering::Release);
+                        return Ok(Async::Ready(()));
                     }
+                    "step"
+                }
+                NEXT => {
+                    let step_data = debugger.step_data.lock().unwrap();
+                    let stack_info = debug_info.stack_info(0).unwrap();
+                    let different_function =
+                        step_data.function_name != stack_info.function_name().unwrap();
+                    let cmp = debug_info.stack_info_len().cmp(&step_data.stack_frames);
+                    if cmp == cmp::Ordering::Greater || (cmp == cmp::Ordering::Equal && different_function) {
+                        // Continue executing if we are in a deeper function call or on the same level
+                        // but in a different function (tail call)
+                        debugger.pause.store(NEXT, Ordering::Release);
+                        return Ok(Async::Ready(()));
+                    }
+                    "step"
+                }
+                _ => {
+                    let stack_info = debug_info.stack_info(0).unwrap();
+                    match stack_info.line() {
+                        Some(line) if debugger.should_break(stack_info.source_name(), line) => {
+                            "breakpoint"
+                        }
                     _ => return Ok(Async::Ready(())),
+                    }
                 }
             };
             debugger.send_event(StoppedEvent {
@@ -313,6 +340,18 @@ fn named_variables(value: VmValue) -> Option<i64> {
     }
 }
 
+const NONE: usize = 0;
+const PAUSE: usize = 1;
+const STEP_IN: usize = 2;
+const STEP_OUT: usize = 3;
+const NEXT: usize = 4;
+
+#[derive(Default)]
+struct StepData {
+    stack_frames: usize,
+    function_name: String,
+}
+
 struct Debugger {
     thread: RootedThread,
     stream: Arc<TcpStream>,
@@ -321,11 +360,13 @@ struct Debugger {
     continue_barrier: Barrier,
     seq: Arc<AtomicUsize>,
     lines_start_at_1: AtomicBool,
-    // When continuing the response must be sent before actually conituing execution otherwise the `stopped`
-    // action could be received by visual code before the continue response which causes it to not recognize
-    // the stopped action
+    // When continuing the response must be sent before actually conituing execution otherwise the
+    // `stopped` action could be received by visual code before the continue response which causes
+    // it to not recognize the stopped action
     do_continue: AtomicBool,
-    pause: AtomicBool,
+    pause: AtomicUsize,
+    // Information used to determine when the step has finished
+    step_data: Mutex<StepData>,
 }
 
 impl Debugger {
@@ -517,7 +558,8 @@ pub fn main() {
             seq: seq.clone(),
             lines_start_at_1: AtomicBool::new(true),
             do_continue: AtomicBool::new(false),
-            pause: AtomicBool::new(false),
+            pause: AtomicUsize::new(NONE),
+            step_data: Mutex::new(StepData::default()),
         });
 
         let mut io = IoHandler::new();
@@ -716,8 +758,58 @@ pub fn main() {
 
         {
             let debugger = debugger.clone();
+            let cont = move |_: NextArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+                debugger.do_continue.store(true, Ordering::Release);
+                let context = debugger.thread.context();
+                let debug_info = context.debug_info();
+                debugger.pause.store(NEXT, Ordering::Release);
+                *debugger.step_data.lock().unwrap() = StepData {
+                    stack_frames: debug_info.stack_info_len(),
+                    function_name: debug_info.stack_info(0)
+                        .unwrap()
+                        .function_name()
+                        .unwrap()
+                        .to_string(),
+                };
+                Ok(None).into_future().boxed()
+            };
+            io.add_async_method("next", ServerCommand::new(cont));
+        }
+
+        {
+            let debugger = debugger.clone();
+            let cont = move |_: StepInArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+                debugger.do_continue.store(true, Ordering::Release);
+                debugger.pause.store(STEP_IN, Ordering::Release);
+                Ok(None).into_future().boxed()
+            };
+            io.add_async_method("stepIn", ServerCommand::new(cont));
+        }
+
+        {
+            let debugger = debugger.clone();
+            let cont = move |_: StepOutArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+                debugger.do_continue.store(true, Ordering::Release);
+                let context = debugger.thread.context();
+                let debug_info = context.debug_info();
+                debugger.pause.store(STEP_OUT, Ordering::Release);
+                *debugger.step_data.lock().unwrap() = StepData {
+                    stack_frames: debug_info.stack_info_len(),
+                    function_name: debug_info.stack_info(0)
+                        .unwrap()
+                        .function_name()
+                        .unwrap()
+                        .to_string(),
+                };
+                Ok(None).into_future().boxed()
+            };
+            io.add_async_method("stepOut", ServerCommand::new(cont));
+        }
+
+        {
+            let debugger = debugger.clone();
             let cont = move |_: PauseArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                debugger.pause.store(true, Ordering::Release);
+                debugger.pause.store(PAUSE, Ordering::Release);
                 Ok(None).into_future().boxed()
             };
             io.add_async_method("pause", ServerCommand::new(cont));
@@ -743,7 +835,8 @@ pub fn main() {
                 Ok(())
             };
 
-            // The response needs the command so we need extract it from the request and inject it in the response
+            // The response needs the command so we need extract it from the request and inject it
+            // in the response
             let command = RefCell::new(String::new());
             main_loop(read,
                       &*stream,
