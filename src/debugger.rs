@@ -15,7 +15,7 @@ use std::cmp;
 use std::error::Error as StdError;
 use std::fs::File;
 use std::collections::hash_map::Entry;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Barrier, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -38,8 +38,8 @@ use gluon::vm::internal::{Value as VmValue, ValuePrinter};
 use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
 
-use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, main_loop,
-                                 write_message};
+use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, read_message,
+                                 write_message, write_message_str};
 
 pub struct InitializeHandler {
     debugger: Arc<Debugger>,
@@ -826,26 +826,36 @@ pub fn main() {
         }
 
         let handle = spawn(move || {
-            let read = BufReader::new(&*stream);
-            let post_request_action = || {
-                if debugger.do_continue.load(Ordering::Acquire) {
-                    debugger.do_continue.store(false, Ordering::Release);
-                    debugger.continue_barrier.wait();
-                }
-                Ok(())
-            };
+            let mut input = BufReader::new(&*stream);
 
             // The response needs the command so we need extract it from the request and inject it
             // in the response
             let command = RefCell::new(String::new());
-            main_loop(read,
-                      &*stream,
-                      &io,
-                      exit_token,
-                      post_request_action,
-                      |body| translate_request(body, &command),
-                      |body| translate_response(&debugger, body, &command.borrow()))
-                .unwrap()
+            let mut output = &*stream;
+            (|| -> Result<(), Box<StdError>> {
+                    while !exit_token.load(Ordering::SeqCst) {
+                        match try!(read_message(&mut input)) {
+                            Some(json) => {
+                                let json = try!(translate_request(json, &command));
+                                debug!("Handle: {}", json);
+                                if let Some(response) = io.handle_request_sync(&json) {
+                                    let response = try!(translate_response(&debugger,
+                                                                           response,
+                                                                           &command.borrow()));
+                                    try!(write_message_str(&mut output, &response));
+                                    try!(output.flush());
+                                }
+                                if debugger.do_continue.load(Ordering::Acquire) {
+                                    debugger.do_continue.store(false, Ordering::Release);
+                                    debugger.continue_barrier.wait();
+                                }
+                            }
+                            None => return Ok(()),
+                        }
+                    }
+                    Ok(())
+                })()
+                .unwrap();
         });
 
         handle.join().unwrap();
