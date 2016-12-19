@@ -40,7 +40,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Condvar, Mutex};
@@ -501,7 +501,7 @@ pub fn run() {
         let import = Import::new(CheckImporter::new());
         thread.get_macros().insert("import".into(), import);
 
-        let mut io = IoHandler::new();
+        let io = IoHandler::new();
             io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
             io.add_async_method("textDocument/completion",
                       ServerCommand::new(Completion(thread.clone())));
@@ -509,21 +509,34 @@ pub fn run() {
                       ServerCommand::new(HoverCommand(thread.clone())));
             io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
         let exit_token = Arc::new(AtomicBool::new(false));
-        let exit_token2 = exit_token.clone();
-        io.add_notification("exit",
-                            move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+        {
+            let exit_token = exit_token.clone();
+            io.add_notification("exit",
+                                move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+        }
         io.add_notification("textDocument/didOpen",
                             ServerCommand::new(TextDocumentDidOpen(thread.clone())));
         io.add_notification("textDocument/didChange",
                                 ServerCommand::new(TextDocumentDidChange(work_queue.clone())));
-        let input = io::stdin();
-        main_loop(input.lock(),
-                  io::stdout(),
-                  &mut io,
-                  exit_token2,
-                  || Ok(()),
-                  |s| Ok(s),
-                  |s| Ok(s))
+
+        let mut input = BufReader::new(io::stdin());
+        let mut output = io::stdout();
+
+        (|| -> Result<(), Box<StdError>> {
+                while !exit_token.load(atomic::Ordering::SeqCst) {
+                    match try!(read_message(&mut input)) {
+                        Some(json) => {
+                            debug!("Handle: {}", json);
+                            if let Some(response) = io.handle_request_sync(&json) {
+                                try!(write_message_str(&mut output, &response));
+                                try!(output.flush());
+                            }
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                Ok(())
+            })()
             .unwrap();
         })
     };

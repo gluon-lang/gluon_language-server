@@ -1,8 +1,6 @@
 use std::error::Error as StdError;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
-use std::sync::Arc;
-use std::sync::atomic::{self, AtomicBool};
 
 use jsonrpc_core::{Error, ErrorCode, IoHandler, RpcMethodSimple, Params, Value};
 use futures::{self, BoxFuture, Future, IntoFuture};
@@ -83,19 +81,19 @@ impl<P, T> RpcMethodSimple for ServerCommand<T, P>
                                             .expect("result data could not be serialized"))
                                         .into_future()
                                 }
-                                Err(error) => {
-                                    Err(Error {
-                                            code: ErrorCode::InternalError,
-                                            message: error.message,
+                    Err(error) => {
+                        Err(Error {
+                            code: ErrorCode::InternalError,
+                            message: error.message,
                                             data: error.data
                                                 .as_ref()
                                                 .map(|v| {
                                                     to_value(v).expect("error data could not be \
                                                                         serialized")
                                                 }),
-                                        })
+                        })
                                         .into_future()
-                                }
+                    }
                             })
                             .boxed()
             }
@@ -156,37 +154,5 @@ pub fn write_message_str<W>(mut output: W, response: &str) -> io::Result<()>
                 response.len(),
                 response));
     try!(output.flush());
-    Ok(())
-}
-
-pub fn main_loop<R, W, P, F, G>(mut input: R,
-                                mut output: W,
-                                io: &IoHandler,
-                                exit_token: Arc<AtomicBool>,
-                                mut post_request_action: P,
-                                mut map_request: F,
-                                mut map_response: G)
-                                -> Result<(), Box<StdError>>
-    where R: BufRead,
-          W: Write,
-          P: FnMut() -> Result<(), Box<StdError>>,
-          F: FnMut(String) -> Result<String, Box<StdError>>,
-          G: FnMut(String) -> Result<String, Box<StdError>>,
-{
-    while !exit_token.load(atomic::Ordering::SeqCst) {
-        match try!(read_message(&mut input)) {
-            Some(json) => {
-                let json = try!(map_request(json));
-                debug!("Handle: {}", json);
-                if let Some(response) = io.handle_request_sync(&json) {
-                    let response = try!(map_response(response));
-                    try!(write_message_str(&mut output, &response));
-                    try!(output.flush());
-                }
-                post_request_action()?;
-            }
-            None => return Ok(()),
-        }
-    }
     Ok(())
 }
