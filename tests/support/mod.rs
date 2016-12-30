@@ -7,7 +7,7 @@ use std::str;
 use jsonrpc_core::request::{Call, MethodCall, Notification};
 use jsonrpc_core::version::Version;
 use jsonrpc_core::params::Params;
-use jsonrpc_core::response::{SyncOutput, SyncResponse};
+use jsonrpc_core::response::{Output, Response};
 use jsonrpc_core::id::Id;
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub fn method_call<T>(method: &str, id: u64, value: T) -> Call
         _ => panic!("Expected map"),
     };
     Call::MethodCall(MethodCall {
-        jsonrpc: Version::V2,
+        jsonrpc: Some(Version::V2),
         method: method.into(),
         id: Id::Num(id),
         params: Some(params),
@@ -56,7 +56,7 @@ pub fn notification<T>(method: &str, value: T) -> Call
         _ => panic!("Expected map"),
     };
     Call::Notification(Notification {
-        jsonrpc: Version::V2,
+        jsonrpc: Some(Version::V2),
         method: method.into(),
         params: Some(params),
     })
@@ -101,7 +101,7 @@ pub fn send_rpc<F, T>(f: F) -> T
         f(stdin);
 
         let exit = Call::Notification(Notification {
-            jsonrpc: Version::V2,
+            jsonrpc: Some(Version::V2),
             method: "exit".into(),
             params: None,
         });
@@ -114,7 +114,7 @@ pub fn send_rpc<F, T>(f: F) -> T
     let mut value = None;
     let mut output = &result.stdout[..];
     while let Some(json) = read_message(&mut output).unwrap() {
-        if let Ok(SyncResponse::Single(SyncOutput::Success(response))) = from_str(&json) {
+        if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
             value = from_value(response.result).ok();
         }
         if let Ok(Notification { params: Some(params), .. }) = from_str(&json) {

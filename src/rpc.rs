@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool};
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, MethodCommand, MethodResult, Params, Value};
+use jsonrpc_core::{Error, ErrorCode, IoHandler, RpcMethodSimple, Params, Value};
+use futures::{self, BoxFuture, Future, IntoFuture};
 
 use serde;
 use serde_json::{from_value, to_value};
@@ -13,41 +14,46 @@ pub struct ServerError<E> {
     pub data: Option<E>,
 }
 
-pub trait LanguageServerCommand: Send + Sync {
+pub trait LanguageServerCommand: Send + Sync + 'static {
     type Param: serde::Deserialize;
     type Output: serde::Serialize;
     type Error: serde::Serialize;
-    fn execute(&self, param: Self::Param) -> Result<Self::Output, ServerError<Self::Error>>;
+    fn execute(&self, param: Self::Param) -> BoxFuture<Self::Output, ServerError<Self::Error>>;
 
     fn invalid_params(&self) -> Option<Self::Error>;
 }
 
-pub trait LanguageServerNotification: Send + Sync {
+pub trait LanguageServerNotification: Send + Sync + 'static {
     type Param: serde::Deserialize;
     fn execute(&self, param: Self::Param);
 }
 
 pub struct ServerCommand<T>(pub T);
 
-impl<T> MethodCommand for ServerCommand<T>
+impl<T> RpcMethodSimple for ServerCommand<T>
     where T: LanguageServerCommand,
 {
-    fn execute(&self, param: Params) -> MethodResult {
+    fn call(&self, param: Params) -> BoxFuture<Value, Error> {
         match param {
             Params::Map(ref map) => {
                 match from_value(Value::Object(map.clone())) {
                     Ok(value) => {
-                        let result = match self.0.execute(value) {
-                            Ok(value) => Ok(to_value(&value)),
-                            Err(error) => {
-                                Err(Error {
-                                    code: ErrorCode::InternalError,
-                                    message: error.message,
-                                    data: error.data.as_ref().map(to_value),
-                                })
-                            }
-                        };
-                        return MethodResult::Sync(result);
+                        return self.0
+                            .execute(value)
+                            .then(|result| {
+                                match result {
+                                    Ok(value) => Ok(to_value(&value)).into_future(),
+                                    Err(error) => {
+                                        Err(Error {
+                                                code: ErrorCode::InternalError,
+                                                message: error.message,
+                                                data: error.data.as_ref().map(to_value),
+                                            })
+                                            .into_future()
+                                    }
+                                }
+                            })
+                            .boxed()
                     }
                     Err(_) => (),
                 }
@@ -55,11 +61,12 @@ impl<T> MethodCommand for ServerCommand<T>
             _ => (),
         }
         let data = self.0.invalid_params();
-        MethodResult::Sync(Err(Error {
-            code: ErrorCode::InvalidParams,
-            message: format!("Invalid params: {:?}", param),
-            data: data.as_ref().map(to_value),
-        }))
+        futures::failed(Error {
+                code: ErrorCode::InvalidParams,
+                message: format!("Invalid params: {:?}", param),
+                data: data.as_ref().map(to_value),
+            })
+            .boxed()
     }
 }
 

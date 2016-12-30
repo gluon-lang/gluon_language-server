@@ -14,7 +14,8 @@ env_logger = "0.3.3"
 
 url = "1.2.0"
 
-jsonrpc-core = "3.0.0"
+jsonrpc-core = "5.0.0"
+futures = "0.1.0"
 
 serde = "0.8.11"
 serde_json = "0.8.0"

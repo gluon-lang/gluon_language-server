@@ -5,6 +5,7 @@ extern crate serde;
 extern crate serde_json;
 
 extern crate jsonrpc_core;
+extern crate futures;
 
 #[macro_use]
 extern crate log;
@@ -16,7 +17,7 @@ extern crate languageserver_types;
 
 pub mod rpc;
 
-use jsonrpc_core::{IoHandler, NotificationCommand, Params, Value};
+use jsonrpc_core::{IoHandler, RpcNotificationSimple, Params, Value};
 use serde_json::value::{from_value, to_value};
 
 use gluon::base::ast::SpannedExpr;
@@ -41,9 +42,11 @@ use std::sync::atomic::AtomicBool;
 
 use languageserver_types::*;
 
+use futures::{BoxFuture, Future, IntoFuture};
+
 use rpc::*;
 
-impl<T> NotificationCommand for ServerCommand<T>
+impl<T> RpcNotificationSimple for ServerCommand<T>
     where T: LanguageServerNotification,
 {
     fn execute(&self, param: Params) {
@@ -109,7 +112,7 @@ impl LanguageServerCommand for Initialize {
     type Error = InitializeError;
     fn execute(&self,
                change: InitializeParams)
-               -> Result<InitializeResult, ServerError<InitializeError>> {
+               -> BoxFuture<InitializeResult, ServerError<InitializeError>> {
         let import = self.0.get_macros().get("import").expect("Import macro");
         let import = import.downcast_ref::<Import<CheckImporter>>()
             .expect("Check importer");
@@ -117,16 +120,18 @@ impl LanguageServerCommand for Initialize {
             import.add_path(path);
         }
         Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncKind::Full),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(true),
-                    trigger_characters: vec![".".into()],
-                }),
-                hover_provider: Some(true),
-                ..ServerCapabilities::default()
-            },
-        })
+                capabilities: ServerCapabilities {
+                    text_document_sync: Some(TextDocumentSyncKind::Full),
+                    completion_provider: Some(CompletionOptions {
+                        resolve_provider: Some(true),
+                        trigger_characters: vec![".".into()],
+                    }),
+                    hover_provider: Some(true),
+                    ..ServerCapabilities::default()
+                },
+            })
+            .into_future()
+            .boxed()
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -141,50 +146,55 @@ impl LanguageServerCommand for Completion {
     type Error = ();
     fn execute(&self,
                change: TextDocumentPositionParams)
-               -> Result<Vec<CompletionItem>, ServerError<()>> {
-        let thread = &self.0;
-        let module = strip_file_prefix(thread, &change.text_document.uri);
-        let import = thread.get_macros().get("import").expect("Import macro");
-        let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
-        let importer = import.importer.0.lock().unwrap();
-        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
-            ServerError {
-                message: format!("Module `{}` is not defined", module),
-                data: None,
-            }
-        }));
+               -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
+        (|| -> Result<_, _> {
+                let thread = &self.0;
+                let module = strip_file_prefix(thread, &change.text_document.uri);
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import.downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let importer = import.importer.0.lock().unwrap();
+                let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
+                    ServerError {
+                        message: format!("Module `{}` is not defined", module),
+                        data: None,
+                    }
+                }));
 
-        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
-            .ok_or_else(|| {
-                ServerError {
-                    message: format!("Position ({}, {}) is out of range",
-                                     change.position.line,
-                                     change.position.character),
-                    data: None,
-                }
-            }));
-        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-        let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
+                let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+                    .ok_or_else(|| {
+                        ServerError {
+                            message: format!("Position ({}, {}) is out of range",
+                                             change.position.line,
+                                             change.position.character),
+                            data: None,
+                        }
+                    }));
+                let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+                let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
 
-        let mut items: Vec<_> = suggestions.into_iter()
-            .map(|ident| {
-                // Remove the `:Line x, Row y suffix`
-                let name: &str = ident.name.as_ref();
-                let label = String::from(name.split(':')
-                    .next()
-                    .unwrap_or(ident.name.as_ref()));
-                CompletionItem {
-                    label: label,
-                    detail: Some(format!("{}", ident.typ)),
-                    kind: Some(CompletionItemKind::Variable),
-                    ..CompletionItem::default()
-                }
-            })
-            .collect();
+                let mut items: Vec<_> = suggestions.into_iter()
+                    .map(|ident| {
+                        // Remove the `:Line x, Row y suffix`
+                        let name: &str = ident.name.as_ref();
+                        let label = String::from(name.split(':')
+                            .next()
+                            .unwrap_or(ident.name.as_ref()));
+                        CompletionItem {
+                            label: label,
+                            detail: Some(format!("{}", ident.typ)),
+                            kind: Some(CompletionItemKind::Variable),
+                            ..CompletionItem::default()
+                        }
+                    })
+                    .collect();
 
-        items.sort_by(|l, r| l.label.cmp(&r.label));
+                items.sort_by(|l, r| l.label.cmp(&r.label));
 
-        Ok(items)
+                Ok(items)
+            })()
+            .into_future()
+            .boxed()
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -197,30 +207,32 @@ impl LanguageServerCommand for HoverCommand {
     type Param = TextDocumentPositionParams;
     type Output = Hover;
     type Error = ();
-    fn execute(&self, change: TextDocumentPositionParams) -> Result<Hover, ServerError<()>> {
-        let thread = &self.0;
-        let module = strip_file_prefix(thread, &change.text_document.uri);
-        let import = thread.get_macros().get("import").expect("Import macro");
-        let import = import.downcast_ref::<Import<CheckImporter>>().expect("Check importer");
-        let importer = import.importer.0.lock().unwrap();
-        let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
-            ServerError {
-                message: format!("Module `{}` is not defined", module),
-                data: None,
-            }
-        }));
+    fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
+        (|| -> Result<_, _> {
+                let thread = &self.0;
+                let module = strip_file_prefix(thread, &change.text_document.uri);
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import.downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let importer = import.importer.0.lock().unwrap();
+                let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
+                    ServerError {
+                        message: format!("Module `{}` is not defined", module),
+                        data: None,
+                    }
+                }));
 
-        let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
-            .ok_or_else(|| {
-                ServerError {
-                    message: format!("Position ({}, {}) is out of range",
-                                     change.position.line,
-                                     change.position.character),
-                    data: None,
-                }
-            }));
-        let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-        completion::find(&*thread.get_env(), expr, byte_pos)
+                let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
+                    .ok_or_else(|| {
+                        ServerError {
+                            message: format!("Position ({}, {}) is out of range",
+                                             change.position.line,
+                                             change.position.character),
+                            data: None,
+                        }
+                    }));
+                let byte_pos = line_pos + BytePos::from(change.position.character as usize);
+                completion::find(&*thread.get_env(), expr, byte_pos)
             .map(|typ| {
                 Hover {
                     contents: vec![MarkedString::String(format!("{}", typ))],
@@ -235,6 +247,9 @@ impl LanguageServerCommand for HoverCommand {
                     data: None,
                 }
             })
+            })()
+            .into_future()
+            .boxed()
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -409,12 +424,12 @@ pub fn run() {
         thread.get_macros().insert("import".into(), import);
 
         let mut io = IoHandler::new();
-        io.add_method("initialize", ServerCommand(Initialize(thread.clone())));
-        io.add_method("textDocument/completion",
-                      ServerCommand(Completion(thread.clone())));
-        io.add_method("textDocument/hover",
-                      ServerCommand(HoverCommand(thread.clone())));
-        io.add_method("shutdown", |_| Ok(Value::I64(0)));
+        io.add_async_method("initialize", ServerCommand(Initialize(thread.clone())));
+        io.add_async_method("textDocument/completion",
+                            ServerCommand(Completion(thread.clone())));
+        io.add_async_method("textDocument/hover",
+                            ServerCommand(HoverCommand(thread.clone())));
+        io.add_async_method("shutdown", |_| futures::finished(Value::I64(0)).boxed());
         let exit_token = Arc::new(AtomicBool::new(false));
         let exit_token2 = exit_token.clone();
         io.add_notification("exit",
