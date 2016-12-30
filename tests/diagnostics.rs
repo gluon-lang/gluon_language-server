@@ -21,5 +21,16 @@ fn type_error() {
     assert_eq!(diagnostic.uri, "test");
     assert_eq!(diagnostic.diagnostics.len(), 1);
     let error = &diagnostic.diagnostics[0];
-    assert_eq!(error.severity, Some(DiagnosticSeverity::Error));	
+    assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
+    assert_eq!(error.range,
+               Range {
+                   start: Position {
+                       line: 1,
+                       character: 0,
+                   },
+                   end: Position {
+                       line: 1,
+                       character: 6,
+                   },
+               });
 }

@@ -230,8 +230,8 @@ impl LanguageServerCommand for HoverCommand {
             .map_err(|()| {
                 ServerError {
                     message: format!("Completion not found at: Line {}, Column {}",
-                                     change.position.line,
-                                     change.position.character),
+                                     change.position.line + 1,
+                                     change.position.character + 1),
                     data: None,
                 }
             })
@@ -244,7 +244,7 @@ impl LanguageServerCommand for HoverCommand {
 
 fn location_to_position(loc: &pos::Location) -> Position {
     Position {
-        line: loc.line.to_usize() as u64 + 1,
+        line: loc.line.to_usize() as u64,
         character: loc.column.to_usize() as u64,
     }
 }
@@ -367,7 +367,7 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                         .into_iter()
                         .map(|err| {
                             let p = Position {
-                                line: err.span.start.line.to_usize() as u64 - 1,
+                                line: err.span.start.line.to_usize() as u64,
                                 character: err.span.start.column.to_usize() as u64,
                             };
                             Diagnostic {
