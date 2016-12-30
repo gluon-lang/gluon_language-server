@@ -45,7 +45,11 @@ export function activate(context: ExtensionContext) {
 	let serverOptions: ServerOptions = {
 		command : serverPath,
 		args: [],
-		options: {}
+		options: {
+			env: {
+				"RUST_BACKTRACE": "1"
+			}
+		}
 	}
 
 	// Options to control the language client
