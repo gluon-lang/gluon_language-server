@@ -341,7 +341,7 @@ fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()
 
     let lines = source::Lines::new(fileinput);
     importer.insert(filename.into(), (lines, expr));
-    result.or(parse_result)
+    parse_result.and(result)
 }
 
 fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
