@@ -35,15 +35,17 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
+use std::collections::VecDeque;
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::str;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
+use std::thread;
 
 use languageserver_types::*;
 
@@ -287,14 +289,14 @@ impl LanguageServerNotification for TextDocumentDidOpen {
     }
 }
 
-struct TextDocumentDidChange(RootedThread);
+struct TextDocumentDidChange(Arc<UniqueQueue<Url, String>>);
 impl LanguageServerNotification for TextDocumentDidChange {
     type Param = DidChangeTextDocumentParams;
 
-    fn execute(&self, change: DidChangeTextDocumentParams) {
-        run_diagnostics(&self.0,
-                        &change.text_document.uri,
-                        &change.content_changes[0].text);
+    fn execute(&self, mut change: DidChangeTextDocumentParams) {
+        use std::mem::replace;
+        self.0.add_work(change.text_document.uri,
+                        replace(&mut change.content_changes[0].text, String::new()))
     }
 }
 
@@ -367,7 +369,58 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
     parse_result.and(result)
 }
 
+struct Entry<K, V> {
+    key: K,
+    value: V,
+}
+
+/// Queue which only keeps the latest work item for each key
+struct UniqueQueue<K, V> {
+    queue: Mutex<VecDeque<Entry<K, V>>>,
+    new_work: Condvar,
+}
+
+impl<K, V> UniqueQueue<K, V>
+    where K: PartialEq,
+{
+    fn add_work(&self, key: K, value: V) {
+        let mut queue = self.queue.lock().unwrap();
+        // Overwrite the previous item if one exists already for this key
+        if let Some(entry) = queue.iter_mut().find(|entry| entry.key == key) {
+            entry.value = value;
+            return;
+        }
+        queue.push_back(Entry {
+            key: key,
+            value: value,
+        });
+        self.new_work.notify_one();
+    }
+}
+
+struct DiagnosticProcessor {
+    thread: RootedThread,
+    work_queue: Arc<UniqueQueue<Url, String>>,
+}
+
+impl DiagnosticProcessor {
+    fn run(&self) {
+        let mut work_queue = self.work_queue.queue.lock().unwrap();
+        loop {
+            while let Some(entry) = work_queue.pop_front() {
+                // Don't block the producers while we run diagnostics
+                drop(work_queue);
+                run_diagnostics(&self.thread, &entry.key, &entry.value);
+                work_queue = self.work_queue.queue.lock().unwrap();
+            }
+            work_queue = self.work_queue.new_work.wait(work_queue).unwrap();
+        }
+    }
+}
+
 fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
+    info!("Running diagnostics on {}", filename);
+
     fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
         where T: fmt::Display,
     {
@@ -429,7 +482,7 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
                         "params": {}
                     }}"#,
                     serde_json::to_value(&PublishDiagnosticsParams {
-                            uri: source_name.clone(),
+                            uri: source_name,
                             diagnostics: diagnostics,
                         })
                         .unwrap());
@@ -438,29 +491,53 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
 
 pub fn run() {
     ::env_logger::init().unwrap();
-    let handle = ::std::thread::spawn(|| {
-        let thread = new_vm();
-        let import = Import::new(CheckImporter::new());
-        thread.get_macros().insert("import".into(), import);
 
-        let mut io = IoHandler::new();
-        io.add_async_method("initialize", ServerCommand(Initialize(thread.clone())));
-        io.add_async_method("textDocument/completion",
-                            ServerCommand(Completion(thread.clone())));
-        io.add_async_method("textDocument/hover",
-                            ServerCommand(HoverCommand(thread.clone())));
-        io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
-        let exit_token = Arc::new(AtomicBool::new(false));
-        let exit_token2 = exit_token.clone();
-        io.add_notification("exit",
-                            move |_| exit_token.store(true, atomic::Ordering::SeqCst));
-        io.add_notification("textDocument/didOpen",
-                            ServerCommand(TextDocumentDidOpen(thread.clone())));
-        io.add_notification("textDocument/didChange",
-                            ServerCommand(TextDocumentDidChange(thread)));
-
-        main_loop(&mut io, exit_token2).unwrap();
+    let thread = new_vm();
+    let work_queue = Arc::new(UniqueQueue {
+        queue: Mutex::new(VecDeque::new()),
+        new_work: Condvar::new(),
     });
+
+    let handle = {
+        let work_queue = work_queue.clone();
+        let thread = thread.clone();
+        thread::spawn(move || {
+
+            let import = Import::new(CheckImporter::new());
+            thread.get_macros().insert("import".into(), import);
+
+            let mut io = IoHandler::new();
+            io.add_async_method("initialize", ServerCommand(Initialize(thread.clone())));
+            io.add_async_method("textDocument/completion",
+                                ServerCommand(Completion(thread.clone())));
+            io.add_async_method("textDocument/hover",
+                                ServerCommand(HoverCommand(thread.clone())));
+            io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
+            let exit_token = Arc::new(AtomicBool::new(false));
+            let exit_token2 = exit_token.clone();
+            io.add_notification("exit",
+                                move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+            io.add_notification("textDocument/didOpen",
+                                ServerCommand(TextDocumentDidOpen(thread.clone())));
+            io.add_notification("textDocument/didChange",
+                                ServerCommand(TextDocumentDidChange(work_queue.clone())));
+
+            main_loop(&mut io, exit_token2).unwrap();
+        })
+    };
+
+    // Spawn a separate thread which runs a returns diagnostic information
+    thread::Builder::new()
+        .name("diagnostics".to_string())
+        .spawn(move || {
+            let diagnostics = DiagnosticProcessor {
+                thread: thread,
+                work_queue: work_queue,
+            };
+            diagnostics.run();
+        })
+        .unwrap();
+
     if let Err(err) = handle.join() {
         let msg = err.downcast_ref::<&'static str>()
             .cloned()

@@ -19,7 +19,7 @@ fn type_error() {
 "#;
         support::did_open(stdin, "test", text);
     });
-    assert_eq!(diagnostic.uri, support::test_url("test"));
+    assert_eq!(diagnostic.uri, support::test_url("test.glu"));
     assert_eq!(diagnostic.diagnostics.len(), 1);
     let error = &diagnostic.diagnostics[0];
     assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
