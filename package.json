@@ -43,7 +43,44 @@
 					"description": "Specifies the path to the language server binary."
 				}
 			}
-		}
+		},
+		"breakpoints": [
+			{
+				"language": "gluon"
+			}
+		],
+		"debuggers": [
+			{
+				"type": "gluon",
+				"label": "Gluon Debug",
+
+				"program": "./out/src/debugger.js",
+				"runtime": "node",
+
+				"variables": {
+					"AskForProgramName": "extension.getProgramName"
+				},
+
+				"configurationAttributes": {
+					"launch": {
+						"required": [ "program" ],
+						"properties": {
+							"program": {
+								"type": "string",
+								"description": "Absolute path to a text file.",
+								"default": "${workspaceRoot}/${command.AskForProgramName}"
+							},
+							"stopOnEntry": {
+								"type": "boolean",
+								"description": "Automatically stop after launch.",
+								"default": true
+							}
+						}
+					}
+				},
+				"initialConfigurations": "extension.provideInitialDebugConfigurations"
+			}
+		]
 	},	
 	"scripts": {
 		"vscode:prepublish": "node ./node_modules/vscode/bin/compile",
@@ -54,7 +91,8 @@
 		"typescript": "^1.8.9"
 	},
 	"dependencies": {
-		"vscode-languageclient": "^2.2.1",
+		"vscode-debugadapter": "^1.13.1",
+		"vscode-languageclient": "^2.6.3",
 		"vscode": "^0.11.0"
 	}
 }

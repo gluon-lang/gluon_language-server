@@ -16,7 +16,7 @@ use serde_json::{Value, to_value, from_str, from_value};
 
 use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
-use gluon_language_server::read_message;
+use gluon_language_server::rpc::read_message;
 
 
 pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
@@ -83,9 +83,11 @@ pub fn send_rpc<F, T>(f: F) -> T
           T: Deserialize,
 {
     let args: Vec<_> = env::args().collect();
-    let server_path =
-        Path::new(&args[0][..]).parent().expect("folder").join("gluon_language-server");
-
+    let server_path = Path::new(&args[0][..])
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("folder")
+        .join("gluon_language-server");
     let mut child = Command::new(server_path)
         .arg("--quiet")
         .stdin(Stdio::piped())
@@ -115,9 +117,17 @@ pub fn send_rpc<F, T>(f: F) -> T
         if let Ok(SyncResponse::Single(SyncOutput::Success(response))) = from_str(&json) {
             value = from_value(response.result).ok();
         }
+        if let Ok(Notification { params: Some(params), .. }) = from_str(&json) {
+            let json_value = match params {
+                Params::Map(map) => Value::Object(map),
+                Params::Array(array) => Value::Array(array),
+                Params::None => Value::Null,
+            };
+            value = from_value(json_value).ok();
+        }
     }
     value.unwrap_or_else(|| {
-        panic!("Could not find the retrieve the expected response out of:\n`{}`",
+        panic!("Could not find the expected response out of:\n`{}`",
                str::from_utf8(&result.stdout).expect("UTF8"))
     })
 }
