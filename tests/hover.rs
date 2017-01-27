@@ -54,12 +54,12 @@ let from f : (Int -> Option a) -> Stream a =
 #[test]
 fn simple_hover() {
     let hover: Hover = support::send_rpc(|mut stdin| {
-
-        support::did_open(stdin, "test", "123");
+        let uri = "file:///c%3A/test/test.glu";
+        support::did_open(stdin, uri, "123");
 
         hover(stdin,
               2,
-              "test",
+              uri,
               Position {
                   line: 0,
                   character: 2,
