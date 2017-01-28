@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
+use std::fs::canonicalize;
 
 use serde_json::{Value, from_str};
 
@@ -39,7 +40,7 @@ macro_rules! request {
 
 macro_rules! expect_response {
     ($read: expr, $typ: ty, $name: expr) => { {
-        let msg: $typ = expect_message(&mut $read);
+        let msg: $typ = expect_message(&mut $read, $name);
         assert_eq!(msg.command, $name);
         msg
     } }
@@ -47,7 +48,7 @@ macro_rules! expect_response {
 
 macro_rules! expect_event {
     ($read: expr, $typ: ty, $event: expr) => { {
-        let event: $typ = expect_message(&mut $read);
+        let event: $typ = expect_message(&mut $read, $event);
         assert_eq!(event.event, $event);
         event
     } }
@@ -69,7 +70,7 @@ fn run_debugger<F>(f: F)
     let debugger = path.parent()
         .and_then(|path| path.parent())
         .expect("debugger executable")
-        .join("debugger");
+        .join("gluon_debugger");
 
     let mut child = Command::new(&debugger)
         .arg(port.to_string())
@@ -97,9 +98,9 @@ fn run_debugger<F>(f: F)
         }
     };
 
-    let _: InitializedEvent = expect_message(&mut read);
+    expect_event!(&mut read, InitializedEvent, "initialized");
 
-    let initialize_response: InitializeResponse = expect_message(&mut read);
+    let initialize_response = expect_response!(&mut read, InitializeResponse, "initialize");
     assert!(initialize_response.success);
 
     f(&mut seq, &stream, &mut read);
@@ -116,7 +117,14 @@ fn run_debugger<F>(f: F)
     child.wait().unwrap();
 }
 
-fn launch<W>(stream: W, seq: &mut i64, program: &str)
+fn launch_relative<W>(stream: W, seq: &mut i64, program: &str)
+    where W: Write,
+{
+    let path = url::Url::from_file_path(canonicalize(program).unwrap()).unwrap();
+    launch(stream, seq, &path);
+}
+
+fn launch<W>(stream: W, seq: &mut i64, program: &url::Url)
     where W: Write,
 {
     request! {
@@ -182,11 +190,13 @@ fn request_debug_info(seq: &mut i64,
     (trace, scopes, variables)
 }
 
-fn expect_message<M, R>(read: R) -> M
+fn expect_message<M, R>(read: R, expected: &str) -> M
     where M: serde::Deserialize,
           R: BufRead,
 {
-    let value = read_message(read).unwrap().unwrap();
+    let value = read_message(read)
+        .unwrap()
+        .unwrap_or_else(|| panic!("Rpc message not found: `{}`", expected));
     from_str(&value).unwrap_or_else(|err| {
         panic!("{} in message:\n{}", err, value);
     })
@@ -195,9 +205,9 @@ fn expect_message<M, R>(read: R) -> M
 #[test]
 fn launch_program() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/main.glu");
+        launch_relative(stream, seq, "tests/main.glu");
 
-        let launch_response: LaunchResponse = expect_message(&mut read);
+        let launch_response = expect_response!(&mut read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
@@ -208,18 +218,18 @@ fn launch_program() {
             *seq,
             None
         };
-        let _: ConfigurationDoneResponse = expect_message(&mut read);
+        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
 
-        let _: TerminatedEvent = expect_message(&mut read);
+        expect_event!(&mut read, TerminatedEvent, "terminated");
     });
 }
 
 #[test]
 fn infinite_loops_are_terminated() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/infinite_loop.glu");
+        launch_relative(stream, seq, "tests/infinite_loop.glu");
 
-        let launch_response: LaunchResponse = expect_message(&mut read);
+        let launch_response = expect_response!(&mut read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
@@ -230,16 +240,17 @@ fn infinite_loops_are_terminated() {
             *seq,
             None
         };
-        let _: ConfigurationDoneResponse = expect_message(&mut read);
+
+        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
     });
 }
 
 #[test]
 fn pause() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/infinite_loop.glu");
+        launch_relative(stream, seq, "tests/infinite_loop.glu");
 
-        let launch_response: LaunchResponse = expect_message(&mut read);
+        let launch_response = expect_response!(&mut read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
@@ -250,7 +261,7 @@ fn pause() {
             *seq,
             None
         };
-        let _: ConfigurationDoneResponse = expect_message(&mut read);
+        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
 
         request! {
             stream,
@@ -259,9 +270,9 @@ fn pause() {
             *seq,
             PauseArguments { thread_id: 0, }
         };
-        let _: PauseResponse = expect_message(&mut read);
+        expect_response!(&mut read, PauseResponse, "pause");
 
-        let _: StoppedEvent = expect_message(&mut read);
+        expect_event!(&mut read, StoppedEvent, "stopped");
 
         request! {
             stream,
@@ -270,18 +281,21 @@ fn pause() {
             *seq,
             ContinueArguments { thread_id: 0, }
         };
-        let _: ContinueResponse = expect_message(&mut read);
+        expect_response!(&mut read, ContinueResponse, "continue");
     });
 }
 
 #[test]
 fn breakpoints() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/main.glu");
+        // Visual code actual sends the path to the file as an url encoded absolute path so mimick
+        // that behaviour
+        let main_path = url::Url::from_file_path(canonicalize("tests/main.glu").unwrap()).unwrap();
+        launch(stream, seq, &main_path);
 
         let launch_response = expect_response!(read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
-        assert!(launch_response.success);
+        assert!(launch_response.success, "{:?}", launch_response);
 
         request! {
             stream,
@@ -305,7 +319,7 @@ fn breakpoints() {
                 ]),
                 lines: None,
                 source: Source {
-                    path: Some("tests/main.glu".into()),
+                    path: Some(main_path.to_string()),
                     .. Source::default()
                 },
                 source_modified: None,
@@ -353,7 +367,8 @@ fn breakpoints() {
 #[test]
 fn step_in() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/main.glu");
+        let main_path = url::Url::from_file_path(canonicalize("tests/main.glu").unwrap()).unwrap();
+        launch(stream, seq, &main_path);
 
         let launch_response = expect_response!(read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
@@ -375,7 +390,7 @@ fn step_in() {
                 ]),
                 lines: None,
                 source: Source {
-                    path: Some("tests/main.glu".into()),
+                    path: Some(main_path.to_string()),
                     .. Source::default()
                 },
                 source_modified: None,
@@ -432,7 +447,8 @@ fn step_in() {
 #[test]
 fn step_out() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/main.glu");
+        let main_path = url::Url::from_file_path(canonicalize("tests/main.glu").unwrap()).unwrap();
+        launch(stream, seq, &main_path);
 
         let launch_response = expect_response!(read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
@@ -454,7 +470,7 @@ fn step_out() {
                 ]),
                 lines: None,
                 source: Source {
-                    path: Some("tests/main.glu".into()),
+                    path: Some(main_path.to_string()),
                     .. Source::default()
                 },
                 source_modified: None,
@@ -508,7 +524,8 @@ fn step_out() {
 #[test]
 fn step_over() {
     run_debugger(|seq, stream, mut read| {
-        launch(stream, seq, "tests/main.glu");
+        let main_path = url::Url::from_file_path(canonicalize("tests/main.glu").unwrap()).unwrap();
+        launch(stream, seq, &main_path);
 
         let launch_response = expect_response!(read, LaunchResponse, "launch");
         assert_eq!(launch_response.request_seq, *seq);
@@ -530,7 +547,7 @@ fn step_over() {
                 ]),
                 lines: None,
                 source: Source {
-                    path: Some("tests/main.glu".into()),
+                    path: Some(main_path.to_string()),
                     .. Source::default()
                 },
                 source_modified: None,

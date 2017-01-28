@@ -305,7 +305,7 @@ fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     strip_file_prefix(&paths, url).unwrap()
 }
 
-fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
+pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
     use std::env;
 
     let path = url.to_file_path().map_err(|_| "Expected a file uri")?;
@@ -314,7 +314,7 @@ fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdErro
         Err(_) => env::current_dir()?.join(&*path),
     };
 
-    for path in &*paths {
+    for path in paths {
         let canonicalized = fs::canonicalize(path).ok();
 
         let result = canonicalized.as_ref()
