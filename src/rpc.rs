@@ -2,7 +2,7 @@ use std::error::Error as StdError;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 
-use jsonrpc_core::{Error, ErrorCode, IoHandler, RpcMethodSimple, Params, Value};
+use jsonrpc_core::{Error, ErrorCode, RpcMethodSimple, Params, Value};
 use futures::{self, BoxFuture, Future, IntoFuture};
 
 use serde;
@@ -73,39 +73,37 @@ impl<P, T> RpcMethodSimple for ServerCommand<T, P>
         };
         match from_value(value.clone()) {
             Ok(value) => {
-                        return self.0
-                            .execute(value)
-                            .then(|result| match result {
-                                Ok(value) => {
-                                    Ok(to_value(&value)
-                                            .expect("result data could not be serialized"))
-                                        .into_future()
-                                }
-                    Err(error) => {
-                        Err(Error {
-                            code: ErrorCode::InternalError,
-                            message: error.message,
-                                            data: error.data
-                                                .as_ref()
-                                                .map(|v| {
-                                                    to_value(v).expect("error data could not be \
-                                                                        serialized")
-                                                }),
-                        })
-                                        .into_future()
-                    }
-                            })
-                            .boxed()
+                return self.0
+                    .execute(value)
+                    .then(|result| match result {
+                        Ok(value) => {
+                            Ok(to_value(&value).expect("result data could not be serialized"))
+                                .into_future()
+                        }
+                        Err(error) => {
+                            Err(Error {
+                                    code: ErrorCode::InternalError,
+                                    message: error.message,
+                                    data: error.data
+                                        .as_ref()
+                                        .map(|v| {
+                                            to_value(v).expect("error data could not be serialized")
+                                        }),
+                                })
+                                .into_future()
+                        }
+                    })
+                    .boxed()
             }
             Err(_) => (),
         }
         let data = self.0.invalid_params();
         futures::failed(Error {
-            code: ErrorCode::InvalidParams,
-            message: format!("Invalid params: {:?}", value),
+                code: ErrorCode::InvalidParams,
+                message: format!("Invalid params: {:?}", value),
                 data: data.as_ref()
                     .map(|v| to_value(v).expect("error data could not be serialized")),
-        })
+            })
             .boxed()
     }
 }
@@ -116,9 +114,9 @@ pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
     let mut header = String::new();
     let n = try!(reader.read_line(&mut header));
     if n == 0 {
-        // EOF
         return Ok(None);
     }
+
     if header.starts_with("Content-Length: ") {
         let content_length = {
             let len = header["Content-Length:".len()..].trim();

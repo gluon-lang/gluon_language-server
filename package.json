@@ -54,7 +54,8 @@
 				"type": "gluon",
 				"label": "Gluon Debug",
 
-				"program": "./target/debug/debugger",
+				"program": "./out/src/debugger",
+				"runtime": "node",
 
 				"variables": {
 					"AskForProgramName": "extension.getProgramName"
