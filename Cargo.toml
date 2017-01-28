@@ -9,7 +9,7 @@ repository = "https://github.com/gluon-lang/gluon_language-server"
 [workspace]
 
 [[bin]]
-name = "debugger"
+name = "gluon_debugger"
 path = "src/debugger.rs"
 
 [[bin]]

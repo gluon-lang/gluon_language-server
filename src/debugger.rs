@@ -5,6 +5,7 @@ extern crate futures;
 extern crate jsonrpc_core;
 extern crate serde;
 extern crate serde_json;
+#[macro_use]
 extern crate log;
 
 extern crate gluon_language_server;
@@ -15,7 +16,7 @@ use std::cmp;
 use std::error::Error as StdError;
 use std::fs::File;
 use std::collections::hash_map::Entry;
-use std::io::{BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Barrier, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -352,9 +353,44 @@ struct StepData {
     function_name: String,
 }
 
+trait SharedWrite: Send + Sync {
+    fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize>;
+}
+
+impl SharedWrite for TcpStream {
+    fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize> {
+        let mut this = self;
+        f(&mut this)
+    }
+}
+
+impl SharedWrite for io::Stdout {
+    fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize> {
+        f(&mut self.lock())
+    }
+}
+
+impl<'s> Write for SharedWrite + 's {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.with_write(&mut |write| write.write(buf))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.with_write(&mut |write| write.flush().map(|_| 0)).map(|_| ())
+    }
+}
+
+impl<'a, 'b> Write for &'a (SharedWrite + 'b) {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.with_write(&mut |write| write.write(buf))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.with_write(&mut |write| write.flush().map(|_| 0)).map(|_| ())
+    }
+}
+
 struct Debugger {
     thread: RootedThread,
-    stream: Arc<TcpStream>,
+    stream: Arc<SharedWrite>,
     sources: Mutex<HashMap<String, SourceData>>,
     variables: Mutex<Variables>,
     continue_barrier: Barrier,
@@ -529,6 +565,316 @@ fn translate_reference(reference: i64) -> VariableReference {
     }
 }
 
+fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
+    where R: BufRead,
+{
+    let exit_token = Arc::new(AtomicBool::new(false));
+    let seq = Arc::new(AtomicUsize::new(1));
+
+    let debugger = Arc::new(Debugger {
+        thread: gluon::new_vm(),
+        stream: output.clone(),
+        sources: Mutex::new(HashMap::new()),
+        variables: Mutex::new(Variables {
+            map: HashMap::new(),
+            reference: i32::max_value() as i64,
+        }),
+        continue_barrier: Barrier::new(2),
+        seq: seq.clone(),
+        lines_start_at_1: AtomicBool::new(true),
+        do_continue: AtomicBool::new(false),
+        pause: AtomicUsize::new(NONE),
+        step_data: Mutex::new(StepData::default()),
+    });
+
+    let mut io = IoHandler::new();
+    io.add_async_method("initialize",
+                        ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+
+    {
+        let debugger = debugger.clone();
+        let configuration_done =
+            move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
+                // Notify the launched thread that it can start executing
+                debugger.continue_barrier.wait();
+                Ok(()).into_future().boxed()
+            };
+        io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+    }
+
+    io.add_async_method("launch",
+                        ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
+    io.add_async_method("disconnect",
+                        ServerCommand::new(DisconnectHandler { exit_token: exit_token.clone() }));
+    {
+        let debugger = debugger.clone();
+        let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
+            let breakpoints = args.breakpoints
+                .iter()
+                .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
+                .collect();
+
+            let opt = args.source
+                .path
+                .as_ref()
+                .map(|path| filename_to_module(path.trim_right_matches(".glu")));
+            if let Some(path) = opt {
+                let mut sources = debugger.sources.lock().unwrap();
+                sources.insert(path,
+                               SourceData {
+                                   source: Some(args.source.clone()),
+                                   breakpoints: breakpoints,
+                               });
+            }
+
+            Ok(SetBreakpointsResponseBody {
+                    breakpoints: args.breakpoints
+                        .into_iter()
+                        .flat_map(|bs| bs)
+                        .map(|breakpoint| {
+                            Breakpoint {
+                                column: None,
+                                end_column: None,
+                                end_line: None,
+                                id: None,
+                                line: Some(breakpoint.line),
+                                message: None,
+                                source: None,
+                                verified: true,
+                            }
+                        })
+                        .collect(),
+                })
+                .into_future()
+                .boxed()
+        };
+
+        io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
+    }
+
+    let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
+        Ok(ThreadsResponseBody {
+                threads: vec![Thread {
+                                  id: 1,
+                                  name: "main".to_string(),
+                              }],
+            })
+            .into_future()
+            .boxed()
+    };
+
+    io.add_async_method("threads", ServerCommand::new(threads));
+
+    {
+        let debugger = debugger.clone();
+        let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
+            let mut frames = Vec::new();
+            let mut i = 0;
+
+            let mut sources = debugger.sources.lock().unwrap();
+            let context = debugger.thread.context();
+            let info = context.debug_info();
+
+            while let Some(stack_info) = info.stack_info(i) {
+                if info.stack_info(i + 1).is_none() {
+                    // Skip the top level scope
+                    break;
+                }
+
+                let source = match sources.entry(stack_info.source_name().to_string()) {
+                    Entry::Occupied(entry) => entry.get().source.clone(),
+                    Entry::Vacant(entry) => {
+                        // If the source is not in the map, create it from the debug info
+                        let name = entry.key().to_string();
+                        let path = format!("{}.glu", name.replace(".", "/"));
+                        entry.insert(SourceData {
+                                source: Some(Source {
+                                    path: Some(path),
+                                    name: Some(name),
+                                    ..Source::default()
+                                }),
+                                breakpoints: HashSet::new(),
+                            })
+                            .source
+                            .clone()
+                    }
+                };
+                frames.push(StackFrame {
+                    column: 0,
+                    end_column: None,
+                    end_line: None,
+                    id: i as i64,
+                    line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
+                    module_id: None,
+                    name: stack_info.function_name().unwrap_or("<unknown>").to_string(),
+                    source: source,
+                });
+
+                i += 1;
+            }
+
+            Ok(StackTraceResponseBody {
+                    total_frames: Some(frames.len() as i64),
+                    stack_frames: frames,
+                })
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let scopes = move |args: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
+            let mut scopes = Vec::new();
+
+            let sources = debugger.sources.lock().unwrap();
+            let context = debugger.thread.context();
+            let info = context.debug_info();
+
+            if let Some(stack_info) = info.stack_info(args.frame_id as usize) {
+                scopes.push(Scope {
+                    column: None,
+                    end_column: None,
+                    end_line: None,
+                    expensive: false,
+                    indexed_variables: None,
+                    line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                    name: "Locals".to_string(),
+                    named_variables: Some(stack_info.locals().count() as i64),
+                    source: sources.get(stack_info.source_name())
+                        .and_then(|source| source.source.clone()),
+                    variables_reference: (args.frame_id + 1) * 2 - 1,
+                });
+                scopes.push(Scope {
+                    column: None,
+                    end_column: None,
+                    end_line: None,
+                    expensive: false,
+                    indexed_variables: None,
+                    line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                    name: "Upvars".to_string(),
+                    named_variables: Some(stack_info.locals().count() as i64),
+                    source: sources.get(stack_info.source_name())
+                        .and_then(|source| source.source.clone()),
+                    variables_reference: (args.frame_id + 1) * 2,
+                });
+            }
+            Ok(ScopesResponseBody { scopes: scopes })
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("scopes", ServerCommand::new(scopes));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont = move |_: ContinueArguments| -> BoxFuture<ContinueResponseBody, ServerError<()>> {
+            debugger.do_continue.store(true, Ordering::Release);
+            Ok(ContinueResponseBody { all_threads_continued: Some(true) })
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("continue", ServerCommand::new(cont));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont = move |_: NextArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+            debugger.do_continue.store(true, Ordering::Release);
+            let context = debugger.thread.context();
+            let debug_info = context.debug_info();
+            debugger.pause.store(NEXT, Ordering::Release);
+            *debugger.step_data.lock().unwrap() = StepData {
+                stack_frames: debug_info.stack_info_len(),
+                function_name: debug_info.stack_info(0)
+                    .unwrap()
+                    .function_name()
+                    .unwrap()
+                    .to_string(),
+            };
+            Ok(None).into_future().boxed()
+        };
+        io.add_async_method("next", ServerCommand::new(cont));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont = move |_: StepInArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+            debugger.do_continue.store(true, Ordering::Release);
+            debugger.pause.store(STEP_IN, Ordering::Release);
+            Ok(None).into_future().boxed()
+        };
+        io.add_async_method("stepIn", ServerCommand::new(cont));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont = move |_: StepOutArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+            debugger.do_continue.store(true, Ordering::Release);
+            let context = debugger.thread.context();
+            let debug_info = context.debug_info();
+            debugger.pause.store(STEP_OUT, Ordering::Release);
+            *debugger.step_data.lock().unwrap() = StepData {
+                stack_frames: debug_info.stack_info_len(),
+                function_name: debug_info.stack_info(0)
+                    .unwrap()
+                    .function_name()
+                    .unwrap()
+                    .to_string(),
+            };
+            Ok(None).into_future().boxed()
+        };
+        io.add_async_method("stepOut", ServerCommand::new(cont));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont = move |_: PauseArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
+            debugger.pause.store(PAUSE, Ordering::Release);
+            Ok(None).into_future().boxed()
+        };
+        io.add_async_method("pause", ServerCommand::new(cont));
+    }
+
+    {
+        let debugger = debugger.clone();
+        let cont =
+            move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
+                let variables = debugger.variables(args.variables_reference);
+                Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
+            };
+        io.add_async_method("variables", ServerCommand::new(cont));
+    }
+
+    // The response needs the command so we need extract it from the request and inject it
+    // in the response
+    let command = RefCell::new(String::new());
+    (move || -> Result<(), Box<StdError>> {
+            while !exit_token.load(Ordering::SeqCst) {
+                match try!(read_message(&mut input)) {
+                    Some(json) => {
+                        let json = try!(translate_request(json, &command));
+                        debug!("Handle: {}", json);
+                        if let Some(response) = io.handle_request_sync(&json) {
+                            let response =
+                                try!(translate_response(&debugger, response, &command.borrow()));
+                            try!(write_message_str(&*output, &response));
+                            try!((&mut &*output).flush());
+                        }
+                        if debugger.do_continue.load(Ordering::Acquire) {
+                            debugger.do_continue.store(false, Ordering::Release);
+                            debugger.continue_barrier.wait();
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+            Ok(())
+        })()
+        .unwrap();
+}
+
 pub fn main() {
     env_logger::init().unwrap();
 
@@ -537,327 +883,22 @@ pub fn main() {
         .arg(Arg::with_name("port").value_name("PORT").takes_value(true))
         .get_matches();
 
-    let port = matches.value_of("port").unwrap_or("4711");
+    match matches.value_of("port") {
+        Some(port) => {
+            let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)[..]).unwrap();
 
-    let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)[..]).unwrap();
-    if let Some(stream) = listener.incoming().next() {
-        let stream = Arc::new(stream.unwrap());
+            write!(io::stderr(), "Listening on port {}", port).unwrap();
 
-        let exit_token = Arc::new(AtomicBool::new(false));
-        let seq = Arc::new(AtomicUsize::new(1));
-
-        let debugger = Arc::new(Debugger {
-            thread: gluon::new_vm(),
-            stream: stream.clone(),
-            sources: Mutex::new(HashMap::new()),
-            variables: Mutex::new(Variables {
-                map: HashMap::new(),
-                reference: i32::max_value() as i64,
-            }),
-            continue_barrier: Barrier::new(2),
-            seq: seq.clone(),
-            lines_start_at_1: AtomicBool::new(true),
-            do_continue: AtomicBool::new(false),
-            pause: AtomicUsize::new(NONE),
-            step_data: Mutex::new(StepData::default()),
-        });
-
-        let mut io = IoHandler::new();
-        io.add_async_method("initialize",
-                            ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
-
-        {
-            let debugger = debugger.clone();
-            let configuration_done =
-                move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
-                    // Notify the launched thread that it can start executing
-                    debugger.continue_barrier.wait();
-                    Ok(()).into_future().boxed()
-                };
-            io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+            if let Some(stream) = listener.incoming().next() {
+                let stream = Arc::new(stream.unwrap());
+                let stream2 = stream.clone();
+                let input = BufReader::new(&*stream);
+                spawn_server(input, stream2)
+            }
         }
-
-        io.add_async_method("launch",
-                            ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
-        io.add_async_method("disconnect",
-                            ServerCommand::new(DisconnectHandler {
-                                exit_token: exit_token.clone(),
-                            }));
-        {
-            let debugger = debugger.clone();
-            let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
-                let breakpoints = args.breakpoints
-                    .iter()
-                    .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
-                    .collect();
-
-                let opt = args.source
-                    .path
-                    .as_ref()
-                    .map(|path| filename_to_module(path.trim_right_matches(".glu")));
-                if let Some(path) = opt {
-                    let mut sources = debugger.sources.lock().unwrap();
-                    sources.insert(path,
-                                   SourceData {
-                                       source: Some(args.source.clone()),
-                                       breakpoints: breakpoints,
-                                   });
-                }
-
-                Ok(SetBreakpointsResponseBody {
-                        breakpoints: args.breakpoints
-                            .into_iter()
-                            .flat_map(|bs| bs)
-                            .map(|breakpoint| {
-                                Breakpoint {
-                                    column: None,
-                                    end_column: None,
-                                    end_line: None,
-                                    id: None,
-                                    line: Some(breakpoint.line),
-                                    message: None,
-                                    source: None,
-                                    verified: true,
-                                }
-                            })
-                            .collect(),
-                    })
-                    .into_future()
-                    .boxed()
-            };
-
-            io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
+        None => {
+            let stdin = io::stdin();
+            spawn_server(stdin.lock(), Arc::new(io::stdout()));
         }
-
-        let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
-            Ok(ThreadsResponseBody {
-                    threads: vec![Thread {
-                                      id: 1,
-                                      name: "main".to_string(),
-                                  }],
-                })
-                .into_future()
-                .boxed()
-        };
-
-        io.add_async_method("threads", ServerCommand::new(threads));
-
-        {
-            let debugger = debugger.clone();
-            let stack_trace = move |_: StackTraceArguments| -> BoxFuture<_, ServerError<()>> {
-                let mut frames = Vec::new();
-                let mut i = 0;
-
-                let mut sources = debugger.sources.lock().unwrap();
-                let context = debugger.thread.context();
-                let info = context.debug_info();
-
-                while let Some(stack_info) = info.stack_info(i) {
-                    if info.stack_info(i + 1).is_none() {
-                        // Skip the top level scope
-                        break;
-                    }
-
-                    let source = match sources.entry(stack_info.source_name().to_string()) {
-                        Entry::Occupied(entry) => entry.get().source.clone(),
-                        Entry::Vacant(entry) => {
-                            // If the source is not in the map, create it from the debug info
-                            let name = entry.key().to_string();
-                            let path = format!("{}.glu", name.replace(".", "/"));
-                            entry.insert(SourceData {
-                                    source: Some(Source {
-                                        path: Some(path),
-                                        name: Some(name),
-                                        ..Source::default()
-                                    }),
-                                    breakpoints: HashSet::new(),
-                                })
-                                .source
-                                .clone()
-                        }
-                    };
-                    frames.push(StackFrame {
-                        column: 0,
-                        end_column: None,
-                        end_line: None,
-                        id: i as i64,
-                        line: stack_info.line().map_or(0, |line| line.to_usize() as i64 + 1),
-                        module_id: None,
-                        name: stack_info.function_name().unwrap_or("<unknown>").to_string(),
-                        source: source,
-                    });
-
-                    i += 1;
-                }
-
-                Ok(StackTraceResponseBody {
-                        total_frames: Some(frames.len() as i64),
-                        stack_frames: frames,
-                    })
-                    .into_future()
-                    .boxed()
-            };
-            io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let scopes = move |args: ScopesArguments| -> BoxFuture<_, ServerError<()>> {
-                let mut scopes = Vec::new();
-
-                let sources = debugger.sources.lock().unwrap();
-                let context = debugger.thread.context();
-                let info = context.debug_info();
-
-                if let Some(stack_info) = info.stack_info(args.frame_id as usize) {
-                    scopes.push(Scope {
-                        column: None,
-                        end_column: None,
-                        end_line: None,
-                        expensive: false,
-                        indexed_variables: None,
-                        line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
-                        name: "Locals".to_string(),
-                        named_variables: Some(stack_info.locals().count() as i64),
-                        source: sources.get(stack_info.source_name())
-                            .and_then(|source| source.source.clone()),
-                        variables_reference: (args.frame_id + 1) * 2 - 1,
-                    });
-                    scopes.push(Scope {
-                        column: None,
-                        end_column: None,
-                        end_line: None,
-                        expensive: false,
-                        indexed_variables: None,
-                        line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
-                        name: "Upvars".to_string(),
-                        named_variables: Some(stack_info.locals().count() as i64),
-                        source: sources.get(stack_info.source_name())
-                            .and_then(|source| source.source.clone()),
-                        variables_reference: (args.frame_id + 1) * 2,
-                    });
-                }
-                Ok(ScopesResponseBody { scopes: scopes })
-                    .into_future()
-                    .boxed()
-            };
-            io.add_async_method("scopes", ServerCommand::new(scopes));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont =
-                move |_: ContinueArguments| -> BoxFuture<ContinueResponseBody, ServerError<()>> {
-                    debugger.do_continue.store(true, Ordering::Release);
-                    Ok(ContinueResponseBody { all_threads_continued: Some(true) })
-                        .into_future()
-                        .boxed()
-                };
-            io.add_async_method("continue", ServerCommand::new(cont));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont = move |_: NextArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                debugger.do_continue.store(true, Ordering::Release);
-                let context = debugger.thread.context();
-                let debug_info = context.debug_info();
-                debugger.pause.store(NEXT, Ordering::Release);
-                *debugger.step_data.lock().unwrap() = StepData {
-                    stack_frames: debug_info.stack_info_len(),
-                    function_name: debug_info.stack_info(0)
-                        .unwrap()
-                        .function_name()
-                        .unwrap()
-                        .to_string(),
-                };
-                Ok(None).into_future().boxed()
-            };
-            io.add_async_method("next", ServerCommand::new(cont));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont = move |_: StepInArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                debugger.do_continue.store(true, Ordering::Release);
-                debugger.pause.store(STEP_IN, Ordering::Release);
-                Ok(None).into_future().boxed()
-            };
-            io.add_async_method("stepIn", ServerCommand::new(cont));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont = move |_: StepOutArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                debugger.do_continue.store(true, Ordering::Release);
-                let context = debugger.thread.context();
-                let debug_info = context.debug_info();
-                debugger.pause.store(STEP_OUT, Ordering::Release);
-                *debugger.step_data.lock().unwrap() = StepData {
-                    stack_frames: debug_info.stack_info_len(),
-                    function_name: debug_info.stack_info(0)
-                        .unwrap()
-                        .function_name()
-                        .unwrap()
-                        .to_string(),
-                };
-                Ok(None).into_future().boxed()
-            };
-            io.add_async_method("stepOut", ServerCommand::new(cont));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont = move |_: PauseArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
-                debugger.pause.store(PAUSE, Ordering::Release);
-                Ok(None).into_future().boxed()
-            };
-            io.add_async_method("pause", ServerCommand::new(cont));
-        }
-
-        {
-            let debugger = debugger.clone();
-            let cont =
-                move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
-                    let variables = debugger.variables(args.variables_reference);
-                    Ok(VariablesResponseBody { variables: variables }).into_future().boxed()
-                };
-            io.add_async_method("variables", ServerCommand::new(cont));
-        }
-
-        let handle = spawn(move || {
-            let mut input = BufReader::new(&*stream);
-
-            // The response needs the command so we need extract it from the request and inject it
-            // in the response
-            let command = RefCell::new(String::new());
-            let mut output = &*stream;
-            (|| -> Result<(), Box<StdError>> {
-                    while !exit_token.load(Ordering::SeqCst) {
-                        match try!(read_message(&mut input)) {
-                            Some(json) => {
-                                let json = try!(translate_request(json, &command));
-                                debug!("Handle: {}", json);
-                                if let Some(response) = io.handle_request_sync(&json) {
-                                    let response = try!(translate_response(&debugger,
-                                                                           response,
-                                                                           &command.borrow()));
-                                    try!(write_message_str(&mut output, &response));
-                                    try!(output.flush());
-                                }
-                                if debugger.do_continue.load(Ordering::Acquire) {
-                                    debugger.do_continue.store(false, Ordering::Release);
-                                    debugger.continue_barrier.wait();
-                                }
-                            }
-                            None => return Ok(()),
-                        }
-                    }
-                    Ok(())
-                })()
-                .unwrap();
-        });
-
-        handle.join().unwrap();
     }
 }
