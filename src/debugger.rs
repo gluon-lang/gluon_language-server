@@ -36,8 +36,9 @@ use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{ArcType, Type, arg_iter};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
-use gluon::vm::thread::{RootedThread, ThreadInternal, LINE_FLAG};
+use gluon::vm::thread::{Thread as GluonThread, RootedThread, ThreadInternal, LINE_FLAG};
 use gluon::{Compiler, Error as GluonError, filename_to_module};
+use gluon::import::Import;
 
 use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, read_message,
                                  write_message, write_message_str};
@@ -76,6 +77,16 @@ pub struct LaunchHandler {
     debugger: Arc<Debugger>,
 }
 
+fn strip_file_prefix(thread: &GluonThread, program: &str) -> String {
+    let import = thread.get_macros()
+        .get("import")
+        .expect("Import macro");
+    let import = import.downcast_ref::<Import>()
+        .expect("Importer");
+    let paths = import.paths.read().unwrap();
+    gluon_language_server::strip_file_prefix(&paths, &program.parse().unwrap()).unwrap()
+}
+
 impl LanguageServerCommand<Value> for LaunchHandler {
     type Output = Option<Value>;
     type Error = ();
@@ -94,11 +105,12 @@ impl LaunchHandler {
                     data: None,
                 }
             })?;
-        let module = filename_to_module(program);
+        let program = strip_file_prefix(&self.debugger.thread, program);
+        let module = filename_to_module(&program);
         let expr = {
-            let mut file = File::open(program).map_err(|_| {
+            let mut file = File::open(&*program).map_err(|_| {
                     ServerError {
-                        message: format!("Program does not exit: `{}`", program),
+                        message: format!("Program does not exist: `{}`", program),
                         data: None,
                     }
                 })?;
@@ -617,7 +629,7 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
             let opt = args.source
                 .path
                 .as_ref()
-                .map(|path| filename_to_module(path.trim_right_matches(".glu")));
+                .map(|path| filename_to_module(&strip_file_prefix(&debugger.thread, path)));
             if let Some(path) = opt {
                 let mut sources = debugger.sources.lock().unwrap();
                 sources.insert(path,
