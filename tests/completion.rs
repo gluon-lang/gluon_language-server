@@ -5,6 +5,7 @@ extern crate languageserver_types;
 extern crate jsonrpc_core;
 extern crate serde_json;
 extern crate serde;
+extern crate url;
 
 mod support;
 
@@ -19,7 +20,9 @@ fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
     let hover = support::method_call("textDocument/completion",
                                      id,
                                      TextDocumentPositionParams {
-                                         text_document: TextDocumentIdentifier { uri: uri.into() },
+                                         text_document: TextDocumentIdentifier {
+                                             uri: support::test_url(uri),
+                                         },
                                          position: position,
                                      });
 
@@ -76,7 +79,7 @@ fn prelude_completion() {
                [CompletionItem {
                     label: "not".into(),
                     kind: Some(CompletionItemKind::Variable),
-                    detail: Some("| False | True -> std.types.Bool".into()),
+                    detail: Some("std.types.Bool -> std.types.Bool".into()),
                     ..CompletionItem::default()
                 }]);
 }

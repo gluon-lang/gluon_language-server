@@ -5,6 +5,7 @@ extern crate languageserver_types;
 extern crate jsonrpc_core;
 extern crate serde_json;
 extern crate serde;
+extern crate url;
 
 mod support;
 
@@ -19,7 +20,9 @@ fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
     let hover = support::method_call("textDocument/hover",
                                      id,
                                      TextDocumentPositionParams {
-                                         text_document: TextDocumentIdentifier { uri: uri.into() },
+                                         text_document: TextDocumentIdentifier {
+                                             uri: support::test_url(uri),
+                                         },
                                          position: position,
                                      });
 

@@ -14,10 +14,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::ser::Serializer;
 use serde_json::{Value, to_value, from_str, from_value};
 
+use url::Url;
+
 use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
 use gluon_language_server::rpc::read_message;
 
+pub fn test_url(uri: &str) -> Url {
+    Url::from_file_path(&env::current_dir().unwrap().join(uri)).unwrap()
+
+}
 
 pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
     where W: Write,
@@ -36,7 +42,7 @@ pub fn method_call<T>(method: &str, id: u64, value: T) -> Call
 {
     let value = to_value(value);
     let params = match value {
-        Value::Object(map) => Params::Map(map),
+        Ok(Value::Object(map)) => Params::Map(map),
         _ => panic!("Expected map"),
     };
     Call::MethodCall(MethodCall {
@@ -52,7 +58,7 @@ pub fn notification<T>(method: &str, value: T) -> Call
 {
     let value = to_value(value);
     let params = match value {
-        Value::Object(map) => Params::Map(map),
+        Ok(Value::Object(map)) => Params::Map(map),
         _ => panic!("Expected map"),
     };
     Call::Notification(Notification {
@@ -68,7 +74,7 @@ pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
     let did_open = notification("textDocument/didOpen",
                                 DidOpenTextDocumentParams {
                                     text_document: TextDocumentItem {
-                                        uri: uri.into(),
+                                        uri: test_url(uri),
                                         language_id: Some("gluon".into()),
                                         text: text.into(),
                                         version: Some(1),

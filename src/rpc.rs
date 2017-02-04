@@ -40,17 +40,24 @@ impl<T> RpcMethodSimple for ServerCommand<T>
                     Ok(value) => {
                         return self.0
                             .execute(value)
-                            .then(|result| {
-                                match result {
-                                    Ok(value) => Ok(to_value(&value)).into_future(),
-                                    Err(error) => {
-                                        Err(Error {
-                                                code: ErrorCode::InternalError,
-                                                message: error.message,
-                                                data: error.data.as_ref().map(to_value),
-                                            })
-                                            .into_future()
-                                    }
+                            .then(|result| match result {
+                                Ok(value) => {
+                                    Ok(to_value(&value)
+                                            .expect("result data could not be serialized"))
+                                        .into_future()
+                                }
+                                Err(error) => {
+                                    Err(Error {
+                                            code: ErrorCode::InternalError,
+                                            message: error.message,
+                                            data: error.data
+                                                .as_ref()
+                                                .map(|v| {
+                                                    to_value(v).expect("error data could not be \
+                                                                        serialized")
+                                                }),
+                                        })
+                                        .into_future()
                                 }
                             })
                             .boxed()
@@ -64,7 +71,8 @@ impl<T> RpcMethodSimple for ServerCommand<T>
         futures::failed(Error {
                 code: ErrorCode::InvalidParams,
                 message: format!("Invalid params: {:?}", param),
-                data: data.as_ref().map(to_value),
+                data: data.as_ref()
+                    .map(|v| to_value(v).expect("error data could not be serialized")),
             })
             .boxed()
     }

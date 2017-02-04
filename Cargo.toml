@@ -14,16 +14,16 @@ env_logger = "0.3.3"
 
 url = "1.2.0"
 
-jsonrpc-core = "5.0.0"
+jsonrpc-core = { version = "5.0.0", git = "https://github.com/Marwes/jsonrpc", branch = "serde-0.9.0" }
 futures = "0.1.0"
 
-serde = "0.8.11"
-serde_json = "0.8.0"
+serde = "0.9.6"
+serde_json = "0.9.0"
 
-languageserver-types =  "0.4.0"
+languageserver-types = "0.7.0"
 
 [dependencies.gluon]
-git = "https://github.com/Marwes/gluon"
-branch = "debugger"
+git = "https://github.com/gluon-lang/gluon"
+branch = "master"
 # Don't include the repl
 default-features = false

@@ -18,7 +18,8 @@ extern crate languageserver_types;
 pub mod rpc;
 
 use jsonrpc_core::{IoHandler, RpcNotificationSimple, Params, Value};
-use serde_json::value::{from_value, to_value};
+
+use url::Url;
 
 use gluon::base::ast::SpannedExpr;
 use gluon::base::fnv::FnvMap;
@@ -34,7 +35,11 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
+use std::env;
+use std::error::Error as StdError;
+use std::fmt;
 use std::fs;
+use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic;
@@ -51,12 +56,12 @@ impl<T> RpcNotificationSimple for ServerCommand<T>
 {
     fn execute(&self, param: Params) {
         match param {
-            Params::Map(ref map) => {
-                match from_value(Value::Object(map.clone())) {
+            Params::Map(map) => {
+                match serde_json::from_value(Value::Object(map)) {
                     Ok(value) => {
                         self.0.execute(value);
                     }
-                    Err(_) => log_message(format!("Invalid parameters: {:?}", map)),
+                    Err(err) => log_message(format!("Invalid parameters. Reason: {}", err)),
                 }
             }
             _ => log_message(format!("Invalid parameters: {:?}", param)),
@@ -67,10 +72,11 @@ impl<T> RpcNotificationSimple for ServerCommand<T>
 fn log_message(message: String) {
     debug!("{}", message);
     let r = format!(r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
-                    to_value(&LogMessageParams {
-                        typ: MessageType::Log,
-                        message: message,
-                    }));
+                    serde_json::to_value(&LogMessageParams {
+                            typ: MessageType::Log,
+                            message: message,
+                        })
+                        .unwrap());
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
@@ -149,7 +155,7 @@ impl LanguageServerCommand for Completion {
                -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
         (|| -> Result<_, _> {
                 let thread = &self.0;
-                let module = strip_file_prefix(thread, &change.text_document.uri);
+                let module = strip_file_prefix_with_thread(thread, &change.text_document.uri);
                 let import = thread.get_macros().get("import").expect("Import macro");
                 let import = import.downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
@@ -210,7 +216,7 @@ impl LanguageServerCommand for HoverCommand {
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
         (|| -> Result<_, _> {
                 let thread = &self.0;
-                let module = strip_file_prefix(thread, &change.text_document.uri);
+                let module = strip_file_prefix_with_thread(thread, &change.text_document.uri);
                 let import = thread.get_macros().get("import").expect("Import macro");
                 let import = import.downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
@@ -292,21 +298,23 @@ impl LanguageServerNotification for TextDocumentDidChange {
     }
 }
 
-fn strip_file_prefix(thread: &Thread, filename: &str) -> String {
+fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     let import = thread.get_macros()
         .get("import")
         .expect("Import macro");
     let import = import.downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let paths = import.paths.read().unwrap();
+    strip_file_prefix(&paths, url).unwrap()
+}
 
-    let file = url::percent_encoding::percent_decode(filename.as_bytes()).decode_utf8_lossy();
-    let url = url::Url::parse(&file).ok();
-    let name = url.and_then(|url| url.to_file_path().ok())
-        .and_then(|path| fs::canonicalize(path).ok());
-    let name = match name {
-        Some(name) => name,
-        None => return filename.to_string(),
+fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
+    use std::env;
+
+    let path = url.to_file_path().map_err(|_| "Expected a file uri")?;
+    let name = match fs::canonicalize(&*path) {
+        Ok(name) => name,
+        Err(_) => env::current_dir()?.join(&*path),
     };
 
     for path in &*paths {
@@ -316,16 +324,16 @@ fn strip_file_prefix(thread: &Thread, filename: &str) -> String {
             .and_then(|path| name.strip_prefix(path).ok())
             .and_then(|path| path.to_str());
         if let Some(path) = result {
-            return path.to_string();
+            return Ok(format!("{}", path));
         }
     }
-    filename.to_string()
+    Ok(format!("{}", name.strip_prefix(&env::current_dir()?)?.display()))
 }
 
-fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()> {
+fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()> {
     use gluon::compiler_pipeline::*;
 
-    let filename = strip_file_prefix(thread, filename);
+    let filename = strip_file_prefix_with_thread(thread, filename);
     let name = filename_to_module(&filename);
     let mut compiler = Compiler::new();
     // The parser may find parse errors but still produce an expression
@@ -359,47 +367,58 @@ fn typecheck(thread: &Thread, filename: &str, fileinput: &str) -> GluonResult<()
     parse_result.and(result)
 }
 
-fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
-    let diagnostics = match typecheck(thread, filename, fileinput) {
-        Ok(_) => vec![],
+fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
+    fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
+        where T: fmt::Display,
+    {
+        Diagnostic {
+            message: format!("{}", err.value),
+            severity: Some(DiagnosticSeverity::Error),
+            range: span_to_range(&err.span),
+            ..Diagnostic::default()
+        }
+    }
+
+    fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError>> {
+        let mut result = s.replace(".", "/");
+        result.push_str(".glu");
+        let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
+                Ok(path) => Ok(path.join(result)),
+                Err(_) => Err(err),
+            })?;
+        Ok(url::Url::from_file_path(path).or_else(|_| url::Url::from_file_path(s))
+            .map_err(|_| format!("Unable to convert module name to a url: `{}`", s))?)
+    }
+
+    fn module_name_to_file(s: &str) -> Url {
+        module_name_to_file_(s).unwrap()
+    }
+
+    let (source_name, diagnostics) = match typecheck(thread, filename, fileinput) {
+        Ok(_) => (filename.clone(), vec![]),
         Err(err) => {
             match err {
                 GluonError::Typecheck(err) => {
-                    err.errors()
-                        .into_iter()
-                        .map(|err| {
-                            Diagnostic {
-                                message: format!("{}", err.value),
-                                severity: Some(DiagnosticSeverity::Error),
-                                range: span_to_range(&err.span),
-                                ..Diagnostic::default()
-                            }
-                        })
-                        .collect()
+                    (module_name_to_file(&err.source_name),
+                     err.errors()
+                         .into_iter()
+                         .map(into_diagnostic)
+                         .collect())
                 }
                 GluonError::Parse(err) => {
-                    err.errors()
-                        .into_iter()
-                        .map(|err| {
-                            let p = Position {
-                                line: err.span.start.line.to_usize() as u64,
-                                character: err.span.start.column.to_usize() as u64,
-                            };
-                            Diagnostic {
-                                message: format!("{}", err),
-                                severity: Some(DiagnosticSeverity::Error),
-                                range: Range { start: p, end: p },
-                                ..Diagnostic::default()
-                            }
-                        })
-                        .collect()
+                    (module_name_to_file(&err.source_name),
+                     err.errors()
+                         .into_iter()
+                         .map(into_diagnostic)
+                         .collect())
                 }
                 err => {
-                    vec![Diagnostic {
-                             message: format!("{}", err),
-                             severity: Some(DiagnosticSeverity::Error),
-                             ..Diagnostic::default()
-                         }]
+                    (filename.clone(),
+                     vec![Diagnostic {
+                              message: format!("{}", err),
+                              severity: Some(DiagnosticSeverity::Error),
+                              ..Diagnostic::default()
+                          }])
                 }
             }
         }
@@ -409,10 +428,11 @@ fn run_diagnostics(thread: &Thread, filename: &str, fileinput: &str) {
                         "method": "textDocument/publishDiagnostics",
                         "params": {}
                     }}"#,
-                    to_value(&PublishDiagnosticsParams {
-                        uri: filename.into(),
-                        diagnostics: diagnostics,
-                    }));
+                    serde_json::to_value(&PublishDiagnosticsParams {
+                            uri: source_name.clone(),
+                            diagnostics: diagnostics,
+                        })
+                        .unwrap());
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
@@ -429,7 +449,7 @@ pub fn run() {
                             ServerCommand(Completion(thread.clone())));
         io.add_async_method("textDocument/hover",
                             ServerCommand(HoverCommand(thread.clone())));
-        io.add_async_method("shutdown", |_| futures::finished(Value::I64(0)).boxed());
+        io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
         let exit_token = Arc::new(AtomicBool::new(false));
         let exit_token2 = exit_token.clone();
         io.add_notification("exit",
@@ -447,5 +467,25 @@ pub fn run() {
             .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
             .unwrap_or("Any");
         log_message(format!("Panic: `{}`", msg));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::path::PathBuf;
+
+    use url::Url;
+
+    use super::strip_file_prefix;
+
+    #[test]
+    fn test_strip_file_prefix() {
+        let renamed =
+            strip_file_prefix(&[PathBuf::from(".")],
+                              &Url::from_file_path(env::current_dir().unwrap().join("test"))
+                                  .unwrap())
+                .unwrap();
+        assert_eq!(renamed, "test");
     }
 }
