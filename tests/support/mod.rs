@@ -7,17 +7,23 @@ use std::str;
 use jsonrpc_core::request::{Call, MethodCall, Notification};
 use jsonrpc_core::version::Version;
 use jsonrpc_core::params::Params;
-use jsonrpc_core::response::{SyncOutput, SyncResponse};
+use jsonrpc_core::response::{Output, Response};
 use jsonrpc_core::id::Id;
 
 use serde::{Deserialize, Serialize};
 use serde_json::ser::Serializer;
 use serde_json::{Value, to_value, from_str, from_value};
 
+use url::Url;
+
 use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
 
 use gluon_language_server::rpc::read_message;
 
+pub fn test_url(uri: &str) -> Url {
+    Url::from_file_path(&env::current_dir().unwrap().join(uri)).unwrap()
+
+}
 
 pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
     where W: Write,
@@ -36,11 +42,11 @@ pub fn method_call<T>(method: &str, id: u64, value: T) -> Call
 {
     let value = to_value(value);
     let params = match value {
-        Value::Object(map) => Params::Map(map),
+        Ok(Value::Object(map)) => Params::Map(map),
         _ => panic!("Expected map"),
     };
     Call::MethodCall(MethodCall {
-        jsonrpc: Version::V2,
+        jsonrpc: Some(Version::V2),
         method: method.into(),
         id: Id::Num(id),
         params: Some(params),
@@ -52,11 +58,11 @@ pub fn notification<T>(method: &str, value: T) -> Call
 {
     let value = to_value(value);
     let params = match value {
-        Value::Object(map) => Params::Map(map),
+        Ok(Value::Object(map)) => Params::Map(map),
         _ => panic!("Expected map"),
     };
     Call::Notification(Notification {
-        jsonrpc: Version::V2,
+        jsonrpc: Some(Version::V2),
         method: method.into(),
         params: Some(params),
     })
@@ -68,7 +74,7 @@ pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
     let did_open = notification("textDocument/didOpen",
                                 DidOpenTextDocumentParams {
                                     text_document: TextDocumentItem {
-                                        uri: uri.into(),
+                                        uri: test_url(uri),
                                         language_id: Some("gluon".into()),
                                         text: text.into(),
                                         version: Some(1),
@@ -101,7 +107,7 @@ pub fn send_rpc<F, T>(f: F) -> T
         f(stdin);
 
         let exit = Call::Notification(Notification {
-            jsonrpc: Version::V2,
+            jsonrpc: Some(Version::V2),
             method: "exit".into(),
             params: None,
         });
@@ -114,7 +120,7 @@ pub fn send_rpc<F, T>(f: F) -> T
     let mut value = None;
     let mut output = &result.stdout[..];
     while let Some(json) = read_message(&mut output).unwrap() {
-        if let Ok(SyncResponse::Single(SyncOutput::Success(response))) = from_str(&json) {
+        if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
             value = from_value(response.result).ok();
         }
         if let Ok(Notification { params: Some(params), .. }) = from_str(&json) {
