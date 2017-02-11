@@ -11,6 +11,8 @@ mod support;
 
 use std::io::Write;
 
+use url::Url;
+
 use languageserver_types::{CompletionItem, CompletionItemKind, Position, TextDocumentIdentifier,
                            TextDocumentPositionParams};
 
@@ -80,6 +82,37 @@ fn prelude_completion() {
                     label: "not".into(),
                     kind: Some(CompletionItemKind::Variable),
                     detail: Some("std.types.Bool -> std.types.Bool".into()),
+                    ..CompletionItem::default()
+                }]);
+}
+
+#[test]
+fn url_encoded_path() {
+    let completions: Vec<CompletionItem> = support::send_rpc(|mut stdin| {
+        let text = r#"
+let r = { abc = 1 }
+r.
+"#;
+        let uri: Url = "file:///C%3A/examples/test.glu".parse().unwrap();
+        support::did_open_uri(stdin, uri.clone(), text);
+
+        let hover = support::method_call("textDocument/completion",
+                                         1,
+                                         TextDocumentPositionParams {
+                                             text_document: TextDocumentIdentifier { uri: uri },
+                                             position: Position {
+                                                 line: 3,
+                                                 character: 2,
+                                             },
+                                         });
+
+        support::write_message(stdin, hover).unwrap();
+    });
+    assert_eq!(completions,
+               [CompletionItem {
+                    label: "abc".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("Int".into()),
                     ..CompletionItem::default()
                 }]);
 }
