@@ -21,7 +21,8 @@ use jsonrpc_core::{IoHandler, RpcNotificationSimple, Params, Value};
 
 use url::Url;
 
-use gluon::base::ast::SpannedExpr;
+use gluon::base::ast::{SpannedExpr, Typed};
+use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
 use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Line, Span};
@@ -35,7 +36,7 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
             filename_to_module};
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
@@ -338,25 +339,35 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
     let filename = strip_file_prefix_with_thread(thread, filename);
     let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
+    let mut errors = Errors::new();
     let mut compiler = Compiler::new();
     // The parser may find parse errors but still produce an expression
     // For that case still typecheck the expression but return the parse error afterwards
-    let (mut expr, parse_result): (_, GluonResult<()>) =
-        match compiler.parse_partial_expr(&name, fileinput) {
-            Ok(expr) => (expr, Ok(())),
-            Err((None, err)) => return Err(err.into()),
-            Err((Some(expr), err)) => (expr, Err(err.into())),
-        };
-    try!(expr.expand_macro(&mut compiler, thread, &name));
-    let result = match compiler.typecheck_expr(thread, &name, fileinput, &mut expr) {
-        Ok(typ) => {
-            let metadata = Metadata::default();
-            try!(thread.global_env()
-                .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0)));
-            Ok(())
+    let mut expr = match compiler.parse_partial_expr(&name, fileinput) {
+        Ok(expr) => expr,
+        Err((None, err)) => return Err(err.into()),
+        Err((Some(expr), err)) => {
+            errors.push(err.into());
+            expr
         }
-        Err(err) => Err(err),
     };
+    if let Err(err) = expr.expand_macro(&mut compiler, thread, &name) {
+        errors.push(err);
+    }
+
+    let check_result = (MacroValue { expr: &mut expr })
+        .typecheck(&mut compiler, thread, &name, fileinput)
+        .map(|value| value.typ);
+    let typ = match check_result {
+        Ok(typ) => typ,
+        Err(err) => {
+            errors.push(err);
+            expr.env_type_of(&*thread.global_env().get_env())
+        }
+    };
+    let metadata = Metadata::default();
+    try!(thread.global_env()
+        .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0)));
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import.downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
@@ -364,7 +375,11 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
 
     let lines = source::Lines::new(fileinput);
     importer.insert(name.into(), (lines, expr));
-    parse_result.and(result)
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.into())
+    }
 }
 
 struct Entry<K, V> {
@@ -416,9 +431,9 @@ impl DiagnosticProcessor {
     }
 }
 
-fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
-    info!("Running diagnostics on {}", filename);
-
+fn create_diagnostics(diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
+                      filename: &Url,
+                      err: GluonError) {
     fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
         where T: fmt::Display,
     {
@@ -445,46 +460,62 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
         module_name_to_file_(s).unwrap()
     }
 
-    let (source_name, diagnostics) = match typecheck(thread, filename, fileinput) {
-        Ok(_) => (filename.clone(), vec![]),
-        Err(err) => {
-            match err {
-                GluonError::Typecheck(err) => {
-                    (module_name_to_file(&err.source_name),
-                     err.errors()
-                         .into_iter()
-                         .map(into_diagnostic)
-                         .collect())
-                }
-                GluonError::Parse(err) => {
-                    (module_name_to_file(&err.source_name),
-                     err.errors()
-                         .into_iter()
-                         .map(into_diagnostic)
-                         .collect())
-                }
-                err => {
-                    (filename.clone(),
-                     vec![Diagnostic {
-                              message: format!("{}", err),
-                              severity: Some(DiagnosticSeverity::Error),
-                              ..Diagnostic::default()
-                          }])
-                }
+    match err {
+        GluonError::Typecheck(err) => {
+            diagnostics.entry(module_name_to_file(&err.source_name))
+                .or_insert(Vec::new())
+                .extend(err.errors()
+                    .into_iter()
+                    .map(into_diagnostic))
+        }
+        GluonError::Parse(err) => {
+            diagnostics.entry(module_name_to_file(&err.source_name))
+                .or_insert(Vec::new())
+                .extend(err.errors()
+                    .into_iter()
+                    .map(into_diagnostic))
+        }
+        GluonError::Multiple(errors) => {
+            for err in errors {
+                create_diagnostics(diagnostics, filename, err);
             }
         }
+        err => {
+            diagnostics.entry(filename.clone())
+                .or_insert(Vec::new())
+                .push(Diagnostic {
+                    message: format!("{}", err),
+                    severity: Some(DiagnosticSeverity::Error),
+                    ..Diagnostic::default()
+                })
+        }
+    }
+}
+
+fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
+    info!("Running diagnostics on {}", filename);
+
+    let diagnostics = match typecheck(thread, filename, fileinput) {
+        Ok(_) => Some((filename.clone(), vec![])).into_iter().collect(),
+        Err(err) => {
+            let mut diagnostics = BTreeMap::new();
+            create_diagnostics(&mut diagnostics, filename, err);
+            diagnostics
+        }
     };
-    let r = format!(r#"{{
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/publishDiagnostics",
-                        "params": {}
-                    }}"#,
-                    serde_json::to_value(&PublishDiagnosticsParams {
-                            uri: source_name,
-                            diagnostics: diagnostics,
-                        })
-                        .unwrap());
-    print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+    for (source_name, diagnostic) in diagnostics {
+        let r = format!(r#"{{
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": {}
+                        }}"#,
+                        serde_json::to_value(&PublishDiagnosticsParams {
+                                uri: source_name,
+                                diagnostics: diagnostic,
+                            })
+                            .unwrap());
+        print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+    }
 }
 
 pub fn run() {
