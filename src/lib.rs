@@ -252,21 +252,19 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                         }
                     }));
                 let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-                completion::find(&*thread.get_env(), expr, byte_pos)
-            .map(|typ| {
-                Hover {
-                    contents: vec![MarkedString::String(format!("{}", typ))],
-                    range: None,
-                }
-            })
-            .map_err(|()| {
-                ServerError {
-                    message: format!("Completion not found at: Line {}, Column {}",
-                                     change.position.line + 1,
-                                     change.position.character + 1),
-                    data: None,
-                }
-            })
+                Ok(completion::find(&*thread.get_env(), expr, byte_pos)
+                    .map(|typ| {
+                        Hover {
+                            contents: vec![MarkedString::String(format!("{}", typ))],
+                            range: None,
+                        }
+                    })
+                    .unwrap_or_else(|()| {
+                        Hover {
+                            contents: vec![],
+                            range: None,
+                        }
+                    }))
             })()
             .into_future()
             .boxed()
