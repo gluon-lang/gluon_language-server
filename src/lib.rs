@@ -55,6 +55,14 @@ use futures::{BoxFuture, Future, IntoFuture};
 
 use rpc::*;
 
+macro_rules! log_message {
+    ($($ts: tt)+) => {
+        if log_enabled!(log::LogLevel::Debug) {
+            log_message(format!( $($ts)+ ))
+        }
+    }
+}
+
 impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
     where T: LanguageServerNotification<P>,
           P: serde::Deserialize + 'static,
@@ -66,10 +74,10 @@ impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
                     Ok(value) => {
                         self.0.execute(value);
                     }
-                    Err(err) => log_message(format!("Invalid parameters. Reason: {}", err)),
+                    Err(err) => log_message!("Invalid parameters. Reason: {}", err),
                 }
             }
-            _ => log_message(format!("Invalid parameters: {:?}", param)),
+            _ => log_message!("Invalid parameters: {:?}", param),
         }
     }
 }
@@ -592,7 +600,7 @@ pub fn run() {
             .cloned()
             .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
             .unwrap_or("Any");
-        log_message(format!("Panic: `{}`", msg));
+        log_message!("Panic: `{}`", msg);
     }
 }
 
