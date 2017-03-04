@@ -40,6 +40,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
+use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Condvar, Mutex};
@@ -53,8 +54,9 @@ use futures::{BoxFuture, Future, IntoFuture};
 
 use rpc::*;
 
-impl<T> RpcNotificationSimple for ServerCommand<T>
-    where T: LanguageServerNotification,
+impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
+    where T: LanguageServerNotification<P>,
+          P: serde::Deserialize + 'static,
 {
     fn execute(&self, param: Params) {
         match param {
@@ -114,8 +116,7 @@ impl Importer for CheckImporter {
 }
 
 struct Initialize(RootedThread);
-impl LanguageServerCommand for Initialize {
-    type Param = InitializeParams;
+impl LanguageServerCommand<InitializeParams> for Initialize {
     type Output = InitializeResult;
     type Error = InitializeError;
     fn execute(&self,
@@ -148,8 +149,7 @@ impl LanguageServerCommand for Initialize {
 }
 
 struct Completion(RootedThread);
-impl LanguageServerCommand for Completion {
-    type Param = TextDocumentPositionParams;
+impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
     type Output = Vec<CompletionItem>;
     type Error = ();
     fn execute(&self,
@@ -211,8 +211,7 @@ impl LanguageServerCommand for Completion {
 }
 
 struct HoverCommand(RootedThread);
-impl LanguageServerCommand for HoverCommand {
-    type Param = TextDocumentPositionParams;
+impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     type Output = Hover;
     type Error = ();
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
@@ -279,9 +278,7 @@ fn span_to_range(span: &Span<pos::Location>) -> Range {
 }
 
 struct TextDocumentDidOpen(RootedThread);
-impl LanguageServerNotification for TextDocumentDidOpen {
-    type Param = DidOpenTextDocumentParams;
-
+impl LanguageServerNotification<DidOpenTextDocumentParams> for TextDocumentDidOpen {
     fn execute(&self, change: DidOpenTextDocumentParams) {
         run_diagnostics(&self.0,
                         &change.text_document.uri,
@@ -290,9 +287,7 @@ impl LanguageServerNotification for TextDocumentDidOpen {
 }
 
 struct TextDocumentDidChange(Arc<UniqueQueue<Url, String>>);
-impl LanguageServerNotification for TextDocumentDidChange {
-    type Param = DidChangeTextDocumentParams;
-
+impl LanguageServerNotification<DidChangeTextDocumentParams> for TextDocumentDidChange {
     fn execute(&self, mut change: DidChangeTextDocumentParams) {
         use std::mem::replace;
         self.0.add_work(change.text_document.uri,
@@ -310,7 +305,7 @@ fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     strip_file_prefix(&paths, url).unwrap()
 }
 
-fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
+pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
     use std::env;
 
     let path = url.to_file_path().map_err(|_| "Expected a file uri")?;
@@ -319,7 +314,7 @@ fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdErro
         Err(_) => env::current_dir()?.join(&*path),
     };
 
-    for path in &*paths {
+    for path in paths {
         let canonicalized = fs::canonicalize(path).ok();
 
         let result = canonicalized.as_ref()
@@ -507,22 +502,42 @@ pub fn run() {
             thread.get_macros().insert("import".into(), import);
 
             let mut io = IoHandler::new();
-            io.add_async_method("initialize", ServerCommand(Initialize(thread.clone())));
+            io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
             io.add_async_method("textDocument/completion",
-                                ServerCommand(Completion(thread.clone())));
+                                ServerCommand::new(Completion(thread.clone())));
             io.add_async_method("textDocument/hover",
-                                ServerCommand(HoverCommand(thread.clone())));
+                                ServerCommand::new(HoverCommand(thread.clone())));
             io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
             let exit_token = Arc::new(AtomicBool::new(false));
-            let exit_token2 = exit_token.clone();
-            io.add_notification("exit",
-                                move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+            {
+                let exit_token = exit_token.clone();
+                io.add_notification("exit",
+                                    move |_| exit_token.store(true, atomic::Ordering::SeqCst));
+            }
             io.add_notification("textDocument/didOpen",
-                                ServerCommand(TextDocumentDidOpen(thread.clone())));
+                                ServerCommand::new(TextDocumentDidOpen(thread.clone())));
             io.add_notification("textDocument/didChange",
-                                ServerCommand(TextDocumentDidChange(work_queue.clone())));
+                                ServerCommand::new(TextDocumentDidChange(work_queue.clone())));
 
-            main_loop(&mut io, exit_token2).unwrap();
+            let mut input = BufReader::new(io::stdin());
+            let mut output = io::stdout();
+
+            (|| -> Result<(), Box<StdError>> {
+                    while !exit_token.load(atomic::Ordering::SeqCst) {
+                        match try!(read_message(&mut input)) {
+                            Some(json) => {
+                                debug!("Handle: {}", json);
+                                if let Some(response) = io.handle_request_sync(&json) {
+                                    try!(write_message_str(&mut output, &response));
+                                    try!(output.flush());
+                                }
+                            }
+                            None => return Ok(()),
+                        }
+                    }
+                    Ok(())
+                })()
+                .unwrap();
         })
     };
 

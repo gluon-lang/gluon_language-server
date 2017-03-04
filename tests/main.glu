@@ -1,2 +1,16 @@
+
 let x = 1
-x
+let id y = y
+1
+let test b y =
+    if b then
+        id (test False y)
+    else
+        let z = y
+        id (id z)
+
+
+2
+test True [1, 2, 3]
+3
+4

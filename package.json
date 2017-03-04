@@ -7,7 +7,7 @@
 	"publisher": "Marwes",
 	"repository": "https://github.com/gluon-lang/gluon_language-server",
 	"engines": {
-		"vscode": "^0.10.10"
+		"vscode": "^1.8.1"
 	},
 	"categories": [
 		"Other"
@@ -54,12 +54,25 @@
 				"type": "gluon",
 				"label": "Gluon Debug",
 
-				"program": "./out/src/debugger.js",
+				"program": "./out/src/debugger",
 				"runtime": "node",
 
 				"variables": {
 					"AskForProgramName": "extension.getProgramName"
 				},
+				
+				"configurationSnippets": [
+					{
+						"label": "Gluon Debug: Launch",
+						"description": "A new configuration for launching a mock debug program",
+						"body": {
+							"type": "gluon",
+							"request": "launch",
+							"name": "{{2:Launch Program}}",
+							"program": "${workspaceRoot}/{{1:Program}}"
+						}
+					}
+				],
 
 				"configurationAttributes": {
 					"launch": {
@@ -83,16 +96,18 @@
 		]
 	},	
 	"scripts": {
-		"vscode:prepublish": "node ./node_modules/vscode/bin/compile",
-		"compile": "node ./node_modules/vscode/bin/compile -watch -p ./",
+		"vscode:prepublish": "tsc -p ./",
+		"compile": "tsc -watch -p ./",
 		"postinstall": "node ./node_modules/vscode/bin/install"
 	},
 	"devDependencies": {
-		"typescript": "^1.8.9"
+		"typescript": "^2.0.3",
+		"@types/node": "^6.0.40",
+		"vscode": "^1.0.0"
 	},
 	"dependencies": {
 		"vscode-debugadapter": "^1.13.1",
-		"vscode-languageclient": "^2.6.3",
-		"vscode": "^0.11.0"
+		"vscode-languageclient": "^3.0.3",
+		"vscode": "^1.0.0"
 	}
 }
