@@ -1,6 +1,6 @@
 [package]
 name = "gluon_language-server"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Markus Westerlind <marwes91@gmail.com>"]
 description = "Language server providing completion for gluon"
 license = "MIT"
@@ -24,7 +24,7 @@ env_logger = "0.3.3"
 
 url = "1.2.0"
 
-jsonrpc-core = { version = "5.0.0", git = "https://github.com/Marwes/jsonrpc", branch = "serde-0.9.0" }
+jsonrpc-core = "6.0.0"
 futures = "0.1.0"
 
 serde = "0.9.6"
@@ -38,6 +38,3 @@ git = "https://github.com/gluon-lang/gluon"
 branch = "master"
 # Don't include the repl
 default-features = false
-
-[dev-dependencies]
-lazy_static = "0.2.2"

@@ -25,8 +25,8 @@ pub fn test_url(uri: &str) -> Url {
 
 }
 
-pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
-    where W: Write,
+pub fn write_message<W, V>(writer: &mut W, value: V) -> io::Result<()>
+    where W: ?Sized + Write,
           V: Serialize,
 {
     let mut vec = Vec::new();
@@ -68,13 +68,13 @@ pub fn notification<T>(method: &str, value: T) -> Call
     })
 }
 
-pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
+pub fn did_open_uri<W: ?Sized>(stdin: &mut W, uri: Url, text: &str)
     where W: Write,
 {
     let did_open = notification("textDocument/didOpen",
                                 DidOpenTextDocumentParams {
                                     text_document: TextDocumentItem {
-                                        uri: test_url(uri),
+                                        uri: uri,
                                         language_id: Some("gluon".into()),
                                         text: text.into(),
                                         version: Some(1),
@@ -82,6 +82,12 @@ pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
                                 });
 
     write_message(stdin, did_open).unwrap();
+}
+
+pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
+    where W: Write,
+{
+    did_open_uri(stdin, test_url(uri), text)
 }
 
 pub fn send_rpc<F, T>(f: F) -> T
