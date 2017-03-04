@@ -34,7 +34,6 @@ languageserver-types = "0.7.0"
 debugserver-types = "0.2.0"
 
 [dependencies.gluon]
-git = "https://github.com/gluon-lang/gluon"
-branch = "master"
+version = "0.3.0"
 # Don't include the repl
 default-features = false
