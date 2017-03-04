@@ -38,6 +38,3 @@ git = "https://github.com/gluon-lang/gluon"
 branch = "master"
 # Don't include the repl
 default-features = false
-
-[dev-dependencies]
-lazy_static = "0.2.2"

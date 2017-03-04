@@ -7,17 +7,12 @@ extern crate serde_json;
 extern crate serde;
 extern crate url;
 
-#[macro_use]
-extern crate lazy_static;
-
 #[allow(dead_code)]
 mod support;
 
-use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ChildStdin, ChildStdout, Stdio};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Mutex;
 use std::fs::canonicalize;
 
 use serde_json::{Value, from_str};
@@ -54,18 +49,9 @@ macro_rules! expect_event {
     } }
 }
 
-lazy_static! {
-    static ref PORT: Mutex<i32> = Mutex::new(4711);
-}
-
 fn run_debugger<F>(f: F)
-    where F: FnOnce(&mut i64, &TcpStream, &mut BufReader<&TcpStream>),
+    where F: FnOnce(&mut i64, &mut ChildStdin, &mut BufReader<&mut ChildStdout>),
 {
-    let port = {
-        let mut port = PORT.lock().unwrap();
-        *port += 1;
-        *port
-    };
     let path = PathBuf::from(::std::env::args().next().unwrap());
     let debugger = path.parent()
         .and_then(|path| path.parent())
@@ -73,58 +59,61 @@ fn run_debugger<F>(f: F)
         .join("gluon_debugger");
 
     let mut child = Command::new(&debugger)
-        .arg(port.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|_| panic!("Expected exe: {}", debugger.display()));
 
-    let stream = TcpStream::connect(&format!("localhost:{}", port)[..]).unwrap();
+    {
+        let mut stream = child.stdin.as_mut().unwrap();
 
-    let mut seq = 0;
-    let mut read = BufReader::new(&stream);
+        let mut seq = 0;
+        let mut read = BufReader::new(child.stdout.as_mut().unwrap());
 
-    request! {
-        &stream,
-        InitializeRequest,
-        "initialize",
-        seq,
-        InitializeRequestArguments {
-            adapter_id: "".into(),
-            columns_start_at_1: None,
-            lines_start_at_1: None,
-            path_format: None,
-            supports_run_in_terminal_request: None,
-            supports_variable_paging: None,
-            supports_variable_type: None,
-        }
-    };
+        request! {
+            &mut stream,
+            InitializeRequest,
+            "initialize",
+            seq,
+            InitializeRequestArguments {
+                adapter_id: "".into(),
+                columns_start_at_1: None,
+                lines_start_at_1: None,
+                path_format: None,
+                supports_run_in_terminal_request: None,
+                supports_variable_paging: None,
+                supports_variable_type: None,
+            }
+        };
 
-    expect_event!(&mut read, InitializedEvent, "initialized");
+        expect_event!(&mut read, InitializedEvent, "initialized");
 
-    let initialize_response = expect_response!(&mut read, InitializeResponse, "initialize");
-    assert!(initialize_response.success);
+        let initialize_response = expect_response!(&mut read, InitializeResponse, "initialize");
+        assert!(initialize_response.success);
 
-    f(&mut seq, &stream, &mut read);
+        f(&mut seq, &mut stream, &mut read);
 
-    request! {
-        &stream,
-        DisconnectRequest,
-        "disconnect",
-        seq,
-        None
-    };
-    expect_response!(read, DisconnectResponse, "disconnect");
+        request! {
+            &mut stream,
+            DisconnectRequest,
+            "disconnect",
+            seq,
+            None
+        };
+        expect_response!(read, DisconnectResponse, "disconnect");
+    }
 
     child.wait().unwrap();
 }
 
-fn launch_relative<W>(stream: W, seq: &mut i64, program: &str)
+fn launch_relative<W>(stream: &mut W, seq: &mut i64, program: &str)
     where W: Write,
 {
     let path = url::Url::from_file_path(canonicalize(program).unwrap()).unwrap();
     launch(stream, seq, &path);
 }
 
-fn launch<W>(stream: W, seq: &mut i64, program: &url::Url)
+fn launch<W>(stream: &mut W, seq: &mut i64, program: &url::Url)
     where W: Write,
 {
     request! {
@@ -139,10 +128,13 @@ fn launch<W>(stream: W, seq: &mut i64, program: &url::Url)
     };
 }
 
-fn request_debug_info(seq: &mut i64,
-                      stream: &TcpStream,
-                      mut read: &mut BufReader<&TcpStream>)
-                      -> (StackTraceResponse, ScopesResponse, VariablesResponse) {
+fn request_debug_info<R, W>(seq: &mut i64,
+                            stream: &mut W,
+                            mut read: &mut R)
+                            -> (StackTraceResponse, ScopesResponse, VariablesResponse)
+    where R: BufRead,
+          W: Write,
+{
     request! {
         stream,
         ThreadsRequest,

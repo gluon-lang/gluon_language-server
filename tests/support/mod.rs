@@ -25,8 +25,8 @@ pub fn test_url(uri: &str) -> Url {
 
 }
 
-pub fn write_message<W, V>(mut writer: W, value: V) -> io::Result<()>
-    where W: Write,
+pub fn write_message<W, V>(writer: &mut W, value: V) -> io::Result<()>
+    where W: ?Sized + Write,
           V: Serialize,
 {
     let mut vec = Vec::new();
