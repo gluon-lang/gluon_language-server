@@ -24,7 +24,7 @@ env_logger = "0.3.3"
 
 url = "1.2.0"
 
-jsonrpc-core = { version = "5.0.0", git = "https://github.com/Marwes/jsonrpc", branch = "serde-0.9.0" }
+jsonrpc-core = "6.0.0"
 futures = "0.1.0"
 
 serde = "0.9.6"
