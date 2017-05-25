@@ -1,10 +1,13 @@
 extern crate clap;
 extern crate debugserver_types;
+extern crate languageserver_types;
 extern crate env_logger;
 extern crate futures;
 extern crate jsonrpc_core;
 extern crate serde;
 extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 #[macro_use]
 extern crate log;
 
@@ -250,29 +253,36 @@ fn translate_request(message: String,
                      current_command: &RefCell<String>)
                      -> Result<String, Box<StdError>> {
     use serde_json::Value;
-    let mut data: Value = try!(serde_json::from_str(&message));
-    if let Some(data) = data.as_object_mut() {
-        let command = data.get("command")
-            .and_then(|c| c.as_str())
-            .expect("command")
-            .to_string();
-        *current_command.borrow_mut() = command.clone();
-        let seq = data.get("seq")
-            .and_then(|c| {
-                          c.as_str()
-                              .map(|s| Value::String(s.to_string()))
-                              .or_else(|| c.as_i64().map(Value::from))
-                      })
-            .expect("seq");
-        let arguments = data.remove("arguments")
-            .unwrap_or(Value::Object(Default::default()));
-        let map = vec![("method".to_string(), Value::String(command)),
-                       ("id".to_string(), seq),
-                       ("params".to_string(), arguments),
-                       ("jsonrpc".to_owned(), Value::String("2.0".to_string()))]
-                .into_iter()
-                .collect();
-        return Ok(try!(serde_json::to_string(&Value::Object(map))));
+    use languageserver_types::NumberOrString;
+
+
+    #[derive(Debug, Deserialize)]
+    struct In {
+        command: String,
+        seq: NumberOrString,
+        #[serde(default)]
+        arguments: Value,
+    }
+
+    #[derive(Serialize)]
+    struct Out<'a> {
+        method: &'a str,
+        id: NumberOrString,
+        params: Value,
+        jsonrpc: &'a str,
+    }
+
+    let data: Option<In> = try!(serde_json::from_str(&message));
+    if let Some(data) = data {
+        *current_command.borrow_mut() = data.command.clone();
+
+        let out = Out {
+            method: &data.command,
+            id: data.seq,
+            params: data.arguments,
+            jsonrpc: "2.0",
+        };
+        return Ok(try!(serde_json::to_string(&out)));
     }
     Ok(message)
 }
@@ -282,33 +292,55 @@ fn translate_response(debugger: &Debugger,
                       current_command: &str)
                       -> Result<String, Box<StdError>> {
     use serde_json::Value;
-    let mut data: Value = try!(serde_json::from_str(&message));
-    if let Some(data) = data.as_object_mut() {
-        let seq = data.get("id")
-            .and_then(|c| {
-                          c.as_str()
-                              .map(|s| Value::String(s.to_string()))
-                              .or_else(|| c.as_i64().map(Value::from))
-                      })
-            .expect("id");
-        let result = data.remove("result");
-        let error = data.remove("error");
+    use languageserver_types::NumberOrString;
 
-        let mut map = vec![("command".to_string(), Value::String(current_command.to_string())),
-                           ("success".to_string(), Value::Bool(result.is_some())),
-                           ("request_seq".to_string(), seq),
-                           ("seq".to_string(), Value::from(debugger.seq())),
-                           ("type".to_owned(), Value::String("response".to_string()))];
+    #[derive(Debug, Deserialize)]
+    struct Error {
+        message: Value,
+    }
 
-        if let Some(result) = result {
-            map.push(("body".to_string(), result));
-        }
-        if let Some(mut error) = error.and_then(|error| error.as_object_mut()) {
-            map.push(("message".to_string(), error.remove("message").expect("error message")));
-        }
+    fn deserialize<D>(deserializer: D) -> Result<Option<Value>, D::Error>
+        where D: serde::de::Deserializer
+    {
+        serde::Deserialize::deserialize(deserializer).map(Some)
+    }
 
-        let map = map.into_iter().collect();
-        return Ok(try!(serde_json::to_string(&Value::Object(map))));
+    #[derive(Debug, Deserialize)]
+    struct Message {
+        id: NumberOrString,
+        // Distinguishes result: null (`Some(Value::Null)`) from result not existing (`None`)
+        #[serde(default)]
+        #[serde(deserialize_with = "deserialize")]
+        result: Option<Value>,
+        error: Option<Error>,
+    }
+
+    #[derive(Serialize)]
+    struct Out<'a> {
+        command: &'a str,
+        success: bool,
+        request_seq: NumberOrString,
+        seq: i64,
+        #[serde(rename = "type")]
+        typ: &'a str,
+        body: Option<Value>,
+        message: Option<Value>,
+    }
+
+    let data: Option<Message> = try!(serde_json::from_str(&message));
+    if let Some(data) = data {
+
+        let out = Out {
+            command: &current_command,
+            success: data.result.is_some(),
+            request_seq: data.id,
+            seq: debugger.seq(),
+            typ: "response",
+            body: data.result,
+            message: data.error.map(|error| error.message),
+        };
+
+        return Ok(try!(serde_json::to_string(&out)));
     }
     Ok(message)
 }
