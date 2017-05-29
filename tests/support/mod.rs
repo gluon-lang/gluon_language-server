@@ -101,12 +101,13 @@ pub fn send_rpc<F, T>(f: F) -> T
         .and_then(|p| p.parent())
         .expect("folder")
         .join("gluon_language-server");
-    let mut child = Command::new(server_path)
-        .arg("--quiet")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child =
+        Command::new(&*server_path)
+            .arg("--quiet")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|err| panic!("{}\nWhen opening `{}`", err, server_path.display()));
 
     {
         let mut stdin = child.stdin.as_mut().expect("stdin");

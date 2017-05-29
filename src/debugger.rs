@@ -306,8 +306,8 @@ fn translate_response(debugger: &Debugger,
         message: Value,
     }
 
-    fn deserialize<D>(deserializer: D) -> Result<Option<Value>, D::Error>
-        where D: serde::de::Deserializer
+    fn deserialize<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+        where D: serde::de::Deserializer<'de>
     {
         serde::Deserialize::deserialize(deserializer).map(Some)
     }
