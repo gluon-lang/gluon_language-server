@@ -13,12 +13,13 @@ use languageserver_types::{DiagnosticSeverity, Position, PublishDiagnosticsParam
 
 #[test]
 fn type_error() {
-    let diagnostic: PublishDiagnosticsParams = support::send_rpc(|mut stdin| {
-        let text = r#"
+    let diagnostic: PublishDiagnosticsParams =
+        support::send_rpc(|mut stdin| {
+                              let text = r#"
 "" + 1
 "#;
-        support::did_open(stdin, "test", text);
-    });
+                              support::did_open(stdin, "test", text);
+                          });
     assert_eq!(diagnostic.uri, support::test_url("test.glu"));
     assert_eq!(diagnostic.diagnostics.len(), 1);
     let error = &diagnostic.diagnostics[0];

@@ -123,58 +123,65 @@ impl LaunchHandler {
         };
 
         let debugger = self.debugger.clone();
-        self.debugger.thread.context().set_hook(Some(Box::new(move |_, debug_info| {
-            let pause = debugger.pause.swap(NONE, Ordering::Acquire);
-            let reason = match pause {
-                PAUSE => "pause",
-                STEP_IN => "step",
-                STEP_OUT => {
-                    let step_data = debugger.step_data.lock().unwrap();
-                    if debug_info.stack_info_len() >= step_data.stack_frames {
-                        // Continue executing if we are in a deeper function call or on the same level
-                        debugger.pause.store(STEP_OUT, Ordering::Release);
-                        return Ok(Async::Ready(()));
-                    }
-                    "step"
-                }
-                NEXT => {
-                    let step_data = debugger.step_data.lock().unwrap();
-                    let stack_info = debug_info.stack_info(0).unwrap();
-                    let different_function =
-                        step_data.function_name != stack_info.function_name().unwrap_or("<Unknown function>");
-                    let cmp = debug_info.stack_info_len().cmp(&step_data.stack_frames);
-                    if cmp == cmp::Ordering::Greater || (cmp == cmp::Ordering::Equal && different_function) {
-                        // Continue executing if we are in a deeper function call or on the same level
-                        // but in a different function (tail call)
-                        debugger.pause.store(NEXT, Ordering::Release);
-                        return Ok(Async::Ready(()));
-                    }
-                    "step"
-                }
-                _ => {
-                    let stack_info = debug_info.stack_info(0).unwrap();
-                    match stack_info.line() {
-                        Some(line) if debugger.should_break(stack_info.source_name(), line) => {
-                            "breakpoint"
+        self.debugger
+            .thread
+            .context()
+            .set_hook(Some(Box::new(move |_, debug_info| {
+                let pause = debugger.pause.swap(NONE, Ordering::Acquire);
+                let reason = match pause {
+                    PAUSE => "pause",
+                    STEP_IN => "step",
+                    STEP_OUT => {
+                        let step_data = debugger.step_data.lock().unwrap();
+                        if debug_info.stack_info_len() >= step_data.stack_frames {
+                            // Continue executing if we are in a deeper function call or on the same
+                            // level
+                            debugger.pause.store(STEP_OUT, Ordering::Release);
+                            return Ok(Async::Ready(()));
                         }
-                    _ => return Ok(Async::Ready(())),
+                        "step"
                     }
-                }
-            };
-            debugger.send_event(StoppedEvent {
-                body: StoppedEventBody {
-                    all_threads_stopped: Some(true),
-                    reason: reason.into(),
-                    text: None,
-                    thread_id: Some(1),
-                },
-                event: "stopped".to_string(),
-                seq: debugger.seq(),
-                type_: "event".to_string(),
-            });
-            debugger.variables.lock().unwrap().clear();
-            Ok(Async::NotReady)
-        })));
+                    NEXT => {
+                        let step_data = debugger.step_data.lock().unwrap();
+                        let stack_info = debug_info.stack_info(0).unwrap();
+                        let different_function = step_data.function_name !=
+                                                 stack_info
+                                                     .function_name()
+                                                     .unwrap_or("<Unknown function>");
+                        let cmp = debug_info.stack_info_len().cmp(&step_data.stack_frames);
+                        if cmp == cmp::Ordering::Greater ||
+                           (cmp == cmp::Ordering::Equal && different_function) {
+                            // Continue executing if we are in a deeper function call or on the same
+                            // level but in a different function (tail call)
+                            debugger.pause.store(NEXT, Ordering::Release);
+                            return Ok(Async::Ready(()));
+                        }
+                        "step"
+                    }
+                    _ => {
+                        let stack_info = debug_info.stack_info(0).unwrap();
+                        match stack_info.line() {
+                            Some(line) if debugger.should_break(stack_info.source_name(), line) => {
+                                "breakpoint"
+                            }
+                            _ => return Ok(Async::Ready(())),
+                        }
+                    }
+                };
+                debugger.send_event(StoppedEvent {
+                                        body: StoppedEventBody {
+                                            all_threads_stopped: Some(true),
+                                            reason: reason.into(),
+                                            text: None,
+                                            thread_id: Some(1),
+                                        },
+                                        event: "stopped".to_string(),
+                                        seq: debugger.seq(),
+                                        type_: "event".to_string(),
+                                    });
+                debugger.variables.lock().unwrap().clear();
+                Ok(Async::NotReady)
+            })));
 
         let debugger = self.debugger.clone();
         spawn(move || {

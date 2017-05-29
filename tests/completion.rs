@@ -17,7 +17,7 @@ use languageserver_types::{CompletionItem, CompletionItemKind, Position, TextDoc
                            TextDocumentPositionParams};
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-    where W: Write,
+    where W: Write
 {
     let hover = support::method_call("textDocument/completion",
                                      id,

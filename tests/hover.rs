@@ -15,7 +15,7 @@ use languageserver_types::{Hover, MarkedString, Position, TextDocumentPositionPa
                            TextDocumentIdentifier};
 
 fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-    where W: Write,
+    where W: Write
 {
     let hover = support::method_call("textDocument/hover",
                                      id,
@@ -78,7 +78,7 @@ fn identifier() {
     let hover: Hover = support::send_rpc(|mut stdin| {
         let src = r#"
 let test = 1
-test 
+test
 "#;
         support::did_open(stdin, "test", src);
 
