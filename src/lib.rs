@@ -3,6 +3,8 @@
 
 extern crate serde;
 extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 
 extern crate jsonrpc_core;
 extern crate futures;
@@ -12,6 +14,7 @@ extern crate log;
 extern crate env_logger;
 extern crate gluon;
 extern crate url;
+extern crate url_serde;
 
 extern crate languageserver_types;
 
@@ -115,11 +118,11 @@ impl Importer for CheckImporter {
             try!(macro_value.typecheck(compiler, vm, module_name, input));
 
         let lines = source::Lines::new(input);
+        let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
         self.0
             .lock()
             .unwrap()
             .insert(module_name.into(), (lines, expr));
-        let metadata = Metadata::default();
         // Insert a global to ensure the globals type can be looked up
         try!(vm.global_env()
                  .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0)));
@@ -164,6 +167,52 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
     }
 }
 
+fn retrieve_expr<F, R>(thread: &Thread,
+                       text_document_uri: &Url,
+                       position: &Position,
+                       f: F)
+                       -> Result<R, ServerError<()>>
+    where F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>
+{
+    let filename = strip_file_prefix_with_thread(thread, text_document_uri);
+    let module = filename_to_module(&filename);
+    let import = thread.get_macros().get("import").expect("Import macro");
+    let import = import
+        .downcast_ref::<Import<CheckImporter>>()
+        .expect("Check importer");
+    let importer = import.importer.0.lock().unwrap();
+    let &(ref line_map, ref expr) = try!(importer
+                                             .get(&module)
+                                             .ok_or_else(|| {
+                                                             ServerError {
+                        message: format!("Module `{}` is not defined\n{:?}",
+                                         module,
+                                         importer.keys().collect::<Vec<_>>()),
+                        data: None,
+                    }
+                                                         }));
+
+    let line_pos = try!(line_map.line(Line::from(position.line as usize))
+                    .ok_or_else(|| {
+                        ServerError {
+                            message: format!("Position ({}, {}) is out of range",
+                                             position.line,
+                                             position.character),
+                            data: None,
+                        }
+                    }));
+    let byte_pos = line_pos + BytePos::from(position.character as usize);
+
+    f(expr, byte_pos)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct CompletionData {
+    #[serde(with = "url_serde")]
+    pub text_document_uri: Url,
+    pub position: Position,
+}
+
 struct Completion(RootedThread);
 impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
     type Output = Vec<CompletionItem>;
@@ -173,35 +222,13 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
                -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
         (|| -> Result<_, _> {
             let thread = &self.0;
-            let filename = strip_file_prefix_with_thread(thread, &change.text_document.uri);
-            let module = filename_to_module(&filename);
-            let import = thread.get_macros().get("import").expect("Import macro");
-            let import = import
-                .downcast_ref::<Import<CheckImporter>>()
-                .expect("Check importer");
-            let importer = import.importer.0.lock().unwrap();
-            let &(ref line_map, ref expr) = try!(importer
-                                                     .get(&module)
-                                                     .ok_or_else(|| {
-                                                                     ServerError {
-                        message: format!("Module `{}` is not defined\n{:?}",
-                                         module,
-                                         importer.keys().collect::<Vec<_>>()),
-                        data: None,
-                    }
-                                                                 }));
-
-            let line_pos = try!(line_map.line(Line::from(change.position.line as usize))
-                    .ok_or_else(|| {
-                        ServerError {
-                            message: format!("Position ({}, {}) is out of range",
-                                             change.position.line,
-                                             change.position.character),
-                            data: None,
-                        }
-                    }));
-            let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-            let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos);
+            let suggestions =
+                retrieve_expr(thread,
+                              &change.text_document.uri,
+                              &change.position,
+                              |expr, byte_pos| {
+                                  Ok(completion::suggest(&*thread.get_env(), expr, byte_pos))
+                              })?;
 
             let mut items: Vec<_> = suggestions
                 .into_iter()
@@ -213,6 +240,14 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
                         label: label,
                         detail: Some(format!("{}", ident.typ)),
                         kind: Some(CompletionItemKind::Variable),
+                        data: Some(serde_json::to_value(CompletionData {
+                                                            text_document_uri: change
+                                                                .text_document
+                                                                .uri
+                                                                .clone(),
+                                                            position: change.position,
+                                                        })
+                                           .expect("CompletionData")),
                         ..CompletionItem::default()
                     }
                 })
@@ -561,6 +596,39 @@ pub fn run() {
             io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
             io.add_async_method("textDocument/completion",
                                 ServerCommand::new(Completion(thread.clone())));
+
+            {
+                let thread = thread.clone();
+                let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
+                    let data: CompletionData = serde_json::from_value(item.data.clone().unwrap())
+                        .expect("CompletionData");
+
+                    log_message(format!("{:?}", data.text_document_uri));
+                    retrieve_expr(&thread,
+                                  &data.text_document_uri,
+                                  &data.position,
+                                  |expr, byte_pos| {
+                        let type_env = thread.global_env().get_env();
+                        let (_, metadata_map) = gluon::check::metadata::metadata(&*type_env, expr);
+                        log_message(format!("{}  {:?}", item.label, metadata_map));
+                        Ok(completion::suggest_metadata(&metadata_map,
+                                                        &*type_env,
+                                                        expr,
+                                                        byte_pos,
+                                                        &item.label)
+                                   .and_then(|metadata| metadata.comment.clone()))
+                    })
+                            .map(|comment| {
+                                     log_message(format!("{:?}", comment));
+                                     item.documentation = comment;
+                                     item
+                                 })
+                            .into_future()
+                            .boxed()
+                };
+                io.add_async_method("completionItem/resolve", ServerCommand::new(resolve));
+            }
+
             io.add_async_method("textDocument/hover",
                                 ServerCommand::new(HoverCommand(thread.clone())));
             io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
