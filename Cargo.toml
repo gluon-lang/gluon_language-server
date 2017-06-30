@@ -35,12 +35,7 @@ serde_derive = "1.0.0"
 languageserver-types = "0.8.0"
 debugserver-types = "0.3.0"
 
-[dependencies.gluon]
-version = "0.4.0"
-git = "https://github.com/gluon-lang/gluon"
-rev = "5f3df1a672288607665fb0818c547b585776c1a7"
-# Don't include the repl
-default-features = false
+gluon = "0.5.0"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"

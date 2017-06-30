@@ -15,16 +15,17 @@ use languageserver_types::{Hover, MarkedString, Position, TextDocumentPositionPa
                            TextDocumentIdentifier};
 
 fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-    where W: Write
+where
+    W: Write,
 {
-    let hover = support::method_call("textDocument/hover",
-                                     id,
-                                     TextDocumentPositionParams {
-                                         text_document: TextDocumentIdentifier {
-                                             uri: support::test_url(uri),
-                                         },
-                                         position: position,
-                                     });
+    let hover = support::method_call(
+        "textDocument/hover",
+        id,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: support::test_url(uri) },
+            position: position,
+        },
+    );
 
     support::write_message(stdin, hover).unwrap();
 }
@@ -57,20 +58,24 @@ fn simple_hover() {
         let uri = "file:///c%3A/test/test.glu";
         support::did_open(stdin, uri, "123");
 
-        hover(stdin,
-              2,
-              uri,
-              Position {
-                  line: 0,
-                  character: 2,
-              });
+        hover(
+            stdin,
+            2,
+            uri,
+            Position {
+                line: 0,
+                character: 2,
+            },
+        );
     });
 
-    assert_eq!(hover,
-               Hover {
-                   contents: vec![MarkedString::String("Int".into())],
-                   range: None,
-               });
+    assert_eq!(
+        hover,
+        Hover {
+            contents: vec![MarkedString::String("Int".into())],
+            range: None,
+        }
+    );
 }
 
 #[test]
@@ -82,20 +87,24 @@ test
 "#;
         support::did_open(stdin, "test", src);
 
-        hover(stdin,
-              2,
-              "test",
-              Position {
-                  line: 2,
-                  character: 2,
-              });
+        hover(
+            stdin,
+            2,
+            "test",
+            Position {
+                line: 2,
+                character: 2,
+            },
+        );
     });
 
-    assert_eq!(hover,
-               Hover {
-                   contents: vec![MarkedString::String("Int".into())],
-                   range: None,
-               });
+    assert_eq!(
+        hover,
+        Hover {
+            contents: vec![MarkedString::String("Int".into())],
+            range: None,
+        }
+    );
 }
 
 #[test]
@@ -104,18 +113,22 @@ fn stream() {
 
         support::did_open(stdin, "stream", STREAM_SOURCE);
 
-        hover(stdin,
-              2,
-              "stream",
-              Position {
-                  line: 13,
-                  character: 29,
-              });
+        hover(
+            stdin,
+            2,
+            "stream",
+            Position {
+                line: 13,
+                character: 29,
+            },
+        );
     });
 
-    assert_eq!(hover,
-               Hover {
-                   contents: vec![MarkedString::String("Int".into())],
-                   range: None,
-               });
+    assert_eq!(
+        hover,
+        Hover {
+            contents: vec![MarkedString::String("Int".into())],
+            range: None,
+        }
+    );
 }

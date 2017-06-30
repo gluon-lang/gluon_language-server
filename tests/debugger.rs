@@ -50,7 +50,8 @@ macro_rules! expect_event {
 }
 
 fn run_debugger<F>(f: F)
-    where F: FnOnce(&mut i64, &mut ChildStdin, &mut BufReader<&mut ChildStdout>)
+where
+    F: FnOnce(&mut i64, &mut ChildStdin, &mut BufReader<&mut ChildStdout>),
 {
     let path = PathBuf::from(::std::env::args().next().unwrap());
     let debugger = path.parent()
@@ -107,14 +108,16 @@ fn run_debugger<F>(f: F)
 }
 
 fn launch_relative<W>(stream: &mut W, seq: &mut i64, program: &str)
-    where W: Write
+where
+    W: Write,
 {
     let path = url::Url::from_file_path(canonicalize(program).unwrap()).unwrap();
     launch(stream, seq, &path);
 }
 
 fn launch<W>(stream: &mut W, seq: &mut i64, program: &url::Url)
-    where W: Write
+where
+    W: Write,
 {
     request! {
         stream,
@@ -128,12 +131,14 @@ fn launch<W>(stream: &mut W, seq: &mut i64, program: &url::Url)
     };
 }
 
-fn request_debug_info<R, W>(seq: &mut i64,
-                            stream: &mut W,
-                            mut read: &mut R)
-                            -> (StackTraceResponse, ScopesResponse, VariablesResponse)
-    where R: BufRead,
-          W: Write
+fn request_debug_info<R, W>(
+    seq: &mut i64,
+    stream: &mut W,
+    mut read: &mut R,
+) -> (StackTraceResponse, ScopesResponse, VariablesResponse)
+where
+    R: BufRead,
+    W: Write,
 {
     request! {
         stream,
@@ -183,15 +188,16 @@ fn request_debug_info<R, W>(seq: &mut i64,
 }
 
 fn expect_message<M, R>(read: R, expected: &str) -> M
-    where M: serde::de::DeserializeOwned,
-          R: BufRead
+where
+    M: serde::de::DeserializeOwned,
+    R: BufRead,
 {
     let value = read_message(read)
         .unwrap()
         .unwrap_or_else(|| panic!("Rpc message not found: `{}`", expected));
     from_str(&value).unwrap_or_else(|err| {
-                                        panic!("{} in message:\n{}", err, value);
-                                    })
+        panic!("{} in message:\n{}", err, value);
+    })
 }
 
 #[test]

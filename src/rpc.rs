@@ -24,10 +24,11 @@ pub trait LanguageServerCommand<P>: Send + Sync + 'static {
 }
 
 impl<'de, F, P, O, E> LanguageServerCommand<P> for F
-    where F: Fn(P) -> BoxFuture<O, ServerError<E>> + Send + Sync + 'static,
-          P: serde::Deserialize<'de>,
-          O: serde::Serialize,
-          E: serde::Serialize
+where
+    F: Fn(P) -> BoxFuture<O, ServerError<E>> + Send + Sync + 'static,
+    P: serde::Deserialize<'de>,
+    O: serde::Serialize,
+    E: serde::Serialize,
 {
     type Output = O;
     type Error = E;
@@ -42,8 +43,9 @@ pub trait LanguageServerNotification<P>: Send + Sync + 'static {
 }
 
 impl<'de, F, P> LanguageServerNotification<P> for F
-    where F: Fn(P) + Send + Sync + 'static,
-          P: serde::Deserialize<'de> + 'static
+where
+    F: Fn(P) + Send + Sync + 'static,
+    P: serde::Deserialize<'de> + 'static,
 {
     fn execute(&self, param: P) {
         self(param)
@@ -58,8 +60,9 @@ impl<T, P> ServerCommand<T, P> {
 }
 
 impl<P, T> RpcMethodSimple for ServerCommand<T, P>
-    where T: LanguageServerCommand<P>,
-          P: for<'de> serde::Deserialize<'de> + 'static
+where
+    T: LanguageServerCommand<P>,
+    P: for<'de> serde::Deserialize<'de> + 'static,
 {
     fn call(&self, param: Params) -> BoxFuture<Value, Error> {
         let value = match param {
@@ -70,44 +73,40 @@ impl<P, T> RpcMethodSimple for ServerCommand<T, P>
         match from_value(value.clone()) {
             Ok(value) => {
                 return self.0
-                           .execute(value)
-                           .then(|result| match result {
-                                     Ok(value) => {
-                            Ok(to_value(&value).expect("result data could not be serialized"))
-                                .into_future()
+                    .execute(value)
+                    .then(|result| match result {
+                        Ok(value) => {
+                            Ok(
+                                to_value(&value).expect("result data could not be serialized"),
+                            ).into_future()
                         }
-                                     Err(error) => {
+                        Err(error) => {
                             Err(Error {
-                                    code: ErrorCode::InternalError,
-                                    message: error.message,
-                                    data: error.data
-                                        .as_ref()
-                                        .map(|v| {
-                                            to_value(v).expect("error data could not be serialized")
-                                        }),
-                                })
-                                .into_future()
+                                code: ErrorCode::InternalError,
+                                message: error.message,
+                                data: error.data.as_ref().map(
+                                    |v| to_value(v).expect("error data could not be serialized"),
+                                ),
+                            }).into_future()
                         }
-                                 })
-                           .boxed()
+                    })
+                    .boxed()
             }
             Err(_) => (),
         }
         let data = self.0.invalid_params();
         futures::failed(Error {
-                            code: ErrorCode::InvalidParams,
-                            message: format!("Invalid params: {:?}", value),
-                            data: data.as_ref()
-                                .map(|v| {
-                                         to_value(v).expect("error data could not be serialized")
-                                     }),
-                        })
-                .boxed()
+            code: ErrorCode::InvalidParams,
+            message: format!("Invalid params: {:?}", value),
+            data: data.as_ref()
+                .map(|v| to_value(v).expect("error data could not be serialized")),
+        }).boxed()
     }
 }
 
 pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
-    where R: BufRead + Read
+where
+    R: BufRead + Read,
 {
     let mut header = String::new();
     let n = try!(reader.read_line(&mut header));
@@ -134,21 +133,25 @@ pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
 }
 
 pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>
-    where W: Write,
-          T: serde::Serialize
+where
+    W: Write,
+    T: serde::Serialize,
 {
     let response = to_string(&value).unwrap();
     write_message_str(output, &response)
 }
 
 pub fn write_message_str<W>(mut output: W, response: &str) -> io::Result<()>
-    where W: Write
+where
+    W: Write,
 {
     debug!("Respond: {}", response);
-    try!(write!(output,
-                "Content-Length: {}\r\n\r\n{}",
-                response.len(),
-                response));
+    try!(write!(
+        output,
+        "Content-Length: {}\r\n\r\n{}",
+        response.len(),
+        response
+    ));
     try!(output.flush());
     Ok(())
 }

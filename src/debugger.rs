@@ -53,27 +53,26 @@ pub struct InitializeHandler {
 impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
     type Output = Option<Capabilities>;
     type Error = ();
-    fn execute(&self,
-               args: InitializeRequestArguments)
-               -> BoxFuture<Option<Capabilities>, ServerError<Self::Error>> {
+    fn execute(
+        &self,
+        args: InitializeRequestArguments,
+    ) -> BoxFuture<Option<Capabilities>, ServerError<Self::Error>> {
         self.debugger
             .lines_start_at_1
             .store(args.lines_start_at_1.unwrap_or(true), Ordering::Release);
 
-        self.debugger
-            .send_event(InitializedEvent {
-                            body: None,
-                            event: "initialized".into(),
-                            seq: self.debugger.seq(),
-                            type_: "event".into(),
-                        });
+        self.debugger.send_event(InitializedEvent {
+            body: None,
+            event: "initialized".into(),
+            seq: self.debugger.seq(),
+            type_: "event".into(),
+        });
 
         Ok(Some(Capabilities {
-                    supports_configuration_done_request: Some(true),
-                    ..Capabilities::default()
-                }))
-                .into_future()
-                .boxed()
+            supports_configuration_done_request: Some(true),
+            ..Capabilities::default()
+        })).into_future()
+            .boxed()
     }
 }
 
@@ -98,24 +97,23 @@ impl LanguageServerCommand<Value> for LaunchHandler {
 
 impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
-        let program = args.get("program")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| {
-                            ServerError {
-                                message: "No program argument found".into(),
-                                data: None,
-                            }
-                        })?;
+        let program = args.get("program").and_then(|s| s.as_str()).ok_or_else(
+            || {
+                ServerError {
+                    message: "No program argument found".into(),
+                    data: None,
+                }
+            },
+        )?;
         let program = strip_file_prefix(&self.debugger.thread, program);
         let module = filename_to_module(&program);
         let expr = {
-            let mut file = File::open(&*program)
-                .map_err(|_| {
-                             ServerError {
-                                 message: format!("Program does not exist: `{}`", program),
-                                 data: None,
-                             }
-                         })?;
+            let mut file = File::open(&*program).map_err(|_| {
+                ServerError {
+                    message: format!("Program does not exist: `{}`", program),
+                    data: None,
+                }
+            })?;
             let mut expr = String::new();
             file.read_to_string(&mut expr)
                 .expect("Could not read from file");
@@ -123,10 +121,8 @@ impl LaunchHandler {
         };
 
         let debugger = self.debugger.clone();
-        self.debugger
-            .thread
-            .context()
-            .set_hook(Some(Box::new(move |_, debug_info| {
+        self.debugger.thread.context().set_hook(
+            Some(Box::new(move |_, debug_info| {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
                 let reason = match pause {
                     PAUSE => "pause",
@@ -145,12 +141,11 @@ impl LaunchHandler {
                         let step_data = debugger.step_data.lock().unwrap();
                         let stack_info = debug_info.stack_info(0).unwrap();
                         let different_function = step_data.function_name !=
-                                                 stack_info
-                                                     .function_name()
-                                                     .unwrap_or("<Unknown function>");
+                            stack_info.function_name().unwrap_or("<Unknown function>");
                         let cmp = debug_info.stack_info_len().cmp(&step_data.stack_frames);
                         if cmp == cmp::Ordering::Greater ||
-                           (cmp == cmp::Ordering::Equal && different_function) {
+                            (cmp == cmp::Ordering::Equal && different_function)
+                        {
                             // Continue executing if we are in a deeper function call or on the same
                             // level but in a different function (tail call)
                             debugger.pause.store(NEXT, Ordering::Release);
@@ -169,19 +164,20 @@ impl LaunchHandler {
                     }
                 };
                 debugger.send_event(StoppedEvent {
-                                        body: StoppedEventBody {
-                                            all_threads_stopped: Some(true),
-                                            reason: reason.into(),
-                                            text: None,
-                                            thread_id: Some(1),
-                                        },
-                                        event: "stopped".to_string(),
-                                        seq: debugger.seq(),
-                                        type_: "event".to_string(),
-                                    });
+                    body: StoppedEventBody {
+                        all_threads_stopped: Some(true),
+                        reason: reason.into(),
+                        text: None,
+                        thread_id: Some(1),
+                    },
+                    event: "stopped".to_string(),
+                    seq: debugger.seq(),
+                    type_: "event".to_string(),
+                });
                 debugger.variables.lock().unwrap().clear();
                 Ok(Async::NotReady)
-            })));
+            })),
+        );
 
         let debugger = self.debugger.clone();
         spawn(move || {
@@ -191,18 +187,19 @@ impl LaunchHandler {
             debugger.continue_barrier.wait();
 
             let mut compiler = Compiler::new();
-            let mut run_future = FutureValue::sync(expr.compile(&mut compiler,
-                                                                &debugger.thread,
-                                                                &module,
-                                                                &expr,
-                                                                None))
-                    .and_then(|compile_value| {
-                        // Since we cannot yield while importing modules we don't enable pausing or
-                        // breakpoints until we start executing the main module
-                        debugger.thread.context().set_hook_mask(LINE_FLAG);
-                        compile_value.run_expr(&mut compiler, &debugger.thread, &module, &expr, ())
-                    })
-                    .map(|_| ());
+            let mut run_future = FutureValue::sync(expr.compile(
+                &mut compiler,
+                &debugger.thread,
+                &module,
+                &expr,
+                None,
+            )).and_then(|compile_value| {
+                // Since we cannot yield while importing modules we don't enable pausing or
+                // breakpoints until we start executing the main module
+                debugger.thread.context().set_hook_mask(LINE_FLAG);
+                compile_value.run_expr(&mut compiler, &debugger.thread, &module, &expr, ())
+            })
+                .map(|_| ());
             let mut result = match run_future {
                 FutureValue::Value(_) => Ok(Async::Ready(())),
                 _ => Ok(Async::NotReady),
@@ -256,9 +253,10 @@ impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
 }
 
 // Translate debug server messages into jsonrpc-2.0
-fn translate_request(message: String,
-                     current_command: &RefCell<String>)
-                     -> Result<String, Box<StdError>> {
+fn translate_request(
+    message: String,
+    current_command: &RefCell<String>,
+) -> Result<String, Box<StdError>> {
     use serde_json::Value;
     use languageserver_types::NumberOrString;
 
@@ -294,10 +292,11 @@ fn translate_request(message: String,
     Ok(message)
 }
 
-fn translate_response(debugger: &Debugger,
-                      message: String,
-                      current_command: &str)
-                      -> Result<String, Box<StdError>> {
+fn translate_response(
+    debugger: &Debugger,
+    message: String,
+    current_command: &str,
+) -> Result<String, Box<StdError>> {
     use serde_json::Value;
     use languageserver_types::NumberOrString;
 
@@ -307,7 +306,8 @@ fn translate_response(debugger: &Debugger,
     }
 
     fn deserialize<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
-        where D: serde::de::Deserializer<'de>
+    where
+        D: serde::de::Deserializer<'de>,
     {
         serde::Deserialize::deserialize(deserializer).map(Some)
     }
@@ -476,12 +476,14 @@ impl Debugger {
     }
 
     fn line(&self, line: i64) -> Line {
-        Line::from((line as usize).saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as
-                                                  usize))
+        Line::from(
+            (line as usize).saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize),
+        )
     }
 
     fn send_event<T>(&self, value: T)
-        where T: serde::Serialize
+    where
+        T: serde::Serialize,
     {
         write_message(&*self.stream, &value).unwrap();
     }
@@ -503,20 +505,19 @@ impl Debugger {
                 name: String::from(name),
                 named_variables: named_variables(value),
                 type_: Some(typ.to_string()),
-                value: format!("{}",
-                               ValuePrinter::new(&*self.thread.get_env(), typ, value)
-                                   .max_level(2)
-                                   .width(10000000)),
+                value: format!(
+                    "{}",
+                    ValuePrinter::new(&*self.thread.get_env(), typ, value)
+                        .max_level(2)
+                        .width(10000000)
+                ),
                 variables_reference: variables.insert(value, typ),
             }
         };
         match stack_info {
             Some(stack_info) => {
                 let frames = context.stack.get_frames();
-                let frame_index = frames
-                    .len()
-                    .overflowing_sub(variable_ref.stack_index + 1)
-                    .0;
+                let frame_index = frames.len().overflowing_sub(variable_ref.stack_index + 1).0;
                 let frame = frames.get(frame_index).expect("frame");
                 match variable_ref.typ {
                     VariableType::Local => {
@@ -525,8 +526,8 @@ impl Debugger {
                             .locals()
                             .zip(values)
                             .map(|(local, value)| {
-                                     mk_variable(local.name.declared_name(), &local.typ, *value)
-                                 })
+                                mk_variable(local.name.declared_name(), &local.typ, *value)
+                            })
                             .collect()
                     }
                     VariableType::Upvar => {
@@ -551,17 +552,18 @@ impl Debugger {
                                             .iter()
                                             .zip(row.row_iter())
                                             .map(|(field, type_field)| {
-                                                     mk_variable(type_field.name.declared_name(),
-                                                                 &type_field.typ,
-                                                                 *field)
-                                                 })
+                                                mk_variable(
+                                                    type_field.name.declared_name(),
+                                                    &type_field.typ,
+                                                    *field,
+                                                )
+                                            })
                                             .collect()
                                     }
                                     Type::Variant(ref row) => {
-                                        let type_field =
-                                            row.row_iter()
-                                                .nth(data.tag as usize)
-                                                .expect("Variant tag is out of bounds");
+                                        let type_field = row.row_iter()
+                                            .nth(data.tag as usize)
+                                            .expect("Variant tag is out of bounds");
                                         data.fields
                                             .into_iter()
                                             .zip(arg_iter(&type_field.typ))
@@ -577,8 +579,8 @@ impl Debugger {
                                     .iter()
                                     .zip(&closure.function.debug_info.upvars)
                                     .map(|(value, ref upvar_info)| {
-                                             mk_variable(&upvar_info.name, &upvar_info.typ, *value)
-                                         })
+                                        mk_variable(&upvar_info.name, &upvar_info.typ, *value)
+                                    })
                                     .collect()
                             }
                             VmValue::Array(ref array) => {
@@ -592,11 +594,11 @@ impl Debugger {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, value)| {
-                                             use std::fmt::Write;
-                                             index.clear();
-                                             write!(index, "[{}]", i).unwrap();
-                                             mk_variable(&index, &element_type, value)
-                                         })
+                                        use std::fmt::Write;
+                                        index.clear();
+                                        write!(index, "[{}]", i).unwrap();
+                                        mk_variable(&index, &element_type, value)
+                                    })
                                     .collect()
                             }
                             _ => vec![],
@@ -631,91 +633,95 @@ fn translate_reference(reference: i64) -> VariableReference {
 }
 
 fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
-    where R: BufRead
+where
+    R: BufRead,
 {
     let exit_token = Arc::new(AtomicBool::new(false));
     let seq = Arc::new(AtomicUsize::new(1));
 
     let debugger = Arc::new(Debugger {
-                                thread: gluon::new_vm(),
-                                stream: output.clone(),
-                                sources: Mutex::new(HashMap::new()),
-                                variables: Mutex::new(Variables {
-                                                          map: HashMap::new(),
-                                                          reference: i32::max_value() as i64,
-                                                      }),
-                                continue_barrier: Barrier::new(2),
-                                seq: seq.clone(),
-                                lines_start_at_1: AtomicBool::new(true),
-                                do_continue: AtomicBool::new(false),
-                                pause: AtomicUsize::new(NONE),
-                                step_data: Mutex::new(StepData::default()),
-                            });
+        thread: gluon::new_vm(),
+        stream: output.clone(),
+        sources: Mutex::new(HashMap::new()),
+        variables: Mutex::new(Variables {
+            map: HashMap::new(),
+            reference: i32::max_value() as i64,
+        }),
+        continue_barrier: Barrier::new(2),
+        seq: seq.clone(),
+        lines_start_at_1: AtomicBool::new(true),
+        do_continue: AtomicBool::new(false),
+        pause: AtomicUsize::new(NONE),
+        step_data: Mutex::new(StepData::default()),
+    });
 
     let mut io = IoHandler::new();
-    io.add_async_method("initialize",
-                        ServerCommand::new(InitializeHandler { debugger: debugger.clone() }));
+    io.add_async_method(
+        "initialize",
+        ServerCommand::new(InitializeHandler { debugger: debugger.clone() }),
+    );
 
     {
         let debugger = debugger.clone();
-        let configuration_done =
-            move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
-                // Notify the launched thread that it can start executing
-                debugger.continue_barrier.wait();
-                Ok(()).into_future().boxed()
-            };
+        let configuration_done = move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
+            // Notify the launched thread that it can start executing
+            debugger.continue_barrier.wait();
+            Ok(()).into_future().boxed()
+        };
         io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
     }
 
-    io.add_async_method("launch",
-                        ServerCommand::new(LaunchHandler { debugger: debugger.clone() }));
-    io.add_async_method("disconnect",
-                        ServerCommand::new(DisconnectHandler { exit_token: exit_token.clone() }));
+    io.add_async_method(
+        "launch",
+        ServerCommand::new(LaunchHandler { debugger: debugger.clone() }),
+    );
+    io.add_async_method(
+        "disconnect",
+        ServerCommand::new(DisconnectHandler { exit_token: exit_token.clone() }),
+    );
     {
         let debugger = debugger.clone();
         let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
             let breakpoints = args.breakpoints
                 .iter()
                 .flat_map(|bs| {
-                              bs.iter()
-                                  .map(|breakpoint| debugger.line(breakpoint.line))
-                          })
+                    bs.iter().map(|breakpoint| debugger.line(breakpoint.line))
+                })
                 .collect();
 
-            let opt =
-                args.source
-                    .path
-                    .as_ref()
-                    .map(|path| filename_to_module(&strip_file_prefix(&debugger.thread, path)));
+            let opt = args.source.path.as_ref().map(|path| {
+                filename_to_module(&strip_file_prefix(&debugger.thread, path))
+            });
             if let Some(path) = opt {
                 let mut sources = debugger.sources.lock().unwrap();
-                sources.insert(path,
-                               SourceData {
-                                   source: Some(args.source.clone()),
-                                   breakpoints: breakpoints,
-                               });
+                sources.insert(
+                    path,
+                    SourceData {
+                        source: Some(args.source.clone()),
+                        breakpoints: breakpoints,
+                    },
+                );
             }
 
             Ok(SetBreakpointsResponseBody {
-                   breakpoints: args.breakpoints
-                       .into_iter()
-                       .flat_map(|bs| bs)
-                       .map(|breakpoint| {
-                Breakpoint {
-                    column: None,
-                    end_column: None,
-                    end_line: None,
-                    id: None,
-                    line: Some(breakpoint.line),
-                    message: None,
-                    source: None,
-                    verified: true,
-                }
-            })
-                       .collect(),
-               })
-                    .into_future()
-                    .boxed()
+                breakpoints: args.breakpoints
+                    .into_iter()
+                    .flat_map(|bs| bs)
+                    .map(|breakpoint| {
+                        Breakpoint {
+                            column: None,
+                            end_column: None,
+                            end_line: None,
+                            id: None,
+                            line: Some(breakpoint.line),
+                            message: None,
+                            source: None,
+                            verified: true,
+                        }
+                    })
+                    .collect(),
+            }).into_future()
+                .boxed()
         };
 
         io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
@@ -723,13 +729,14 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
 
     let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
         Ok(ThreadsResponseBody {
-               threads: vec![Thread {
-                                 id: 1,
-                                 name: "main".to_string(),
-                             }],
-           })
-                .into_future()
-                .boxed()
+            threads: vec![
+                Thread {
+                    id: 1,
+                    name: "main".to_string(),
+                },
+            ],
+        }).into_future()
+            .boxed()
     };
 
     io.add_async_method("threads", ServerCommand::new(threads));
@@ -758,42 +765,41 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
                         let path = format!("{}.glu", name.replace(".", "/"));
                         entry
                             .insert(SourceData {
-                                        source: Some(Source {
-                                                         path: Some(path),
-                                                         name: Some(name),
-                                                         ..Source::default()
-                                                     }),
-                                        breakpoints: HashSet::new(),
-                                    })
+                                source: Some(Source {
+                                    path: Some(path),
+                                    name: Some(name),
+                                    ..Source::default()
+                                }),
+                                breakpoints: HashSet::new(),
+                            })
                             .source
                             .clone()
                     }
                 };
                 frames.push(StackFrame {
-                                column: 0,
-                                end_column: None,
-                                end_line: None,
-                                id: i as i64,
-                                line: stack_info
-                                    .line()
-                                    .map_or(0, |line| line.to_usize() as i64 + 1),
-                                module_id: None,
-                                name: stack_info
-                                    .function_name()
-                                    .unwrap_or("<unknown>")
-                                    .to_string(),
-                                source: source,
-                            });
+                    column: 0,
+                    end_column: None,
+                    end_line: None,
+                    id: i as i64,
+                    line: stack_info
+                        .line()
+                        .map_or(0, |line| line.to_usize() as i64 + 1),
+                    module_id: None,
+                    name: stack_info
+                        .function_name()
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                    source: source,
+                });
 
                 i += 1;
             }
 
             Ok(StackTraceResponseBody {
-                   total_frames: Some(frames.len() as i64),
-                   stack_frames: frames,
-               })
-                    .into_future()
-                    .boxed()
+                total_frames: Some(frames.len() as i64),
+                stack_frames: frames,
+            }).into_future()
+                .boxed()
         };
         io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
     }
@@ -809,33 +815,33 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
 
             if let Some(stack_info) = info.stack_info(args.frame_id as usize) {
                 scopes.push(Scope {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                expensive: false,
-                                indexed_variables: None,
-                                line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
-                                name: "Locals".to_string(),
-                                named_variables: Some(stack_info.locals().count() as i64),
-                                source: sources
-                                    .get(stack_info.source_name())
-                                    .and_then(|source| source.source.clone()),
-                                variables_reference: (args.frame_id + 1) * 2 - 1,
-                            });
+                    column: None,
+                    end_column: None,
+                    end_line: None,
+                    expensive: false,
+                    indexed_variables: None,
+                    line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                    name: "Locals".to_string(),
+                    named_variables: Some(stack_info.locals().count() as i64),
+                    source: sources
+                        .get(stack_info.source_name())
+                        .and_then(|source| source.source.clone()),
+                    variables_reference: (args.frame_id + 1) * 2 - 1,
+                });
                 scopes.push(Scope {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                expensive: false,
-                                indexed_variables: None,
-                                line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
-                                name: "Upvars".to_string(),
-                                named_variables: Some(stack_info.locals().count() as i64),
-                                source: sources
-                                    .get(stack_info.source_name())
-                                    .and_then(|source| source.source.clone()),
-                                variables_reference: (args.frame_id + 1) * 2,
-                            });
+                    column: None,
+                    end_column: None,
+                    end_line: None,
+                    expensive: false,
+                    indexed_variables: None,
+                    line: stack_info.line().map(|line| line.to_usize() as i64 + 1),
+                    name: "Upvars".to_string(),
+                    named_variables: Some(stack_info.locals().count() as i64),
+                    source: sources
+                        .get(stack_info.source_name())
+                        .and_then(|source| source.source.clone()),
+                    variables_reference: (args.frame_id + 1) * 2,
+                });
             }
             Ok(ScopesResponseBody { scopes: scopes })
                 .into_future()
@@ -918,13 +924,12 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
 
     {
         let debugger = debugger.clone();
-        let cont =
-            move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
-                let variables = debugger.variables(args.variables_reference);
-                Ok(VariablesResponseBody { variables: variables })
-                    .into_future()
-                    .boxed()
-            };
+        let cont = move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
+            let variables = debugger.variables(args.variables_reference);
+            Ok(VariablesResponseBody { variables: variables })
+                .into_future()
+                .boxed()
+        };
         io.add_async_method("variables", ServerCommand::new(cont));
     }
 
@@ -952,8 +957,7 @@ fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
             }
         }
         Ok(())
-    })()
-            .unwrap();
+    })().unwrap();
 }
 
 pub fn main() {
@@ -961,9 +965,7 @@ pub fn main() {
 
     let matches = App::new("debugger")
         .version(env!("CARGO_PKG_VERSION"))
-        .arg(Arg::with_name("port")
-                 .value_name("PORT")
-                 .takes_value(true))
+        .arg(Arg::with_name("port").value_name("PORT").takes_value(true))
         .get_matches();
 
     match matches.value_of("port") {
