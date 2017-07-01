@@ -1,4 +1,5 @@
 use std::error::Error as StdError;
+use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 
@@ -11,6 +12,18 @@ use serde_json::{from_value, to_value, to_string};
 pub struct ServerError<E> {
     pub message: String,
     pub data: Option<E>,
+}
+
+impl<E, D> From<E> for ServerError<D>
+where
+    E: fmt::Display,
+{
+    fn from(err: E) -> ServerError<D> {
+        ServerError {
+            message: err.to_string(),
+            data: None,
+        }
+    }
 }
 
 pub trait LanguageServerCommand<P>: Send + Sync + 'static {
@@ -70,7 +83,7 @@ where
             Params::Array(arr) => Value::Array(arr),
             Params::None => Value::Null,
         };
-        match from_value(value.clone()) {
+        let err = match from_value(value.clone()) {
             Ok(value) => {
                 return self.0
                     .execute(value)
@@ -92,12 +105,12 @@ where
                     })
                     .boxed()
             }
-            Err(_) => (),
-        }
+            Err(err) => err,
+        };
         let data = self.0.invalid_params();
         futures::failed(Error {
             code: ErrorCode::InvalidParams,
-            message: format!("Invalid params: {:?}", value),
+            message: format!("Invalid params: {}", err),
             data: data.as_ref()
                 .map(|v| to_value(v).expect("error data could not be serialized")),
         }).boxed()

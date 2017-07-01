@@ -98,10 +98,16 @@ fn log_message(message: String) {
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
+struct Module {
+    lines: source::Lines,
+    expr: SpannedExpr<Symbol>,
+    source_string: String,
+}
+
 #[derive(Clone)]
-pub struct CheckImporter(pub Arc<Mutex<FnvMap<String, (source::Lines, SpannedExpr<Symbol>)>>>);
+struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
 impl CheckImporter {
-    pub fn new() -> CheckImporter {
+    fn new() -> CheckImporter {
         CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
     }
 }
@@ -122,10 +128,14 @@ impl Importer for CheckImporter {
 
         let lines = source::Lines::new(input);
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
-        self.0
-            .lock()
-            .unwrap()
-            .insert(module_name.into(), (lines, expr));
+        self.0.lock().unwrap().insert(
+            module_name.into(),
+            Module {
+                lines: lines,
+                expr: expr,
+                source_string: input.into(),
+            },
+        );
         // Insert a global to ensure the globals type can be looked up
         try!(
             vm.global_env()
@@ -158,6 +168,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     trigger_characters: vec![".".into()],
                 }),
                 hover_provider: Some(true),
+                document_formatting_provider: Some(true),
                 ..ServerCapabilities::default()
             },
         }).into_future()
@@ -169,14 +180,9 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
     }
 }
 
-fn retrieve_expr<F, R>(
-    thread: &Thread,
-    text_document_uri: &Url,
-    position: &Position,
-    f: F,
-) -> Result<R, ServerError<()>>
+fn retrieve_expr<F, R>(thread: &Thread, text_document_uri: &Url, f: F) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>,
+    F: FnOnce(&Module) -> Result<R, ServerError<()>>,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
     let module = filename_to_module(&filename);
@@ -185,7 +191,7 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
+    let source_module = try!(importer.get(&module).ok_or_else(|| {
         ServerError {
             message: format!(
                 "Module `{}` is not defined\n{:?}",
@@ -195,11 +201,26 @@ where
             data: None,
         }
     }));
+    f(source_module)
+}
 
-    let line_pos = try!(
-        line_map
-            .line(Line::from(position.line as usize))
-            .ok_or_else(|| {
+fn retrieve_expr_with_pos<F, R>(
+    thread: &Thread,
+    text_document_uri: &Url,
+    position: &Position,
+    f: F,
+) -> Result<R, ServerError<()>>
+where
+    F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>,
+{
+    retrieve_expr(thread, text_document_uri, |module| {
+        let Module {
+            ref expr,
+            ref lines,
+            ..
+        } = *module;
+        let line_pos = try!(lines.line(Line::from(position.line as usize)).ok_or_else(
+            || {
                 ServerError {
                     message: format!(
                         "Position ({}, {}) is out of range",
@@ -208,11 +229,12 @@ where
                     ),
                     data: None,
                 }
-            })
-    );
-    let byte_pos = line_pos + BytePos::from(position.character as usize);
+            },
+        ));
+        let byte_pos = line_pos + BytePos::from(position.character as usize);
 
-    f(expr, byte_pos)
+        f(expr, byte_pos)
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -232,7 +254,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
     ) -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
         (|| -> Result<_, _> {
             let thread = &self.0;
-            let suggestions = retrieve_expr(
+            let suggestions = retrieve_expr_with_pos(
                 thread,
                 &change.text_document.uri,
                 &change.position,
@@ -279,36 +301,12 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
         (|| -> Result<_, _> {
             let thread = &self.0;
-            let filename = strip_file_prefix_with_thread(thread, &change.text_document.uri);
-            let module = filename_to_module(&filename);
-            let import = thread.get_macros().get("import").expect("Import macro");
-            let import = import
-                .downcast_ref::<Import<CheckImporter>>()
-                .expect("Check importer");
-            let importer = import.importer.0.lock().unwrap();
-            let &(ref line_map, ref expr) = try!(importer.get(&module).ok_or_else(|| {
-                ServerError {
-                    message: format!("Module `{}` is not defined", module),
-                    data: None,
-                }
-            }));
-
-            let line_pos = try!(
-                line_map
-                    .line(Line::from(change.position.line as usize))
-                    .ok_or_else(|| {
-                        ServerError {
-                            message: format!(
-                                "Position ({}, {}) is out of range",
-                                change.position.line,
-                                change.position.character
-                            ),
-                            data: None,
-                        }
-                    })
-            );
-            let byte_pos = line_pos + BytePos::from(change.position.character as usize);
-            Ok(completion::find(&*thread.get_env(), expr, byte_pos)
+            retrieve_expr_with_pos(
+                thread,
+                &change.text_document.uri,
+                &change.position,
+                |expr, byte_pos| {
+                    Ok(completion::find(&*thread.get_env(), expr, byte_pos)
                     .map(|typ| {
                         Hover {
                             contents: vec![MarkedString::String(format!("{}", typ))],
@@ -321,6 +319,8 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                             range: None,
                         }
                     }))
+                },
+            )
         })().into_future()
             .boxed()
     }
@@ -447,7 +447,14 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
     let mut importer = import.importer.0.lock().unwrap();
 
     let lines = source::Lines::new(fileinput);
-    importer.insert(name.into(), (lines, expr));
+    importer.insert(
+        name.into(),
+        Module {
+            lines: lines,
+            expr: expr,
+            source_string: fileinput.into(),
+        },
+    );
     if errors.is_empty() {
         Ok(())
     } else {
@@ -631,7 +638,7 @@ pub fn run() {
                         .expect("CompletionData");
 
                     log_message(format!("{:?}", data.text_document_uri));
-                    retrieve_expr(
+                    retrieve_expr_with_pos(
                         &thread,
                         &data.text_document_uri,
                         &data.position,
@@ -665,6 +672,38 @@ pub fn run() {
                 "textDocument/hover",
                 ServerCommand::new(HoverCommand(thread.clone())),
             );
+
+            {
+                let thread = thread.clone();
+                let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<TextEdit>, _> {
+                    retrieve_expr(&thread, &params.text_document.uri, |module| {
+                        use gluon::parser::format_expr;
+                        let formatted = format_expr(&module.source_string)?;
+                        Ok(vec![
+                            TextEdit {
+                                range: Range {
+                                    start: location_to_position(
+                                        &module
+                                            .lines
+                                            .location(0.into())
+                                            .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?
+                                    ),
+                                    end: location_to_position(
+                                        &module
+                                            .lines
+                                            .location(module.source_string.len().into())
+                                            .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?
+                                    ),
+                                },
+                                new_text: formatted,
+                            },
+                        ])
+                    }).into_future()
+                        .boxed()
+                };
+                io.add_async_method("textDocument/formatting", ServerCommand::new(format));
+            }
+
             io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
             let exit_token = Arc::new(AtomicBool::new(false));
             {
