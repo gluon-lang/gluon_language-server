@@ -28,7 +28,7 @@ where
                 tab_size: 4,
                 insert_spaces: true,
                 properties: Default::default(),
-            }
+            },
         },
     );
 
@@ -38,9 +38,9 @@ where
 #[test]
 fn simple() {
     let text = r#"
-let x =  
+let x =
          1
-x   + 
+x   +
    2
 "#;
     let expected = r#"
@@ -53,17 +53,22 @@ x + 2
         format(stdin, 2, "test")
     });
 
-    assert_eq!(edits, vec![TextEdit {
-        range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
+    assert_eq!(
+        edits,
+        vec![
+            TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 5,
+                        character: 0,
+                    },
+                },
+                new_text: expected.to_string(),
             },
-            end: Position {
-                line: 5,
-                character: 0,
-            }
-        },
-        new_text: expected.to_string(),
-    }]);
+        ]
+    );
 }

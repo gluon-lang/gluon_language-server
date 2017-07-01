@@ -306,10 +306,17 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                 &change.text_document.uri,
                 &change.position,
                 |expr, byte_pos| {
-                    Ok(completion::find(&*thread.get_env(), expr, byte_pos)
+                    let env = thread.get_env();
+                    let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
+                    let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
+                    Ok(completion::find(&*env, expr, byte_pos)
                     .map(|typ| {
+                        let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                            Some(comment) => format!("{}\n\n{}", typ, comment),
+                            None => format!("{}", typ),
+                        };
                         Hover {
-                            contents: vec![MarkedString::String(format!("{}", typ))],
+                            contents: vec![MarkedString::String(contents)],
                             range: None,
                         }
                     })
@@ -682,18 +689,22 @@ pub fn run() {
                         Ok(vec![
                             TextEdit {
                                 range: Range {
-                                    start: location_to_position(
-                                        &module
-                                            .lines
-                                            .location(0.into())
-                                            .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?
-                                    ),
-                                    end: location_to_position(
-                                        &module
-                                            .lines
-                                            .location(module.source_string.len().into())
-                                            .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?
-                                    ),
+                                    start: location_to_position(&module
+                                        .lines
+                                        .location(0.into())
+                                        .ok_or_else(|| {
+                                            ServerError::from(
+                                                &"Unable to translate index to location",
+                                            )
+                                        })?),
+                                    end: location_to_position(&module
+                                        .lines
+                                        .location(module.source_string.len().into())
+                                        .ok_or_else(|| {
+                                            ServerError::from(
+                                                &"Unable to translate index to location",
+                                            )
+                                        })?),
                                 },
                                 new_text: formatted,
                             },
