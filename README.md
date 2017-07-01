@@ -8,9 +8,23 @@ The language server is available at [crates.io][] and can be installed by runnin
 
 ```json
 {
-    "gluon.language-server.path": "gluon_language-server"
+    "gluon.language-server.path": "gluon_language-server",
+
+    // Gluon specific settings can be specified with
+    "[gluon]": {
+        "editor.formatOnSave": false
+    }
 }
 ```
+
+## Features
+
+* Code completion
+
+* Hover support
+
+* Code formatting (May still eat your laundry)
+
 
 ## Example
 
