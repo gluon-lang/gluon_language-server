@@ -1,6 +1,8 @@
 #![cfg_attr(feature = "serde_macros", feature(custom_derive, plugin))]
 #![cfg_attr(feature = "serde_macros", plugin(serde_macros))]
 
+extern crate clap;
+
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
@@ -619,6 +621,13 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
 pub fn run() {
     ::env_logger::init().unwrap();
 
+    let _matches = clap::App::new("debugger")
+        .version(env!("CARGO_PKG_VERSION"))
+        .get_matches();
+    start_server()
+}
+
+fn start_server() {
     let thread = new_vm();
     let work_queue = Arc::new(UniqueQueue {
         queue: Mutex::new(VecDeque::new()),
