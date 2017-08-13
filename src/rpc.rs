@@ -3,11 +3,11 @@ use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 
-use jsonrpc_core::{Error, ErrorCode, RpcMethodSimple, Params, Value};
+use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, Value};
 use futures::{self, BoxFuture, Future, IntoFuture};
 
 use serde;
-use serde_json::{from_value, to_value, to_string};
+use serde_json::{from_value, to_string, to_value};
 
 pub struct ServerError<E> {
     pub message: String,
@@ -88,20 +88,17 @@ where
                 return self.0
                     .execute(value)
                     .then(|result| match result {
-                        Ok(value) => {
-                            Ok(
-                                to_value(&value).expect("result data could not be serialized"),
-                            ).into_future()
-                        }
-                        Err(error) => {
-                            Err(Error {
-                                code: ErrorCode::InternalError,
-                                message: error.message,
-                                data: error.data.as_ref().map(
-                                    |v| to_value(v).expect("error data could not be serialized"),
-                                ),
-                            }).into_future()
-                        }
+                        Ok(value) => Ok(
+                            to_value(&value).expect("result data could not be serialized"),
+                        ).into_future(),
+                        Err(error) => Err(Error {
+                            code: ErrorCode::InternalError,
+                            message: error.message,
+                            data: error
+                                .data
+                                .as_ref()
+                                .map(|v| to_value(v).expect("error data could not be serialized")),
+                        }).into_future(),
                     })
                     .boxed()
             }

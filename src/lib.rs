@@ -24,7 +24,7 @@ extern crate languageserver_types;
 
 pub mod rpc;
 
-use jsonrpc_core::{IoHandler, RpcNotificationSimple, Params, Value};
+use jsonrpc_core::{IoHandler, Params, RpcNotificationSimple, Value};
 
 use url::Url;
 
@@ -35,13 +35,13 @@ use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Line, Span};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
-use gluon::base::types::{TypeCache};
+use gluon::base::types::TypeCache;
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::vm::macros::Error as MacroError;
-use gluon::{Compiler, Error as GluonError, Result as GluonResult, RootedThread, new_vm,
-            filename_to_module};
+use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
+            RootedThread};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
@@ -77,14 +77,12 @@ where
 {
     fn execute(&self, param: Params) {
         match param {
-            Params::Map(map) => {
-                match serde_json::from_value(Value::Object(map)) {
-                    Ok(value) => {
-                        self.0.execute(value);
-                    }
-                    Err(err) => log_message!("Invalid parameters. Reason: {}", err),
+            Params::Map(map) => match serde_json::from_value(Value::Object(map)) {
+                Ok(value) => {
+                    self.0.execute(value);
                 }
-            }
+                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
+            },
             _ => log_message!("Invalid parameters: {:?}", param),
         }
     }
@@ -124,7 +122,7 @@ impl Importer for CheckImporter {
         input: &str,
         expr: SpannedExpr<Symbol>,
     ) -> Result<(), MacroError> {
-        use gluon::compiler_pipeline::*;
+        use gluon::compiler_pipeline::{MacroValue, Typecheckable, TypecheckValue};
 
         let macro_value = MacroValue { expr: expr };
         let TypecheckValue { expr, typ } =
@@ -223,19 +221,7 @@ where
             ref lines,
             ..
         } = *module;
-        let line_pos = try!(lines.line(Line::from(position.line as usize)).ok_or_else(
-            || {
-                ServerError {
-                    message: format!(
-                        "Position ({}, {}) is out of range",
-                        position.line,
-                        position.character
-                    ),
-                    data: None,
-                }
-            },
-        ));
-        let byte_pos = line_pos + BytePos::from(position.character as usize);
+        let byte_pos = position_to_byte_pos(lines, position)?;
 
         f(expr, byte_pos)
     })
@@ -305,23 +291,26 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
         (|| -> Result<_, _> {
             let thread = &self.0;
-            retrieve_expr_with_pos(
+            retrieve_expr(
                 thread,
                 &change.text_document.uri,
-                &change.position,
-                |expr, byte_pos| {
+                |module| {
+                    let expr = &module.expr;
+                    let byte_pos = position_to_byte_pos(&module.lines, &change.position)?;
+
                     let env = thread.get_env();
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
                     let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
-                    Ok(completion::find(&*env, expr, byte_pos)
-                    .map(|typ| {
+                    let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
+                    Ok(completion::completion(extract, expr, byte_pos)
+                    .map(|(typ, span)| {
                         let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
                             Some(comment) => format!("{}\n\n{}", typ, comment),
                             None => format!("{}", typ),
                         };
                         Hover {
                             contents: vec![MarkedString::String(contents)],
-                            range: None,
+                            range: byte_span_to_range(&module.lines, span).ok(),
                         }
                     })
                     .unwrap_or_else(|()| {
@@ -352,6 +341,40 @@ fn span_to_range(span: &Span<pos::Location>) -> Range {
         start: location_to_position(&span.start),
         end: location_to_position(&span.end),
     }
+}
+
+fn byte_pos_to_position(lines: &source::Lines, pos: BytePos) -> Result<Position, ServerError<()>> {
+    Ok(location_to_position(&lines
+        .location(pos)
+        .ok_or_else(|| {
+            ServerError::from(&"Unable to translate index to location")
+        })?))
+}
+
+fn byte_span_to_range(
+    lines: &source::Lines,
+    span: Span<BytePos>,
+) -> Result<Range, ServerError<()>> {
+    Ok(Range {
+        start: byte_pos_to_position(lines, span.start)?,
+        end: byte_pos_to_position(lines, span.end)?,
+    })
+}
+
+fn position_to_byte_pos(lines: &source::Lines, position: &Position) -> Result<BytePos, ServerError<()>> {
+    let line_pos = try!(lines.line(Line::from(position.line as usize),).ok_or_else(
+        || {
+            ServerError {
+                message: format!(
+                    "Position ({}, {}) is out of range",
+                    position.line,
+                    position.character
+                ),
+                data: None,
+            }
+        },
+    ));
+    Ok(line_pos + BytePos::from(position.character as usize))
 }
 
 struct TextDocumentDidOpen(RootedThread);
@@ -414,7 +437,7 @@ pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<Std
 }
 
 fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()> {
-    use gluon::compiler_pipeline::*;
+    use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 
     let filename = strip_file_prefix_with_thread(thread, filename);
     let name = filename_to_module(&filename);
@@ -561,33 +584,25 @@ fn create_diagnostics(
     }
 
     match err {
-        GluonError::Typecheck(err) => {
-            diagnostics
-                .entry(module_name_to_file(&err.source_name))
-                .or_insert(Vec::new())
-                .extend(err.errors().into_iter().map(into_diagnostic))
-        }
-        GluonError::Parse(err) => {
-            diagnostics
-                .entry(module_name_to_file(&err.source_name))
-                .or_insert(Vec::new())
-                .extend(err.errors().into_iter().map(into_diagnostic))
-        }
-        GluonError::Multiple(errors) => {
-            for err in errors {
-                create_diagnostics(diagnostics, filename, err);
-            }
-        }
-        err => {
-            diagnostics
-                .entry(filename.clone())
-                .or_insert(Vec::new())
-                .push(Diagnostic {
-                    message: format!("{}", err),
-                    severity: Some(DiagnosticSeverity::Error),
-                    ..Diagnostic::default()
-                })
-        }
+        GluonError::Typecheck(err) => diagnostics
+            .entry(module_name_to_file(&err.source_name))
+            .or_insert(Vec::new())
+            .extend(err.errors().into_iter().map(into_diagnostic)),
+        GluonError::Parse(err) => diagnostics
+            .entry(module_name_to_file(&err.source_name))
+            .or_insert(Vec::new())
+            .extend(err.errors().into_iter().map(into_diagnostic)),
+        GluonError::Multiple(errors) => for err in errors {
+            create_diagnostics(diagnostics, filename, err);
+        },
+        err => diagnostics
+            .entry(filename.clone())
+            .or_insert(Vec::new())
+            .push(Diagnostic {
+                message: format!("{}", err),
+                severity: Some(DiagnosticSeverity::Error),
+                ..Diagnostic::default()
+            }),
     }
 }
 
@@ -652,8 +667,8 @@ fn start_server() {
             {
                 let thread = thread.clone();
                 let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
-                    let data: CompletionData = serde_json::from_value(item.data.clone().unwrap())
-                        .expect("CompletionData");
+                    let data: CompletionData =
+                        serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
 
                     log_message(format!("{:?}", data.text_document_uri));
                     retrieve_expr_with_pos(
@@ -699,24 +714,10 @@ fn start_server() {
                         let formatted = format_expr(&module.source_string)?;
                         Ok(vec![
                             TextEdit {
-                                range: Range {
-                                    start: location_to_position(&module
-                                        .lines
-                                        .location(0.into())
-                                        .ok_or_else(|| {
-                                            ServerError::from(
-                                                &"Unable to translate index to location",
-                                            )
-                                        })?),
-                                    end: location_to_position(&module
-                                        .lines
-                                        .location(module.source_string.len().into())
-                                        .ok_or_else(|| {
-                                            ServerError::from(
-                                                &"Unable to translate index to location",
-                                            )
-                                        })?),
-                                },
+                                range: byte_span_to_range(
+                                    &module.lines,
+                                    Span::new(0.into(), module.source_string.len().into()),
+                                )?,
                                 new_text: formatted,
                             },
                         ])

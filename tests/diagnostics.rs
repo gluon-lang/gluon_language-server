@@ -13,7 +13,7 @@ use languageserver_types::{DiagnosticSeverity, Position, PublishDiagnosticsParam
 
 #[test]
 fn type_error() {
-    let diagnostic: PublishDiagnosticsParams = support::send_rpc(|mut stdin| {
+    let diagnostic: PublishDiagnosticsParams = support::send_rpc(|stdin| {
         let text = r#"
 "" + 1
 "#;

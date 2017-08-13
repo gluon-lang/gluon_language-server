@@ -11,11 +11,11 @@ extern crate url;
 mod support;
 
 use std::path::PathBuf;
-use std::process::{Command, ChildStdin, ChildStdout, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::io::{BufRead, BufReader, Write};
 use std::fs::canonicalize;
 
-use serde_json::{Value, from_str};
+use serde_json::{from_str, Value};
 
 use debugserver_types::*;
 

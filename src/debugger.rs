@@ -37,14 +37,14 @@ use debugserver_types::*;
 
 use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
-use gluon::base::types::{ArcType, Type, arg_iter};
+use gluon::base::types::{arg_iter, ArcType, Type};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
-use gluon::vm::thread::{Thread as GluonThread, RootedThread, ThreadInternal, LINE_FLAG};
-use gluon::{Compiler, Error as GluonError, filename_to_module};
+use gluon::vm::thread::{RootedThread, Thread as GluonThread, ThreadInternal, LINE_FLAG};
+use gluon::{filename_to_module, Compiler, Error as GluonError};
 use gluon::import::Import;
 
-use gluon_language_server::rpc::{LanguageServerCommand, ServerCommand, ServerError, read_message,
-                                 write_message, write_message_str};
+use gluon_language_server::rpc::{read_message, write_message, write_message_str,
+                                 LanguageServerCommand, ServerCommand, ServerError};
 
 pub struct InitializeHandler {
     debugger: Arc<Debugger>,
@@ -370,9 +370,7 @@ impl Variables {
 
     fn insert(&mut self, value: VmValue, typ: &ArcType) -> i64 {
         match value {
-            VmValue::Array(_) |
-            VmValue::Data(_) |
-            VmValue::Closure(_) => {
+            VmValue::Array(_) | VmValue::Data(_) | VmValue::Closure(_) => {
                 self.reference -= 1;
                 self.map.insert(self.reference, (value, typ.clone()));
                 self.reference
@@ -530,14 +528,12 @@ impl Debugger {
                             })
                             .collect()
                     }
-                    VariableType::Upvar => {
-                        stack_info
-                            .upvars()
-                            .iter()
-                            .zip(frame.upvars())
-                            .map(|(info, value)| mk_variable(&info.name, &info.typ, *value))
-                            .collect()
-                    }
+                    VariableType::Upvar => stack_info
+                        .upvars()
+                        .iter()
+                        .zip(frame.upvars())
+                        .map(|(info, value)| mk_variable(&info.name, &info.typ, *value))
+                        .collect(),
                 }
             }
             None => {
@@ -545,44 +541,38 @@ impl Debugger {
                     Some((value, typ)) => {
                         let typ = remove_aliases_cow(&*self.thread.get_env(), &typ);
                         match value {
-                            VmValue::Data(ref data) => {
-                                match **typ {
-                                    Type::Record(ref row) => {
-                                        data.fields
-                                            .iter()
-                                            .zip(row.row_iter())
-                                            .map(|(field, type_field)| {
-                                                mk_variable(
-                                                    type_field.name.declared_name(),
-                                                    &type_field.typ,
-                                                    *field,
-                                                )
-                                            })
-                                            .collect()
-                                    }
-                                    Type::Variant(ref row) => {
-                                        let type_field = row.row_iter()
-                                            .nth(data.tag() as usize)
-                                            .expect("Variant tag is out of bounds");
-                                        data.fields
-                                            .into_iter()
-                                            .zip(arg_iter(&type_field.typ))
-                                            .map(|(field, typ)| mk_variable("", typ, *field))
-                                            .collect()
-                                    }
-                                    _ => vec![],
-                                }
-                            }
-                            VmValue::Closure(ref closure) => {
-                                closure
-                                    .upvars
+                            VmValue::Data(ref data) => match **typ {
+                                Type::Record(ref row) => data.fields
                                     .iter()
-                                    .zip(&closure.function.debug_info.upvars)
-                                    .map(|(value, ref upvar_info)| {
-                                        mk_variable(&upvar_info.name, &upvar_info.typ, *value)
+                                    .zip(row.row_iter())
+                                    .map(|(field, type_field)| {
+                                        mk_variable(
+                                            type_field.name.declared_name(),
+                                            &type_field.typ,
+                                            *field,
+                                        )
                                     })
-                                    .collect()
-                            }
+                                    .collect(),
+                                Type::Variant(ref row) => {
+                                    let type_field = row.row_iter()
+                                        .nth(data.tag() as usize)
+                                        .expect("Variant tag is out of bounds");
+                                    data.fields
+                                        .into_iter()
+                                        .zip(arg_iter(&type_field.typ))
+                                        .map(|(field, typ)| mk_variable("", typ, *field))
+                                        .collect()
+                                }
+                                _ => vec![],
+                            },
+                            VmValue::Closure(ref closure) => closure
+                                .upvars
+                                .iter()
+                                .zip(&closure.function.debug_info.upvars)
+                                .map(|(value, ref upvar_info)| {
+                                    mk_variable(&upvar_info.name, &upvar_info.typ, *value)
+                                })
+                                .collect(),
                             VmValue::Array(ref array) => {
                                 let element_type = match **typ {
                                     // Unpack the array type
@@ -658,7 +648,9 @@ where
     let mut io = IoHandler::new();
     io.add_async_method(
         "initialize",
-        ServerCommand::new(InitializeHandler { debugger: debugger.clone() }),
+        ServerCommand::new(InitializeHandler {
+            debugger: debugger.clone(),
+        }),
     );
 
     {
@@ -673,11 +665,15 @@ where
 
     io.add_async_method(
         "launch",
-        ServerCommand::new(LaunchHandler { debugger: debugger.clone() }),
+        ServerCommand::new(LaunchHandler {
+            debugger: debugger.clone(),
+        }),
     );
     io.add_async_method(
         "disconnect",
-        ServerCommand::new(DisconnectHandler { exit_token: exit_token.clone() }),
+        ServerCommand::new(DisconnectHandler {
+            exit_token: exit_token.clone(),
+        }),
     );
     {
         let debugger = debugger.clone();
@@ -854,8 +850,9 @@ where
         let debugger = debugger.clone();
         let cont = move |_: ContinueArguments| -> BoxFuture<ContinueResponseBody, ServerError<()>> {
             debugger.do_continue.store(true, Ordering::Release);
-            Ok(ContinueResponseBody { all_threads_continued: Some(true) })
-                .into_future()
+            Ok(ContinueResponseBody {
+                all_threads_continued: Some(true),
+            }).into_future()
                 .boxed()
         };
         io.add_async_method("continue", ServerCommand::new(cont));
@@ -926,8 +923,9 @@ where
         let debugger = debugger.clone();
         let cont = move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
             let variables = debugger.variables(args.variables_reference);
-            Ok(VariablesResponseBody { variables: variables })
-                .into_future()
+            Ok(VariablesResponseBody {
+                variables: variables,
+            }).into_future()
                 .boxed()
         };
         io.add_async_method("variables", ServerCommand::new(cont));

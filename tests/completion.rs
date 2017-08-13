@@ -28,7 +28,9 @@ where
         "textDocument/completion",
         id,
         TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: support::test_url(uri) },
+            text_document: TextDocumentIdentifier {
+                uri: support::test_url(uri),
+            },
             position: position,
         },
     );
@@ -54,7 +56,7 @@ fn remove_completion_data(mut completions: Vec<CompletionItem>) -> Vec<Completio
 
 #[test]
 fn local_completion() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|mut stdin| {
+    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
         let text = r#"
 let test = 2
 let test1 = ""
@@ -94,7 +96,7 @@ te
 
 #[test]
 fn prelude_completion() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|mut stdin| {
+    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
         support::did_open(stdin, "test", "no");
 
         completion(
@@ -138,7 +140,7 @@ fn resolve_completion() {
         ),
         ..CompletionItem::default()
     };
-    let actual: CompletionItem = support::send_rpc(|mut stdin| {
+    let actual: CompletionItem = support::send_rpc(|stdin| {
         let text = r#"
 /// doc
 let test = 2
@@ -160,7 +162,7 @@ te
 
 #[test]
 fn url_encoded_path() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|mut stdin| {
+    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
         let text = r#"
 let r = { abc = 1 }
 r.

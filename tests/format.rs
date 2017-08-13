@@ -23,7 +23,9 @@ where
         "textDocument/formatting",
         id,
         DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: support::test_url(uri) },
+            text_document: TextDocumentIdentifier {
+                uri: support::test_url(uri),
+            },
             options: FormattingOptions {
                 tab_size: 4,
                 insert_spaces: true,
@@ -47,7 +49,7 @@ x   +
 let x = 1
 x + 2
 "#;
-    let edits: Vec<TextEdit> = support::send_rpc(|mut stdin| {
+    let edits: Vec<TextEdit> = support::send_rpc(|stdin| {
         support::did_open(stdin, "test", text);
 
         format(stdin, 2, "test")
