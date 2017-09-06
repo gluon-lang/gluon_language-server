@@ -22,9 +22,17 @@ extern crate url_serde;
 
 extern crate languageserver_types;
 
+macro_rules! log_message {
+    ($($ts: tt)+) => {
+        if log_enabled!(::log::LogLevel::Debug) {
+            ::log_message(format!( $($ts)+ ))
+        }
+    }
+}
+
 pub mod rpc;
 
-use jsonrpc_core::{IoHandler, Params, RpcNotificationSimple, Value};
+use jsonrpc_core::{IoHandler, Value};
 
 use url::Url;
 
@@ -64,32 +72,6 @@ use futures::{Future, IntoFuture};
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
-
-macro_rules! log_message {
-    ($($ts: tt)+) => {
-        if log_enabled!(log::LogLevel::Debug) {
-            log_message(format!( $($ts)+ ))
-        }
-    }
-}
-
-impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
-where
-    T: LanguageServerNotification<P>,
-    P: for<'de> serde::Deserialize<'de> + 'static,
-{
-    fn execute(&self, param: Params) {
-        match param {
-            Params::Map(map) => match serde_json::from_value(Value::Object(map)) {
-                Ok(value) => {
-                    self.0.execute(value);
-                }
-                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
-            },
-            _ => log_message!("Invalid parameters: {:?}", param),
-        }
-    }
-}
 
 fn log_message(message: String) {
     debug!("{}", message);
@@ -725,10 +707,13 @@ fn initialize_rpc(
     });
 
     let mut io = IoHandler::new();
-    io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
+    io.add_async_method(
+        "initialize",
+        ServerCommand::method(Initialize(thread.clone())),
+    );
     io.add_async_method(
         "textDocument/completion",
-        ServerCommand::new(Completion(thread.clone())),
+        ServerCommand::method(Completion(thread.clone())),
     );
 
     {
@@ -767,12 +752,12 @@ fn initialize_rpc(
                     .into_future(),
             )
         };
-        io.add_async_method("completionItem/resolve", ServerCommand::new(resolve));
+        io.add_async_method("completionItem/resolve", ServerCommand::method(resolve));
     }
 
     io.add_async_method(
         "textDocument/hover",
-        ServerCommand::new(HoverCommand(thread.clone())),
+        ServerCommand::method(HoverCommand(thread.clone())),
     );
 
     {
@@ -803,20 +788,35 @@ fn initialize_rpc(
                 }).into_future(),
             )
         };
-        io.add_async_method("textDocument/formatting", ServerCommand::new(format));
+        io.add_async_method("textDocument/formatting", ServerCommand::method(format));
     }
 
-    /*
     {
         let thread = thread.clone();
-        let f = |params: TextDocumentPositionParams| -> BoxFuture<Vec<_>, _> {
-            retrieve_expr(&thread, &params.text_document.uri, |module| {})
-                .into_future()
-                .boxed()
+        let f = move |params: TextDocumentPositionParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let expr = &module.expr;
+                    let byte_pos = position_to_byte_pos(&module.lines, &params.position)?;
+
+                    let symbol_spans = completion::find_all_symbols(expr, byte_pos)
+                        .map(|t| t.1)
+                        .unwrap_or(Vec::new());
+
+                    symbol_spans
+                        .into_iter()
+                        .map(|span| {
+                            Ok(DocumentHighlight {
+                                kind: None,
+                                range: byte_span_to_range(&module.lines, span)?,
+                            })
+                        })
+                        .collect::<Result<_, _>>()
+                }).into_future(),
+            )
         };
-        io.add_async_method("textDocument/documentHighlight", f);
+        io.add_async_method("textDocument/documentHighlight", ServerCommand::method(f));
     }
-    */
 
     io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
     let exit_token = Arc::new(AtomicBool::new(false));
@@ -828,11 +828,11 @@ fn initialize_rpc(
     }
     io.add_notification(
         "textDocument/didOpen",
-        ServerCommand::new(TextDocumentDidOpen(thread.clone())),
+        ServerCommand::notification(TextDocumentDidOpen(thread.clone())),
     );
     io.add_notification(
         "textDocument/didChange",
-        ServerCommand::new(TextDocumentDidChange(work_queue.clone())),
+        ServerCommand::notification(TextDocumentDidChange(work_queue.clone())),
     );
     (io, exit_token, work_queue)
 }

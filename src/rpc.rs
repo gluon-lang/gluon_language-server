@@ -3,7 +3,7 @@ use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 
-use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, Value};
+use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 use futures::{self, Future, IntoFuture};
 
 use serde;
@@ -69,7 +69,19 @@ where
 pub struct ServerCommand<T, P>(pub T, PhantomData<fn(P)>);
 
 impl<T, P> ServerCommand<T, P> {
-    pub fn new(command: T) -> ServerCommand<T, P> {
+    pub fn method(command: T) -> ServerCommand<T, P>
+    where
+        T: LanguageServerCommand<P>,
+        P: for<'de> serde::Deserialize<'de> + 'static,
+    {
+        ServerCommand(command, PhantomData)
+    }
+
+    pub fn notification(command: T) -> ServerCommand<T, P>
+    where
+        T: LanguageServerNotification<P>,
+        P: for<'de> serde::Deserialize<'de> + 'static,
+    {
         ServerCommand(command, PhantomData)
     }
 }
@@ -114,6 +126,25 @@ where
         }))
     }
 }
+
+impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
+where
+    T: LanguageServerNotification<P>,
+    P: for<'de> serde::Deserialize<'de> + 'static,
+{
+    fn execute(&self, param: Params) {
+        match param {
+            Params::Map(map) => match from_value(Value::Object(map)) {
+                Ok(value) => {
+                    self.0.execute(value);
+                }
+                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
+            },
+            _ => log_message!("Invalid parameters: {:?}", param),
+        }
+    }
+}
+
 
 pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
 where
