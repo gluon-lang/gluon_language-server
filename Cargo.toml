@@ -16,6 +16,10 @@ path = "src/debugger.rs"
 name = "gluon_language-server"
 path = "src/main.rs"
 
+[lib]
+name = "gluon_language_server"
+path = "src/lib.rs"
+
 [dependencies]
 clap = "2.19.0"
 
