@@ -1,10 +1,10 @@
-extern crate gluon_language_server;
 extern crate debugserver_types;
+extern crate gluon_language_server;
 extern crate languageserver_types;
 
 extern crate jsonrpc_core;
-extern crate serde_json;
 extern crate serde;
+extern crate serde_json;
 extern crate url;
 
 #[allow(dead_code)]

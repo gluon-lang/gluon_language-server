@@ -1,10 +1,9 @@
-
 extern crate gluon_language_server;
 extern crate languageserver_types;
 
 extern crate jsonrpc_core;
-extern crate serde_json;
 extern crate serde;
+extern crate serde_json;
 extern crate url;
 
 mod support;
@@ -130,7 +129,6 @@ test
 #[test]
 fn stream() {
     let hover: Hover = support::send_rpc(|stdin| {
-
         support::did_open(stdin, "stream", STREAM_SOURCE);
 
         hover(

@@ -4,10 +4,12 @@ use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, Value};
-use futures::{self, BoxFuture, Future, IntoFuture};
+use futures::{self, Future, IntoFuture};
 
 use serde;
 use serde_json::{from_value, to_string, to_value};
+
+use BoxFuture;
 
 pub struct ServerError<E> {
     pub message: String,
@@ -85,9 +87,8 @@ where
         };
         let err = match from_value(value.clone()) {
             Ok(value) => {
-                return self.0
-                    .execute(value)
-                    .then(|result| match result {
+                return Box::new(self.0.execute(value).then(|result| {
+                    match result {
                         Ok(value) => Ok(
                             to_value(&value).expect("result data could not be serialized"),
                         ).into_future(),
@@ -99,18 +100,18 @@ where
                                 .as_ref()
                                 .map(|v| to_value(v).expect("error data could not be serialized")),
                         }).into_future(),
-                    })
-                    .boxed()
+                    }
+                }))
             }
             Err(err) => err,
         };
         let data = self.0.invalid_params();
-        futures::failed(Error {
+        Box::new(futures::failed(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {}", err),
             data: data.as_ref()
                 .map(|v| to_value(v).expect("error data could not be serialized")),
-        }).boxed()
+        }))
     }
 }
 

@@ -4,17 +4,17 @@
 extern crate clap;
 
 extern crate serde;
-extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
+extern crate serde_json;
 
-extern crate jsonrpc_core;
 extern crate futures;
+extern crate jsonrpc_core;
 
-#[macro_use]
-extern crate log;
 extern crate env_logger;
 extern crate gluon;
+#[macro_use]
+extern crate log;
 extern crate gluon_format;
 extern crate gluon_completion as completion;
 extern crate url;
@@ -40,6 +40,7 @@ use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::vm::macros::Error as MacroError;
+use gluon::compiler_pipeline::{MacroExpandable, MacroValue, TypecheckValue, Typecheckable};
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
 
@@ -58,7 +59,9 @@ use std::thread;
 
 use languageserver_types::*;
 
-use futures::{BoxFuture, Future, IntoFuture};
+use futures::{Future, IntoFuture};
+
+pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
 
@@ -106,6 +109,8 @@ struct Module {
     source_string: String,
 }
 
+pub struct ChainImporter<I>(CheckImporter, I);
+
 #[derive(Clone)]
 struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
 impl CheckImporter {
@@ -122,8 +127,6 @@ impl Importer for CheckImporter {
         input: &str,
         expr: SpannedExpr<Symbol>,
     ) -> Result<(), MacroError> {
-        use gluon::compiler_pipeline::{MacroValue, Typecheckable, TypecheckValue};
-
         let macro_value = MacroValue { expr: expr };
         let TypecheckValue { expr, typ } =
             try!(macro_value.typecheck(compiler, vm, module_name, input));
@@ -139,10 +142,12 @@ impl Importer for CheckImporter {
             },
         );
         // Insert a global to ensure the globals type can be looked up
-        try!(
-            vm.global_env()
-                .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0))
-        );
+        try!(vm.global_env().set_global(
+            Symbol::from(module_name),
+            typ,
+            metadata,
+            GluonValue::Int(0)
+        ));
         Ok(())
     }
 }
@@ -162,19 +167,21 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         if let Some(ref path) = change.root_path {
             import.add_path(path);
         }
-        Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncKind::Full),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(true),
-                    trigger_characters: vec![".".into()],
-                }),
-                hover_provider: Some(true),
-                document_formatting_provider: Some(true),
-                ..ServerCapabilities::default()
-            },
-        }).into_future()
-            .boxed()
+        Box::new(
+            Ok(InitializeResult {
+                capabilities: ServerCapabilities {
+                    text_document_sync: Some(TextDocumentSyncKind::Full),
+                    completion_provider: Some(CompletionOptions {
+                        resolve_provider: Some(true),
+                        trigger_characters: vec![".".into()],
+                    }),
+                    hover_provider: Some(true),
+                    document_formatting_provider: Some(true),
+                    document_highlight_provider: Some(true),
+                    ..ServerCapabilities::default()
+                },
+            }).into_future(),
+        )
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -229,8 +236,7 @@ where
 
 #[derive(Serialize, Deserialize)]
 pub struct CompletionData {
-    #[serde(with = "url_serde")]
-    pub text_document_uri: Url,
+    #[serde(with = "url_serde")] pub text_document_uri: Url,
     pub position: Position,
 }
 
@@ -242,41 +248,44 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
         &self,
         change: TextDocumentPositionParams,
     ) -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
-        (|| -> Result<_, _> {
-            let thread = &self.0;
-            let suggestions = retrieve_expr_with_pos(
-                thread,
-                &change.text_document.uri,
-                &change.position,
-                |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
-            )?;
+        Box::new(
+            (|| -> Result<_, _> {
+                let thread = &self.0;
+                let suggestions = retrieve_expr_with_pos(
+                    thread,
+                    &change.text_document.uri,
+                    &change.position,
+                    |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
+                )?;
 
-            let mut items: Vec<_> = suggestions
-                .into_iter()
-                .map(|ident| {
-                    // Remove the `:Line x, Row y suffix`
-                    let name: &str = ident.name.as_ref();
-                    let label = String::from(name.split(':').next().unwrap_or(ident.name.as_ref()));
-                    CompletionItem {
-                        label: label,
-                        detail: Some(format!("{}", ident.typ)),
-                        kind: Some(CompletionItemKind::Variable),
-                        data: Some(
-                            serde_json::to_value(CompletionData {
-                                text_document_uri: change.text_document.uri.clone(),
-                                position: change.position,
-                            }).expect("CompletionData"),
-                        ),
-                        ..CompletionItem::default()
-                    }
-                })
-                .collect();
+                let mut items: Vec<_> = suggestions
+                    .into_iter()
+                    .map(|ident| {
+                        // Remove the `:Line x, Row y suffix`
+                        let name: &str = ident.name.as_ref();
+                        let label =
+                            String::from(name.split(':').next().unwrap_or(ident.name.as_ref()));
+                        CompletionItem {
+                            label: label,
+                            detail: Some(format!("{}", ident.typ)),
+                            kind: Some(CompletionItemKind::Variable),
+                            data: Some(
+                                serde_json::to_value(CompletionData {
+                                    text_document_uri: change.text_document.uri.clone(),
+                                    position: change.position,
+                                }).expect("CompletionData"),
+                            ),
+                            ..CompletionItem::default()
+                        }
+                    })
+                    .collect();
 
-            items.sort_by(|l, r| l.label.cmp(&r.label));
+                items.sort_by(|l, r| l.label.cmp(&r.label));
 
-            Ok(items)
-        })().into_future()
-            .boxed()
+                Ok(items)
+            })()
+                .into_future(),
+        )
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -289,12 +298,10 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     type Output = Hover;
     type Error = ();
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
-        (|| -> Result<_, _> {
-            let thread = &self.0;
-            retrieve_expr(
-                thread,
-                &change.text_document.uri,
-                |module| {
+        Box::new(
+            (|| -> Result<_, _> {
+                let thread = &self.0;
+                retrieve_expr(thread, &change.text_document.uri, |module| {
                     let expr = &module.expr;
                     let byte_pos = position_to_byte_pos(&module.lines, &change.position)?;
 
@@ -302,27 +309,29 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
                     let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
                     let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
-                    Ok(completion::completion(extract, expr, byte_pos)
-                    .map(|(typ, span)| {
-                        let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                            Some(comment) => format!("{}\n\n{}", typ, comment),
-                            None => format!("{}", typ),
-                        };
-                        Hover {
-                            contents: vec![MarkedString::String(contents)],
-                            range: byte_span_to_range(&module.lines, span).ok(),
-                        }
-                    })
-                    .unwrap_or_else(|()| {
-                        Hover {
-                            contents: vec![],
-                            range: None,
-                        }
-                    }))
-                },
-            )
-        })().into_future()
-            .boxed()
+                    Ok(
+                        completion::completion(extract, expr, byte_pos)
+                            .map(|(typ, span)| {
+                                let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                                    Some(comment) => format!("{}\n\n{}", typ, comment),
+                                    None => format!("{}", typ),
+                                };
+                                Hover {
+                                    contents: vec![MarkedString::String(contents)],
+                                    range: byte_span_to_range(&module.lines, span).ok(),
+                                }
+                            })
+                            .unwrap_or_else(|()| {
+                                Hover {
+                                    contents: vec![],
+                                    range: None,
+                                }
+                            }),
+                    )
+                })
+            })()
+                .into_future(),
+        )
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -344,11 +353,9 @@ fn span_to_range(span: &Span<pos::Location>) -> Range {
 }
 
 fn byte_pos_to_position(lines: &source::Lines, pos: BytePos) -> Result<Position, ServerError<()>> {
-    Ok(location_to_position(&lines
-        .location(pos)
-        .ok_or_else(|| {
-            ServerError::from(&"Unable to translate index to location")
-        })?))
+    Ok(location_to_position(&lines.location(pos).ok_or_else(|| {
+        ServerError::from(&"Unable to translate index to location")
+    })?))
 }
 
 fn byte_span_to_range(
@@ -361,7 +368,10 @@ fn byte_span_to_range(
     })
 }
 
-fn position_to_byte_pos(lines: &source::Lines, position: &Position) -> Result<BytePos, ServerError<()>> {
+fn position_to_byte_pos(
+    lines: &source::Lines,
+    position: &Position,
+) -> Result<BytePos, ServerError<()>> {
     let line_pos = try!(lines.line(Line::from(position.line as usize),).ok_or_else(
         || {
             ServerError {
@@ -437,8 +447,6 @@ pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<Std
 }
 
 fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()> {
-    use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
-
     let filename = strip_file_prefix_with_thread(thread, filename);
     let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
@@ -469,11 +477,12 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
         }
     };
     let metadata = Metadata::default();
-    try!(
-        thread
-            .global_env()
-            .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0))
-    );
+    try!(thread.global_env().set_global(
+        Symbol::from(&name[..]),
+        typ,
+        metadata,
+        GluonValue::Int(0)
+    ));
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -524,6 +533,10 @@ where
         });
         self.new_work.notify_one();
     }
+
+    fn stop(&self) {
+        self.new_work.notify_one();
+    }
 }
 
 struct DiagnosticProcessor {
@@ -542,6 +555,9 @@ impl DiagnosticProcessor {
                 work_queue = self.work_queue.queue.lock().unwrap();
             }
             work_queue = self.work_queue.new_work.wait(work_queue).unwrap();
+            if work_queue.is_empty() {
+                break;
+            }
         }
     }
 }
@@ -566,12 +582,10 @@ fn create_diagnostics(
     fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError>> {
         let mut result = s.replace(".", "/");
         result.push_str(".glu");
-        let path = fs::canonicalize(&*result).or_else(
-            |err| match env::current_dir() {
-                Ok(path) => Ok(path.join(result)),
-                Err(_) => Err(err),
-            },
-        )?;
+        let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
+            Ok(path) => Ok(path.join(result)),
+            Err(_) => Err(err),
+        })?;
         Ok(url::Url::from_file_path(path)
             .or_else(|_| url::Url::from_file_path(s))
             .map_err(|_| {
@@ -640,143 +654,14 @@ pub fn run() {
     let _matches = clap::App::new("debugger")
         .version(env!("CARGO_PKG_VERSION"))
         .get_matches();
-    start_server()
-}
 
-fn start_server() {
     let thread = new_vm();
-    let work_queue = Arc::new(UniqueQueue {
-        queue: Mutex::new(VecDeque::new()),
-        new_work: Condvar::new(),
-    });
-
-    let handle = {
-        let work_queue = work_queue.clone();
-        let thread = thread.clone();
-        thread::spawn(move || {
-
-            let import = Import::new(CheckImporter::new());
-            thread.get_macros().insert("import".into(), import);
-
-            let mut io = IoHandler::new();
-            io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
-            io.add_async_method(
-                "textDocument/completion",
-                ServerCommand::new(Completion(thread.clone())),
-            );
-
-            {
-                let thread = thread.clone();
-                let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
-                    let data: CompletionData =
-                        serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
-
-                    log_message(format!("{:?}", data.text_document_uri));
-                    retrieve_expr_with_pos(
-                        &thread,
-                        &data.text_document_uri,
-                        &data.position,
-                        |expr, byte_pos| {
-                            let type_env = thread.global_env().get_env();
-                            let (_, metadata_map) =
-                                gluon::check::metadata::metadata(&*type_env, expr);
-                            log_message(format!("{}  {:?}", item.label, metadata_map));
-                            Ok(
-                                completion::suggest_metadata(
-                                    &metadata_map,
-                                    &*type_env,
-                                    expr,
-                                    byte_pos,
-                                    &item.label,
-                                ).and_then(|metadata| metadata.comment.clone()),
-                            )
-                        },
-                    ).map(|comment| {
-                        log_message(format!("{:?}", comment));
-                        item.documentation = comment;
-                        item
-                    })
-                        .into_future()
-                        .boxed()
-                };
-                io.add_async_method("completionItem/resolve", ServerCommand::new(resolve));
-            }
-
-            io.add_async_method(
-                "textDocument/hover",
-                ServerCommand::new(HoverCommand(thread.clone())),
-            );
-
-            {
-                let thread = thread.clone();
-                let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<TextEdit>, _> {
-                    retrieve_expr(&thread, &params.text_document.uri, |module| {
-                        use gluon_format::format_expr;
-                        let formatted = format_expr(&module.source_string)?;
-                        Ok(vec![
-                            TextEdit {
-                                range: byte_span_to_range(
-                                    &module.lines,
-                                    Span::new(0.into(), module.source_string.len().into()),
-                                )?,
-                                new_text: formatted,
-                            },
-                        ])
-                    }).into_future()
-                        .boxed()
-                };
-                io.add_async_method("textDocument/formatting", ServerCommand::new(format));
-            }
-
-            io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
-            let exit_token = Arc::new(AtomicBool::new(false));
-            {
-                let exit_token = exit_token.clone();
-                io.add_notification("exit", move |_| {
-                    exit_token.store(true, atomic::Ordering::SeqCst)
-                });
-            }
-            io.add_notification(
-                "textDocument/didOpen",
-                ServerCommand::new(TextDocumentDidOpen(thread.clone())),
-            );
-            io.add_notification(
-                "textDocument/didChange",
-                ServerCommand::new(TextDocumentDidChange(work_queue.clone())),
-            );
-
-            let mut input = BufReader::new(io::stdin());
-            let mut output = io::stdout();
-
-            (|| -> Result<(), Box<StdError>> {
-                while !exit_token.load(atomic::Ordering::SeqCst) {
-                    match try!(read_message(&mut input)) {
-                        Some(json) => {
-                            debug!("Handle: {}", json);
-                            if let Some(response) = io.handle_request_sync(&json) {
-                                try!(write_message_str(&mut output, &response));
-                                try!(output.flush());
-                            }
-                        }
-                        None => return Ok(()),
-                    }
-                }
-                Ok(())
-            })().unwrap();
-        })
-    };
-
-    // Spawn a separate thread which runs a returns diagnostic information
-    thread::Builder::new()
-        .name("diagnostics".to_string())
-        .spawn(move || {
-            let diagnostics = DiagnosticProcessor {
-                thread: thread,
-                work_queue: work_queue,
-            };
-            diagnostics.run();
-        })
-        .unwrap();
+    {
+        let macros = thread.get_macros();
+        let import = Import::new(CheckImporter::new());
+        macros.insert("import".into(), import);
+    }
+    let handle = start_server(thread);
 
     if let Err(err) = handle.join() {
         let msg = err.downcast_ref::<&'static str>()
@@ -785,6 +670,171 @@ fn start_server() {
             .unwrap_or("Any");
         log_message!("Panic: `{}`", msg);
     }
+}
+
+pub fn start_server(thread: RootedThread) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let (io, exit_token, work_queue) = initialize_rpc(&thread);
+
+        // Spawn a separate thread which runs a returns diagnostic information
+        let diagnostics_handle = {
+            let work_queue = work_queue.clone();
+            thread::Builder::new()
+                .name("diagnostics".to_string())
+                .spawn(move || {
+                    let diagnostics = DiagnosticProcessor {
+                        thread: thread,
+                        work_queue: work_queue,
+                    };
+                    diagnostics.run();
+                })
+                .unwrap()
+        };
+
+
+        let mut input = BufReader::new(io::stdin());
+        let mut output = io::stdout();
+
+        (|| -> Result<(), Box<StdError>> {
+            while !exit_token.load(atomic::Ordering::SeqCst) {
+                match try!(read_message(&mut input)) {
+                    Some(json) => {
+                        debug!("Handle: {}", json);
+                        if let Some(response) = io.handle_request_sync(&json) {
+                            try!(write_message_str(&mut output, &response));
+                            try!(output.flush());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+            Ok(())
+        })()
+            .unwrap();
+        work_queue.stop();
+        diagnostics_handle.join().unwrap();
+    })
+}
+
+fn initialize_rpc(
+    thread: &RootedThread,
+) -> (IoHandler, Arc<AtomicBool>, Arc<UniqueQueue<Url, String>>) {
+    let work_queue = Arc::new(UniqueQueue {
+        queue: Mutex::new(VecDeque::new()),
+        new_work: Condvar::new(),
+    });
+
+    let mut io = IoHandler::new();
+    io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
+    io.add_async_method(
+        "textDocument/completion",
+        ServerCommand::new(Completion(thread.clone())),
+    );
+
+    {
+        let thread = thread.clone();
+        let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
+            let data: CompletionData =
+                serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
+
+            log_message(format!("{:?}", data.text_document_uri));
+            Box::new(
+                retrieve_expr_with_pos(
+                    &thread,
+                    &data.text_document_uri,
+                    &data.position,
+                    |expr, byte_pos| {
+                        let type_env = thread.global_env().get_env();
+                        let (_, metadata_map) = gluon::check::metadata::metadata(&*type_env, expr);
+                        log_message(format!("{}  {:?}", item.label, metadata_map));
+                        Ok(
+                            completion::suggest_metadata(
+                                &metadata_map,
+                                &*type_env,
+                                expr,
+                                byte_pos,
+                                &item.label,
+                            ).and_then(
+                                |metadata| metadata.comment.clone(),
+                            ),
+                        )
+                    },
+                ).map(|comment| {
+                    log_message(format!("{:?}", comment));
+                    item.documentation = comment;
+                    item
+                })
+                    .into_future(),
+            )
+        };
+        io.add_async_method("completionItem/resolve", ServerCommand::new(resolve));
+    }
+
+    io.add_async_method(
+        "textDocument/hover",
+        ServerCommand::new(HoverCommand(thread.clone())),
+    );
+
+    {
+        let thread = thread.clone();
+        let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    use gluon::parser::format_expr;
+                    let formatted = format_expr(&module.source_string)?;
+                    Ok(vec![
+                        TextEdit {
+                            range: Range {
+                                start: location_to_position(
+                                    &module.lines.location(0.into()).ok_or_else(|| {
+                                        ServerError::from(&"Unable to translate index to location")
+                                    })?,
+                                ),
+                                end: location_to_position(&module
+                                    .lines
+                                    .location(module.source_string.len().into())
+                                    .ok_or_else(|| {
+                                        ServerError::from(&"Unable to translate index to location")
+                                    })?),
+                            },
+                            new_text: formatted,
+                        },
+                    ])
+                }).into_future(),
+            )
+        };
+        io.add_async_method("textDocument/formatting", ServerCommand::new(format));
+    }
+
+    /*
+    {
+        let thread = thread.clone();
+        let f = |params: TextDocumentPositionParams| -> BoxFuture<Vec<_>, _> {
+            retrieve_expr(&thread, &params.text_document.uri, |module| {})
+                .into_future()
+                .boxed()
+        };
+        io.add_async_method("textDocument/documentHighlight", f);
+    }
+    */
+
+    io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
+    let exit_token = Arc::new(AtomicBool::new(false));
+    {
+        let exit_token = exit_token.clone();
+        io.add_notification("exit", move |_| {
+            exit_token.store(true, atomic::Ordering::SeqCst)
+        });
+    }
+    io.add_notification(
+        "textDocument/didOpen",
+        ServerCommand::new(TextDocumentDidOpen(thread.clone())),
+    );
+    io.add_notification(
+        "textDocument/didChange",
+        ServerCommand::new(TextDocumentDidChange(work_queue.clone())),
+    );
+    (io, exit_token, work_queue)
 }
 
 #[cfg(test)]

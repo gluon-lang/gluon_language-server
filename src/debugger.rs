@@ -1,18 +1,18 @@
 extern crate clap;
 extern crate debugserver_types;
-extern crate languageserver_types;
 extern crate env_logger;
 extern crate futures;
 extern crate jsonrpc_core;
-extern crate serde;
-extern crate serde_json;
-#[macro_use]
-extern crate serde_derive;
+extern crate languageserver_types;
 #[macro_use]
 extern crate log;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
 
-extern crate gluon_language_server;
 extern crate gluon;
+extern crate gluon_language_server;
 
 use std::cell::RefCell;
 use std::cmp;
@@ -27,7 +27,7 @@ use std::thread::spawn;
 use std::collections::{HashMap, HashSet};
 
 use clap::{App, Arg};
-use futures::{Async, BoxFuture, Future, IntoFuture};
+use futures::{Async, Future, IntoFuture};
 
 use jsonrpc_core::IoHandler;
 
@@ -45,6 +45,7 @@ use gluon::import::Import;
 
 use gluon_language_server::rpc::{read_message, write_message, write_message_str,
                                  LanguageServerCommand, ServerCommand, ServerError};
+use gluon_language_server::BoxFuture;
 
 pub struct InitializeHandler {
     debugger: Arc<Debugger>,
@@ -68,11 +69,12 @@ impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
             type_: "event".into(),
         });
 
-        Ok(Some(Capabilities {
-            supports_configuration_done_request: Some(true),
-            ..Capabilities::default()
-        })).into_future()
-            .boxed()
+        Box::new(
+            Ok(Some(Capabilities {
+                supports_configuration_done_request: Some(true),
+                ..Capabilities::default()
+            })).into_future(),
+        )
     }
 }
 
@@ -91,20 +93,18 @@ impl LanguageServerCommand<Value> for LaunchHandler {
     type Output = Option<Value>;
     type Error = ();
     fn execute(&self, args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
-        self.execute_launch(args).into_future().boxed()
+        Box::new(self.execute_launch(args).into_future())
     }
 }
 
 impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
-        let program = args.get("program").and_then(|s| s.as_str()).ok_or_else(
-            || {
-                ServerError {
-                    message: "No program argument found".into(),
-                    data: None,
-                }
-            },
-        )?;
+        let program = args.get("program").and_then(|s| s.as_str()).ok_or_else(|| {
+            ServerError {
+                message: "No program argument found".into(),
+                data: None,
+            }
+        })?;
         let program = strip_file_prefix(&self.debugger.thread, program);
         let module = filename_to_module(&program);
         let expr = {
@@ -121,8 +121,10 @@ impl LaunchHandler {
         };
 
         let debugger = self.debugger.clone();
-        self.debugger.thread.context().set_hook(
-            Some(Box::new(move |_, debug_info| {
+        self.debugger
+            .thread
+            .context()
+            .set_hook(Some(Box::new(move |_, debug_info| {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
                 let reason = match pause {
                     PAUSE => "pause",
@@ -176,8 +178,7 @@ impl LaunchHandler {
                 });
                 debugger.variables.lock().unwrap().clear();
                 Ok(Async::NotReady)
-            })),
-        );
+            })));
 
         let debugger = self.debugger.clone();
         spawn(move || {
@@ -252,7 +253,7 @@ impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
     type Error = ();
     fn execute(&self, _args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
         self.exit_token.store(true, Ordering::SeqCst);
-        Ok(None).into_future().boxed()
+        Box::new(Ok(None).into_future())
     }
 }
 
@@ -269,8 +270,7 @@ fn translate_request(
     struct In {
         command: String,
         seq: NumberOrString,
-        #[serde(default)]
-        arguments: Value,
+        #[serde(default)] arguments: Value,
     }
 
     #[derive(Serialize)]
@@ -332,15 +332,13 @@ fn translate_response(
         success: bool,
         request_seq: NumberOrString,
         seq: i64,
-        #[serde(rename = "type")]
-        typ: &'a str,
+        #[serde(rename = "type")] typ: &'a str,
         body: Option<Value>,
         message: Option<Value>,
     }
 
     let data: Option<Message> = try!(serde_json::from_str(&message));
     if let Some(data) = data {
-
         let out = Out {
             command: &current_command,
             success: data.result.is_some(),
@@ -659,12 +657,12 @@ where
 
     {
         let debugger = debugger.clone();
-        let configuration_done = move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
+        let handler = move |_: ConfigurationDoneArguments| -> BoxFuture<(), ServerError<()>> {
             // Notify the launched thread that it can start executing
             debugger.continue_barrier.wait();
-            Ok(()).into_future().boxed()
+            Box::new(Ok(()).into_future())
         };
-        io.add_async_method("configurationDone", ServerCommand::new(configuration_done));
+        io.add_async_method("configurationDone", ServerCommand::new(handler));
     }
 
     io.add_async_method(
@@ -703,40 +701,42 @@ where
                 );
             }
 
-            Ok(SetBreakpointsResponseBody {
-                breakpoints: args.breakpoints
-                    .into_iter()
-                    .flat_map(|bs| bs)
-                    .map(|breakpoint| {
-                        Breakpoint {
-                            column: None,
-                            end_column: None,
-                            end_line: None,
-                            id: None,
-                            line: Some(breakpoint.line),
-                            message: None,
-                            source: None,
-                            verified: true,
-                        }
-                    })
-                    .collect(),
-            }).into_future()
-                .boxed()
+            Box::new(
+                Ok(SetBreakpointsResponseBody {
+                    breakpoints: args.breakpoints
+                        .into_iter()
+                        .flat_map(|bs| bs)
+                        .map(|breakpoint| {
+                            Breakpoint {
+                                column: None,
+                                end_column: None,
+                                end_line: None,
+                                id: None,
+                                line: Some(breakpoint.line),
+                                message: None,
+                                source: None,
+                                verified: true,
+                            }
+                        })
+                        .collect(),
+                }).into_future(),
+            )
         };
 
         io.add_async_method("setBreakpoints", ServerCommand::new(set_break));
     }
 
     let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
-        Ok(ThreadsResponseBody {
-            threads: vec![
-                Thread {
-                    id: 1,
-                    name: "main".to_string(),
-                },
-            ],
-        }).into_future()
-            .boxed()
+        Box::new(
+            Ok(ThreadsResponseBody {
+                threads: vec![
+                    Thread {
+                        id: 1,
+                        name: "main".to_string(),
+                    },
+                ],
+            }).into_future(),
+        )
     };
 
     io.add_async_method("threads", ServerCommand::new(threads));
@@ -795,11 +795,12 @@ where
                 i += 1;
             }
 
-            Ok(StackTraceResponseBody {
-                total_frames: Some(frames.len() as i64),
-                stack_frames: frames,
-            }).into_future()
-                .boxed()
+            Box::new(
+                Ok(StackTraceResponseBody {
+                    total_frames: Some(frames.len() as i64),
+                    stack_frames: frames,
+                }).into_future(),
+            )
         };
         io.add_async_method("stackTrace", ServerCommand::new(stack_trace));
     }
@@ -843,9 +844,7 @@ where
                     variables_reference: (args.frame_id + 1) * 2,
                 });
             }
-            Ok(ScopesResponseBody { scopes: scopes })
-                .into_future()
-                .boxed()
+            Box::new(Ok(ScopesResponseBody { scopes: scopes }).into_future())
         };
         io.add_async_method("scopes", ServerCommand::new(scopes));
     }
@@ -854,10 +853,11 @@ where
         let debugger = debugger.clone();
         let cont = move |_: ContinueArguments| -> BoxFuture<ContinueResponseBody, ServerError<()>> {
             debugger.do_continue.store(true, Ordering::Release);
-            Ok(ContinueResponseBody {
-                all_threads_continued: Some(true),
-            }).into_future()
-                .boxed()
+            Box::new(
+                Ok(ContinueResponseBody {
+                    all_threads_continued: Some(true),
+                }).into_future(),
+            )
         };
         io.add_async_method("continue", ServerCommand::new(cont));
     }
@@ -878,7 +878,7 @@ where
                     .unwrap()
                     .to_string(),
             };
-            Ok(None).into_future().boxed()
+            Box::new(Ok(None).into_future())
         };
         io.add_async_method("next", ServerCommand::new(cont));
     }
@@ -888,7 +888,7 @@ where
         let cont = move |_: StepInArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
             debugger.do_continue.store(true, Ordering::Release);
             debugger.pause.store(STEP_IN, Ordering::Release);
-            Ok(None).into_future().boxed()
+            Box::new(Ok(None).into_future())
         };
         io.add_async_method("stepIn", ServerCommand::new(cont));
     }
@@ -909,7 +909,7 @@ where
                     .unwrap_or("<Unknown function>")
                     .to_string(),
             };
-            Ok(None).into_future().boxed()
+            Box::new(Ok(None).into_future())
         };
         io.add_async_method("stepOut", ServerCommand::new(cont));
     }
@@ -918,19 +918,20 @@ where
         let debugger = debugger.clone();
         let cont = move |_: PauseArguments| -> BoxFuture<Option<Value>, ServerError<()>> {
             debugger.pause.store(PAUSE, Ordering::Release);
-            Ok(None).into_future().boxed()
+            Box::new(Ok(None).into_future())
         };
         io.add_async_method("pause", ServerCommand::new(cont));
     }
 
     {
         let debugger = debugger.clone();
-        let cont = move |args: VariablesArguments| -> BoxFuture<VariablesResponseBody, ServerError<()>> {
+        let cont = move |args: VariablesArguments| -> BoxFuture<_, ServerError<()>> {
             let variables = debugger.variables(args.variables_reference);
-            Ok(VariablesResponseBody {
-                variables: variables,
-            }).into_future()
-                .boxed()
+            Box::new(
+                Ok(VariablesResponseBody {
+                    variables: variables,
+                }).into_future(),
+            )
         };
         io.add_async_method("variables", ServerCommand::new(cont));
     }
@@ -959,7 +960,8 @@ where
             }
         }
         Ok(())
-    })().unwrap();
+    })()
+        .unwrap();
 }
 
 pub fn main() {
