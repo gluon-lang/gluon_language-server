@@ -142,11 +142,11 @@ impl LaunchHandler {
                     NEXT => {
                         let step_data = debugger.step_data.lock().unwrap();
                         let stack_info = debug_info.stack_info(0).unwrap();
-                        let different_function = step_data.function_name !=
-                            stack_info.function_name().unwrap_or("<Unknown function>");
+                        let different_function = step_data.function_name
+                            != stack_info.function_name().unwrap_or("<Unknown function>");
                         let cmp = debug_info.stack_info_len().cmp(&step_data.stack_frames);
-                        if cmp == cmp::Ordering::Greater ||
-                            (cmp == cmp::Ordering::Equal && different_function)
+                        if cmp == cmp::Ordering::Greater
+                            || (cmp == cmp::Ordering::Equal && different_function)
                         {
                             // Continue executing if we are in a deeper function call or on the same
                             // level but in a different function (tail call)
@@ -965,7 +965,6 @@ where
 }
 
 pub fn main() {
-    ::std::thread::sleep_ms(10000);
     env_logger::init().unwrap();
 
     let matches = App::new("debugger")

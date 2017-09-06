@@ -13,10 +13,10 @@ extern crate jsonrpc_core;
 
 extern crate env_logger;
 extern crate gluon;
+extern crate gluon_completion as completion;
+extern crate gluon_format;
 #[macro_use]
 extern crate log;
-extern crate gluon_format;
-extern crate gluon_completion as completion;
 extern crate url;
 extern crate url_serde;
 
@@ -36,14 +36,14 @@ use jsonrpc_core::{IoHandler, Value};
 
 use url::Url;
 
-use gluon::base::ast::{SpannedExpr, Typed};
+use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
 use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Line, Span};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
-use gluon::base::types::TypeCache;
+use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
@@ -83,6 +83,29 @@ fn log_message(message: String) {
         }).unwrap()
     );
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+}
+
+fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
+    match expr.value {
+        // import! "std/prelude.glu" will replace itself with a symbol like `std.prelude
+        Expr::Ident(ref id) if id.name.declared_name().contains('.') => SymbolKind::Module,
+        _ => type_to_kind(typ),
+    }
+}
+
+fn type_to_kind(typ: &ArcType) -> SymbolKind {
+    match **typ {
+        _ if typ.as_function().is_some() => SymbolKind::Function,
+        Type::Ident(ref id) if id.declared_name() == "Bool" => SymbolKind::Boolean,
+        Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
+        Type::Builtin(builtin) => match builtin {
+            BuiltinType::Char | BuiltinType::String => SymbolKind::String,
+            BuiltinType::Byte | BuiltinType::Int | BuiltinType::Float => SymbolKind::Number,
+            BuiltinType::Array => SymbolKind::Array,
+            BuiltinType::Function => SymbolKind::Function,
+        },
+        _ => SymbolKind::Variable,
+    }
 }
 
 struct Module {
@@ -160,6 +183,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     hover_provider: Some(true),
                     document_formatting_provider: Some(true),
                     document_highlight_provider: Some(true),
+                    document_symbol_provider: Some(true),
                     ..ServerCapabilities::default()
                 },
             }).into_future(),
@@ -765,8 +789,7 @@ fn initialize_rpc(
         let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<_>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    use gluon::parser::format_expr;
-                    let formatted = format_expr(&module.source_string)?;
+                    let formatted = gluon_format::format_expr(&module.source_string)?;
                     Ok(vec![
                         TextEdit {
                             range: Range {
@@ -816,6 +839,50 @@ fn initialize_rpc(
             )
         };
         io.add_async_method("textDocument/documentHighlight", ServerCommand::method(f));
+    }
+
+    {
+        let thread = thread.clone();
+        let f = move |params: DocumentSymbolParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let expr = &module.expr;
+
+                    let symbols = completion::all_symbols(expr);
+
+                    symbols
+                        .into_iter()
+                        .map(|symbol| {
+                            use completion::CompletionSymbol;
+                            let (kind, name) = match symbol.value {
+                                CompletionSymbol::Type { ref name, .. } => {
+                                    (SymbolKind::Class, name)
+                                }
+                                CompletionSymbol::Value {
+                                    ref name,
+                                    ref typ,
+                                    ref expr,
+                                } => {
+                                    let kind = expr_to_kind(expr, typ);
+                                    (kind, name)
+                                }
+                            };
+                            Ok(SymbolInformation {
+                                kind,
+                                location: Location {
+                                    uri: params.text_document.uri.clone(),
+
+                                    range: byte_span_to_range(&module.lines, symbol.span)?,
+                                },
+                                name: name.declared_name().to_string(),
+                                container_name: None,
+                            })
+                        })
+                        .collect::<Result<_, _>>()
+                }).into_future(),
+            )
+        };
+        io.add_async_method("textDocument/documentSymbol", ServerCommand::method(f));
     }
 
     io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
