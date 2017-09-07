@@ -9,6 +9,7 @@ extern crate serde_derive;
 extern crate serde_json;
 
 extern crate futures;
+extern crate futures_cpupool;
 extern crate jsonrpc_core;
 
 extern crate env_logger;
@@ -40,10 +41,11 @@ use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
 use gluon::base::metadata::Metadata;
-use gluon::base::pos::{self, BytePos, Line, Span};
+use gluon::base::pos::{self, BytePos, Line, Span, Spanned};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
 use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
+use gluon::check::completion::{self, CompletionSymbol};
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
@@ -68,6 +70,8 @@ use std::thread;
 use languageserver_types::*;
 
 use futures::{Future, IntoFuture};
+
+use futures_cpupool::CpuPool;
 
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
@@ -108,13 +112,40 @@ fn type_to_kind(typ: &ArcType) -> SymbolKind {
     }
 }
 
+fn completion_symbol_to_symbol_information(
+    lines: &source::Lines,
+    symbol: Spanned<CompletionSymbol, BytePos>,
+    uri: Url,
+) -> Result<SymbolInformation, ServerError<()>> {
+    let (kind, name) = match symbol.value {
+        CompletionSymbol::Type { ref name, .. } => (SymbolKind::Class, name),
+        CompletionSymbol::Value {
+            ref name,
+            ref typ,
+            ref expr,
+        } => {
+            let kind = expr_to_kind(expr, typ);
+            (kind, name)
+        }
+    };
+    Ok(SymbolInformation {
+        kind,
+        location: Location {
+            uri,
+
+            range: byte_span_to_range(lines, symbol.span)?,
+        },
+        name: name.declared_name().to_string(),
+        container_name: None,
+    })
+}
+
 struct Module {
     lines: source::Lines,
     expr: SpannedExpr<Symbol>,
     source_string: String,
+    uri: Url,
 }
-
-pub struct ChainImporter<I>(CheckImporter, I);
 
 #[derive(Clone)]
 struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
@@ -133,8 +164,7 @@ impl Importer for CheckImporter {
         expr: SpannedExpr<Symbol>,
     ) -> Result<(), MacroError> {
         let macro_value = MacroValue { expr: expr };
-        let TypecheckValue { expr, typ } =
-            try!(macro_value.typecheck(compiler, vm, module_name, input));
+        let TypecheckValue { expr, typ } = macro_value.typecheck(compiler, vm, module_name, input)?;
 
         let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
@@ -144,15 +174,12 @@ impl Importer for CheckImporter {
                 lines: lines,
                 expr: expr,
                 source_string: input.into(),
+                uri: module_name_to_file_(module_name)?,
             },
         );
         // Insert a global to ensure the globals type can be looked up
-        try!(vm.global_env().set_global(
-            Symbol::from(module_name),
-            typ,
-            metadata,
-            GluonValue::Int(0)
-        ));
+        vm.global_env()
+            .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0))?;
         Ok(())
     }
 }
@@ -184,6 +211,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     document_formatting_provider: Some(true),
                     document_highlight_provider: Some(true),
                     document_symbol_provider: Some(true),
+                    workspace_symbol_provider: Some(true),
                     ..ServerCapabilities::default()
                 },
             }).into_future(),
@@ -206,7 +234,7 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let source_module = try!(importer.get(&module).ok_or_else(|| {
+    let source_module = importer.get(&module).ok_or_else(|| {
         ServerError {
             message: format!(
                 "Module `{}` is not defined\n{:?}",
@@ -215,7 +243,7 @@ where
             ),
             data: None,
         }
-    }));
+    })?;
     f(source_module)
 }
 
@@ -378,8 +406,9 @@ fn position_to_byte_pos(
     lines: &source::Lines,
     position: &Position,
 ) -> Result<BytePos, ServerError<()>> {
-    let line_pos = try!(lines.line(Line::from(position.line as usize),).ok_or_else(
-        || {
+    let line_pos = lines
+        .line(Line::from(position.line as usize))
+        .ok_or_else(|| {
             ServerError {
                 message: format!(
                     "Position ({}, {}) is out of range",
@@ -388,8 +417,7 @@ fn position_to_byte_pos(
                 ),
                 data: None,
             }
-        },
-    ));
+        })?;
     Ok(line_pos + BytePos::from(position.character as usize))
 }
 
@@ -414,6 +442,27 @@ impl LanguageServerNotification<DidChangeTextDocumentParams> for TextDocumentDid
         )
     }
 }
+
+fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
+    let mut result = s.replace(".", "/");
+    result.push_str(".glu");
+    let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
+        Ok(path) => Ok(path.join(result)),
+        Err(_) => Err(err),
+    })?;
+    Ok(url::Url::from_file_path(path)
+        .or_else(|_| url::Url::from_file_path(s))
+        .map_err(|_| {
+            format!("Unable to convert module name to a url: `{}`", s)
+        })?)
+}
+
+// FIXME This may not be correct as this assumes the module can be located from the current working
+// directory
+fn module_name_to_file(s: &str) -> Url {
+    module_name_to_file_(s).unwrap()
+}
+
 
 fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     let import = thread.get_macros().get("import").expect("Import macro");
@@ -452,8 +501,8 @@ pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<Std
     ))
 }
 
-fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()> {
-    let filename = strip_file_prefix_with_thread(thread, filename);
+fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResult<()> {
+    let filename = strip_file_prefix_with_thread(thread, uri_filename);
     let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
     let mut errors = Errors::new();
@@ -483,12 +532,9 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
         }
     };
     let metadata = Metadata::default();
-    try!(thread.global_env().set_global(
-        Symbol::from(&name[..]),
-        typ,
-        metadata,
-        GluonValue::Int(0)
-    ));
+    thread
+        .global_env()
+        .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0))?;
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -502,6 +548,7 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
             lines: lines,
             expr: expr,
             source_string: fileinput.into(),
+            uri: uri_filename.clone(),
         },
     );
     if errors.is_empty() {
@@ -585,24 +632,6 @@ fn create_diagnostics(
         }
     }
 
-    fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError>> {
-        let mut result = s.replace(".", "/");
-        result.push_str(".glu");
-        let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
-            Ok(path) => Ok(path.join(result)),
-            Err(_) => Err(err),
-        })?;
-        Ok(url::Url::from_file_path(path)
-            .or_else(|_| url::Url::from_file_path(s))
-            .map_err(|_| {
-                format!("Unable to convert module name to a url: `{}`", s)
-            })?)
-    }
-
-    fn module_name_to_file(s: &str) -> Url {
-        module_name_to_file_(s).unwrap()
-    }
-
     match err {
         GluonError::Typecheck(err) => diagnostics
             .entry(module_name_to_file(&err.source_name))
@@ -680,7 +709,7 @@ pub fn run() {
 
 pub fn start_server(thread: RootedThread) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let (io, exit_token, work_queue) = initialize_rpc(&thread);
+        let (io, exit_token, work_queue, _cpu_pool) = initialize_rpc(&thread);
 
         // Spawn a separate thread which runs a returns diagnostic information
         let diagnostics_handle = {
@@ -703,12 +732,12 @@ pub fn start_server(thread: RootedThread) -> thread::JoinHandle<()> {
 
         (|| -> Result<(), Box<StdError>> {
             while !exit_token.load(atomic::Ordering::SeqCst) {
-                match try!(read_message(&mut input)) {
+                match read_message(&mut input)? {
                     Some(json) => {
                         debug!("Handle: {}", json);
                         if let Some(response) = io.handle_request_sync(&json) {
-                            try!(write_message_str(&mut output, &response));
-                            try!(output.flush());
+                            write_message_str(&mut output, &response)?;
+                            output.flush()?;
                         }
                     }
                     None => return Ok(()),
@@ -724,7 +753,12 @@ pub fn start_server(thread: RootedThread) -> thread::JoinHandle<()> {
 
 fn initialize_rpc(
     thread: &RootedThread,
-) -> (IoHandler, Arc<AtomicBool>, Arc<UniqueQueue<Url, String>>) {
+) -> (
+    IoHandler,
+    Arc<AtomicBool>,
+    Arc<UniqueQueue<Url, String>>,
+    CpuPool,
+) {
     let work_queue = Arc::new(UniqueQueue {
         queue: Mutex::new(VecDeque::new()),
         new_work: Condvar::new(),
@@ -853,36 +887,56 @@ fn initialize_rpc(
                     symbols
                         .into_iter()
                         .map(|symbol| {
-                            use completion::CompletionSymbol;
-                            let (kind, name) = match symbol.value {
-                                CompletionSymbol::Type { ref name, .. } => {
-                                    (SymbolKind::Class, name)
-                                }
-                                CompletionSymbol::Value {
-                                    ref name,
-                                    ref typ,
-                                    ref expr,
-                                } => {
-                                    let kind = expr_to_kind(expr, typ);
-                                    (kind, name)
-                                }
-                            };
-                            Ok(SymbolInformation {
-                                kind,
-                                location: Location {
-                                    uri: params.text_document.uri.clone(),
-
-                                    range: byte_span_to_range(&module.lines, symbol.span)?,
-                                },
-                                name: name.declared_name().to_string(),
-                                container_name: None,
-                            })
+                            completion_symbol_to_symbol_information(
+                                &module.lines,
+                                symbol,
+                                params.text_document.uri.clone(),
+                            )
                         })
                         .collect::<Result<_, _>>()
                 }).into_future(),
             )
         };
         io.add_async_method("textDocument/documentSymbol", ServerCommand::method(f));
+    }
+
+    let cpu_pool = CpuPool::new(1);
+    {
+        let cpu_pool = cpu_pool.clone();
+        let thread = thread.clone();
+        let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Vec<_>, ServerError<()>> {
+            let thread = thread.clone();
+            Box::new(cpu_pool.spawn_fn(move || {
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let modules = import.importer.0.lock().unwrap();
+
+                let mut symbols = Vec::<SymbolInformation>::new();
+                for module in modules.values() {
+                    symbols.extend(completion::all_symbols(&module.expr)
+                        .into_iter()
+                        .filter(|symbol| match symbol.value {
+                            CompletionSymbol::Value { ref name, .. } |
+                            CompletionSymbol::Type { ref name, .. } => {
+                                name.declared_name().contains(&params.query)
+                            }
+                        })
+                        .map(|symbol| {
+                            completion_symbol_to_symbol_information(
+                                &module.lines,
+                                symbol,
+                                module.uri.clone(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?);
+                }
+
+                Ok(symbols)
+            }))
+        };
+        io.add_async_method("workspace/symbol", ServerCommand::method(f));
     }
 
     io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
@@ -901,7 +955,7 @@ fn initialize_rpc(
         "textDocument/didChange",
         ServerCommand::notification(TextDocumentDidChange(work_queue.clone())),
     );
-    (io, exit_token, work_queue)
+    (io, exit_token, work_queue, cpu_pool)
 }
 
 #[cfg(test)]
