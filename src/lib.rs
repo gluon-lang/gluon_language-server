@@ -640,6 +640,7 @@ fn create_diagnostics(
             message: format!("{}", err.value),
             severity: Some(DiagnosticSeverity::Error),
             range: span_to_range(&err.span),
+            source: Some("gluon".to_string()),
             ..Diagnostic::default()
         }
     }
