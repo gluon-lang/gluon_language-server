@@ -11,6 +11,8 @@ extern crate serde_json;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate jsonrpc_core;
+extern crate tokio_core;
+extern crate tokio_io;
 
 extern crate env_logger;
 extern crate gluon;
@@ -20,6 +22,8 @@ extern crate gluon_format;
 extern crate log;
 extern crate url;
 extern crate url_serde;
+
+extern crate bytes;
 
 extern crate languageserver_types;
 
@@ -32,6 +36,7 @@ macro_rules! log_message {
 }
 
 pub mod rpc;
+mod async_io;
 
 use jsonrpc_core::{IoHandler, Value};
 
@@ -69,9 +74,16 @@ use std::thread;
 
 use languageserver_types::*;
 
-use futures::{Future, IntoFuture};
+use futures::{Async, Future, IntoFuture, Stream};
+use futures::future::poll_fn;
 
 use futures_cpupool::CpuPool;
+
+use tokio_core::reactor::Core;
+
+use tokio_io::codec::{Framed, FramedParts};
+
+use bytes::BytesMut;
 
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
@@ -696,59 +708,65 @@ pub fn run() {
         let import = Import::new(CheckImporter::new());
         macros.insert("import".into(), import);
     }
-    let handle = start_server(thread);
 
-    if let Err(err) = handle.join() {
-        let msg = err.downcast_ref::<&'static str>()
-            .cloned()
-            .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
-            .unwrap_or("Any");
-        log_message!("Panic: `{}`", msg);
-    }
+    start_server(thread).unwrap();
 }
 
-pub fn start_server(thread: RootedThread) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let (io, exit_token, work_queue, _cpu_pool) = initialize_rpc(&thread);
+pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
+    let (io, exit_token, work_queue, _cpu_pool) = initialize_rpc(&thread);
 
-        // Spawn a separate thread which runs a returns diagnostic information
-        let diagnostics_handle = {
-            let work_queue = work_queue.clone();
-            thread::Builder::new()
-                .name("diagnostics".to_string())
-                .spawn(move || {
-                    let diagnostics = DiagnosticProcessor {
-                        thread: thread,
-                        work_queue: work_queue,
-                    };
-                    diagnostics.run();
-                })
-                .unwrap()
-        };
+    // Spawn a separate thread which runs a returns diagnostic information
+    let diagnostics_handle = {
+        let work_queue = work_queue.clone();
+        thread::Builder::new()
+            .name("diagnostics".to_string())
+            .spawn(move || {
+                let diagnostics = DiagnosticProcessor {
+                    thread: thread,
+                    work_queue: work_queue,
+                };
+                diagnostics.run();
+            })
+            .unwrap()
+    };
 
+    let input = BufReader::new(async_io::async_read(io::stdin()));
 
-        let mut input = BufReader::new(io::stdin());
-        let mut output = io::stdout();
-
-        (|| -> Result<(), Box<StdError>> {
-            while !exit_token.load(atomic::Ordering::SeqCst) {
-                match read_message(&mut input)? {
-                    Some(json) => {
-                        debug!("Handle: {}", json);
-                        if let Some(response) = io.handle_request_sync(&json) {
-                            write_message_str(&mut output, &response)?;
-                            output.flush()?;
-                        }
-                    }
-                    None => return Ok(()),
-                }
+    let mut core = Core::new().unwrap();
+    let parts = FramedParts {
+        inner: input,
+        readbuf: BytesMut::default(),
+        writebuf: BytesMut::default(),
+    };
+    let future = Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(|json| {
+        debug!("Handle: {}", json);
+        io.handle_request(&json).then(|result| {
+            if let Ok(Some(response)) = result {
+                let mut output = io::stdout();
+                write_message_str(&mut output, &response)?;
+                output.flush()?;
             }
             Ok(())
-        })()
-            .unwrap();
-        work_queue.stop();
-        diagnostics_handle.join().unwrap();
-    })
+        })
+    });
+
+    core.run(
+        future
+            .select(poll_fn(|| -> futures::Poll<_, _> {
+                Ok(if exit_token.load(atomic::Ordering::SeqCst) {
+                    Async::Ready(())
+                } else {
+                    Async::NotReady
+                })
+            }))
+            .map(|t| t.0)
+            .map_err(|t| t.0),
+    )?;
+
+    work_queue.stop();
+    diagnostics_handle.join().unwrap();
+
+    Ok(())
 }
 
 fn initialize_rpc(

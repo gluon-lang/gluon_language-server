@@ -197,3 +197,87 @@ where
     try!(output.flush());
     Ok(())
 }
+
+
+extern crate bytes;
+
+use std::str;
+
+use tokio_io::codec::{Decoder, Encoder};
+use self::bytes::{BufMut, BytesMut};
+
+#[derive(Debug)]
+pub struct LanguageServerDecoder {
+    message_length: Option<usize>,
+}
+
+impl LanguageServerDecoder {
+    pub fn new() -> LanguageServerDecoder {
+        LanguageServerDecoder {
+            message_length: None,
+        }
+    }
+}
+
+impl Decoder for LanguageServerDecoder {
+    type Item = String;
+    type Error = Box<::std::error::Error>;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.message_length {
+            Some(message_length) if message_length <= src.len() => {
+                let newlines_offset = src.iter()
+                    .position(|&b| b != b'\n' && b != b'\r')
+                    .unwrap_or(src.len());
+                if newlines_offset != 0 {
+                    src.split_to(newlines_offset);
+                    return self.decode(src);
+                }
+                // Message is at least
+                let result = String::from_utf8(src[..message_length].to_owned());
+                src.split_to(message_length);
+                // Start reading the next message
+                self.message_length = None;
+                Ok(Some(result?))
+            }
+            Some(_) => Ok(None),
+            None => {
+                const PREFIX: &str = "Content-Length: ";
+                if src.starts_with(PREFIX.as_bytes()) {
+                    let removed_len;
+                    let content_length = {
+                        let len = src[PREFIX.len()..].split(|&b| b == b'\r').next().unwrap();
+                        removed_len = PREFIX.len() + len.len() + 1;
+                        debug!("Parsing content length: {:?}", str::from_utf8(len));
+                        str::from_utf8(len)?.parse::<usize>()?
+                    };
+                    src.split_to(removed_len);
+                    self.message_length = Some(content_length);
+                    self.decode(src)
+                } else {
+                    let newlines_offset = src.iter()
+                        .position(|&b| b != b'\n' && b != b'\r')
+                        .unwrap_or(src.len());
+                    if newlines_offset != 0 {
+                        src.split_to(newlines_offset);
+                        self.decode(src)
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LanguageServerEncoder;
+
+impl Encoder for LanguageServerEncoder {
+    type Item = String;
+    type Error = Box<::std::error::Error>;
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        write_message_str(dst.writer(), &item)?;
+        Ok(())
+    }
+}
