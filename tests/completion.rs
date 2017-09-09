@@ -14,8 +14,10 @@ use std::io::Write;
 
 use url::Url;
 
-use languageserver_types::{CompletionItem, CompletionItemKind, Position, TextDocumentIdentifier,
-                           TextDocumentPositionParams};
+use languageserver_types::{CompletionItem, CompletionItemKind, DidChangeTextDocumentParams,
+                           Position, Range, TextDocumentContentChangeEvent,
+                           TextDocumentIdentifier, TextDocumentPositionParams,
+                           VersionedTextDocumentIdentifier};
 
 use gluon_language_server::CompletionData;
 
@@ -36,6 +38,31 @@ where
 
     support::write_message(stdin, hover).unwrap();
 }
+
+fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, range: Range, text: &str)
+where
+    W: Write,
+{
+    let hover = support::notification(
+        "textDocument/didChange",
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: support::test_url(uri),
+                version: 1,
+            },
+            content_changes: vec![
+                TextDocumentContentChangeEvent {
+                    range: Some(range),
+                    range_length: None,
+                    text: text.to_string(),
+                },
+            ],
+        },
+    );
+
+    support::write_message(stdin, hover).unwrap();
+}
+
 
 fn resolve<W: ?Sized>(stdin: &mut W, id: u64, item: &CompletionItem)
 where
@@ -191,6 +218,62 @@ r.
                 label: "abc".into(),
                 kind: Some(CompletionItemKind::Variable),
                 detail: Some("Int".into()),
+                ..CompletionItem::default()
+            },
+        ]
+    );
+}
+
+#[test]
+fn local_completion_with_update() {
+    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
+        let text = r#"
+let test = 2
+let test1 = ""
+test2
+"#;
+        support::did_open(stdin, "test", text);
+
+        did_change(
+            stdin,
+            "test",
+            Range {
+                start: Position {
+                    line: 4,
+                    character: 2,
+                },
+                end: Position {
+                    line: 4,
+                    character: 5,
+                },
+            },
+            "st1",
+        );
+
+        completion(
+            stdin,
+            1,
+            "test",
+            Position {
+                line: 3,
+                character: 2,
+            },
+        )
+    });
+    let completions = remove_completion_data(completions);
+    assert_eq!(
+        completions,
+        vec![
+            CompletionItem {
+                label: "test".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("Int".into()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "test1".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("String".into()),
                 ..CompletionItem::default()
             },
         ]

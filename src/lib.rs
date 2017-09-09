@@ -214,7 +214,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         Box::new(
             Ok(InitializeResult {
                 capabilities: ServerCapabilities {
-                    text_document_sync: Some(TextDocumentSyncKind::Full),
+                    text_document_sync: Some(TextDocumentSyncKind::Incremental),
                     completion_provider: Some(CompletionOptions {
                         resolve_provider: Some(true),
                         trigger_characters: vec![".".into()],
@@ -433,6 +433,16 @@ fn position_to_byte_pos(
     Ok(line_pos + BytePos::from(position.character as usize))
 }
 
+fn range_to_byte_span(
+    lines: &source::Lines,
+    range: &Range,
+) -> Result<Span<BytePos>, ServerError<()>> {
+    Ok(Span::new(
+        position_to_byte_pos(lines, &range.start)?,
+        position_to_byte_pos(lines, &range.end)?,
+    ))
+}
+
 struct TextDocumentDidOpen(RootedThread);
 impl LanguageServerNotification<DidOpenTextDocumentParams> for TextDocumentDidOpen {
     fn execute(&self, change: DidOpenTextDocumentParams) {
@@ -444,15 +454,19 @@ impl LanguageServerNotification<DidOpenTextDocumentParams> for TextDocumentDidOp
     }
 }
 
-struct TextDocumentDidChange(Arc<UniqueQueue<Url, String>>);
-impl LanguageServerNotification<DidChangeTextDocumentParams> for TextDocumentDidChange {
-    fn execute(&self, mut change: DidChangeTextDocumentParams) {
-        use std::mem::replace;
-        self.0.add_work(
-            change.text_document.uri,
-            replace(&mut change.content_changes[0].text, String::new()),
-        )
-    }
+fn apply_change(
+    source: &mut String,
+    lines: &source::Lines,
+    change: TextDocumentContentChangeEvent,
+) -> Result<(), ServerError<()>> {
+    let span = match (change.range, change.range_length) {
+        (None, None) => Span::new(0.into(), source.len().into()),
+        (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
+        (None, Some(_)) => return Err("Invalid change".into()),
+    };
+    source.drain(span.start.to_usize()..span.end.to_usize());
+    source.insert_str(span.start.to_usize(), &change.text);
+    Ok(())
 }
 
 fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
@@ -845,19 +859,10 @@ fn initialize_rpc(
                     let formatted = gluon_format::format_expr(&module.source_string)?;
                     Ok(vec![
                         TextEdit {
-                            range: Range {
-                                start: location_to_position(
-                                    &module.lines.location(0.into()).ok_or_else(|| {
-                                        ServerError::from(&"Unable to translate index to location")
-                                    })?,
-                                ),
-                                end: location_to_position(&module
-                                    .lines
-                                    .location(module.source_string.len().into())
-                                    .ok_or_else(|| {
-                                        ServerError::from(&"Unable to translate index to location")
-                                    })?),
-                            },
+                            range: byte_span_to_range(
+                                &module.lines,
+                                Span::new(0.into(), module.source_string.len().into()),
+                            )?,
                             new_text: formatted,
                         },
                     ])
@@ -970,10 +975,27 @@ fn initialize_rpc(
         "textDocument/didOpen",
         ServerCommand::notification(TextDocumentDidOpen(thread.clone())),
     );
-    io.add_notification(
-        "textDocument/didChange",
-        ServerCommand::notification(TextDocumentDidChange(work_queue.clone())),
-    );
+    {
+        let work_queue = work_queue.clone();
+        let sources = Mutex::new(BTreeMap::new());
+        let f = move |change: DidChangeTextDocumentParams| {
+            let mut sources = sources.lock().unwrap();
+            let source = sources
+                .entry(change.text_document.uri.clone())
+                .or_insert(String::new());
+            for change in change.content_changes {
+                let lines = source::Lines::new(source.as_bytes().iter().cloned());
+                match apply_change(source, &lines, change) {
+                    Ok(()) => (),
+                    Err(err) => log_message!("{}", err.message),
+                }
+            }
+            debug!("Change source {}:\n{}", change.text_document.uri, source);
+            work_queue.add_work(change.text_document.uri, source.clone())
+        };
+
+        io.add_notification("textDocument/didChange", ServerCommand::notification(f));
+    }
     (io, exit_token, work_queue, cpu_pool)
 }
 
