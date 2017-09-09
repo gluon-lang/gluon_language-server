@@ -8,6 +8,7 @@ extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
 
+#[macro_use]
 extern crate futures;
 extern crate futures_cpupool;
 extern crate jsonrpc_core;
@@ -59,7 +60,7 @@ use gluon::compiler_pipeline::{MacroExpandable, MacroValue, TypecheckValue, Type
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
@@ -67,17 +68,16 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::str;
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex};
 
 use languageserver_types::*;
 
-use futures::{Future, IntoFuture, Stream};
+use futures::{AsyncSink, Future, IntoFuture, Sink, Stream};
 use futures::sync::oneshot;
 
 use futures_cpupool::CpuPool;
 
-use tokio_core::reactor::Core;
+use tokio_core::reactor;
 
 use tokio_io::codec::{Framed, FramedParts};
 
@@ -292,44 +292,41 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
         &self,
         change: TextDocumentPositionParams,
     ) -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
-        Box::new(
-            (|| -> Result<_, _> {
-                let thread = &self.0;
-                let suggestions = retrieve_expr_with_pos(
-                    thread,
-                    &change.text_document.uri,
-                    &change.position,
-                    |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
-                )?;
+        let result = (move || -> Result<_, _> {
+            let thread = &self.0;
+            let suggestions = retrieve_expr_with_pos(
+                &thread,
+                &change.text_document.uri,
+                &change.position,
+                |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
+            )?;
 
-                let mut items: Vec<_> = suggestions
-                    .into_iter()
-                    .map(|ident| {
-                        // Remove the `:Line x, Row y suffix`
-                        let name: &str = ident.name.as_ref();
-                        let label =
-                            String::from(name.split(':').next().unwrap_or(ident.name.as_ref()));
-                        CompletionItem {
-                            label: label,
-                            detail: Some(format!("{}", ident.typ)),
-                            kind: Some(CompletionItemKind::Variable),
-                            data: Some(
-                                serde_json::to_value(CompletionData {
-                                    text_document_uri: change.text_document.uri.clone(),
-                                    position: change.position,
-                                }).expect("CompletionData"),
-                            ),
-                            ..CompletionItem::default()
-                        }
-                    })
-                    .collect();
+            let mut items: Vec<_> = suggestions
+                .into_iter()
+                .map(|ident| {
+                    // Remove the `:Line x, Row y suffix`
+                    let name: &str = ident.name.as_ref();
+                    let label = String::from(name.split(':').next().unwrap_or(ident.name.as_ref()));
+                    CompletionItem {
+                        label: label,
+                        detail: Some(format!("{}", ident.typ)),
+                        kind: Some(CompletionItemKind::Variable),
+                        data: Some(
+                            serde_json::to_value(CompletionData {
+                                text_document_uri: change.text_document.uri.clone(),
+                                position: change.position,
+                            }).expect("CompletionData"),
+                        ),
+                        ..CompletionItem::default()
+                    }
+                })
+                .collect();
 
-                items.sort_by(|l, r| l.label.cmp(&r.label));
+            items.sort_by(|l, r| l.label.cmp(&r.label));
 
-                Ok(items)
-            })()
-                .into_future(),
-        )
+            Ok(items)
+        })();
+        Box::new(result.into_future())
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -441,22 +438,13 @@ fn range_to_byte_span(
     ))
 }
 
-struct TextDocumentDidOpen(RootedThread);
-impl LanguageServerNotification<DidOpenTextDocumentParams> for TextDocumentDidOpen {
-    fn execute(&self, change: DidOpenTextDocumentParams) {
-        run_diagnostics(
-            &self.0,
-            &change.text_document.uri,
-            &change.text_document.text,
-        );
-    }
-}
 
 fn apply_change(
     source: &mut String,
     lines: &source::Lines,
     change: TextDocumentContentChangeEvent,
 ) -> Result<(), ServerError<()>> {
+    info!("Applying change: {:?}", change);
     let span = match (change.range, change.range_length) {
         (None, None) => Span::new(0.into(), source.len().into()),
         (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
@@ -582,62 +570,6 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
     }
 }
 
-struct Entry<K, V> {
-    key: K,
-    value: V,
-}
-
-/// Queue which only keeps the latest work item for each key
-struct UniqueQueue<K, V> {
-    queue: Mutex<VecDeque<Entry<K, V>>>,
-    new_work: Condvar,
-}
-
-impl<K, V> UniqueQueue<K, V>
-where
-    K: PartialEq,
-{
-    fn add_work(&self, key: K, value: V) {
-        let mut queue = self.queue.lock().unwrap();
-        // Overwrite the previous item if one exists already for this key
-        if let Some(entry) = queue.iter_mut().find(|entry| entry.key == key) {
-            entry.value = value;
-            return;
-        }
-        queue.push_back(Entry {
-            key: key,
-            value: value,
-        });
-        self.new_work.notify_one();
-    }
-
-    fn stop(&self) {
-        self.new_work.notify_one();
-    }
-}
-
-struct DiagnosticProcessor {
-    thread: RootedThread,
-    work_queue: Arc<UniqueQueue<Url, String>>,
-}
-
-impl DiagnosticProcessor {
-    fn run(&self) {
-        let mut work_queue = self.work_queue.queue.lock().unwrap();
-        loop {
-            while let Some(entry) = work_queue.pop_front() {
-                // Don't block the producers while we run diagnostics
-                drop(work_queue);
-                run_diagnostics(&self.thread, &entry.key, &entry.value);
-                work_queue = self.work_queue.queue.lock().unwrap();
-            }
-            work_queue = self.work_queue.new_work.wait(work_queue).unwrap();
-            if work_queue.is_empty() {
-                break;
-            }
-        }
-    }
-}
 
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
@@ -678,6 +610,19 @@ fn create_diagnostics(
                 ..Diagnostic::default()
             }),
     }
+}
+
+fn schedule_diagnostics(
+    handle: &reactor::Handle,
+    cpu_pool: &CpuPool,
+    thread: RootedThread,
+    filename: Url,
+    fileinput: String,
+) {
+    handle.spawn(cpu_pool.spawn_fn(move || {
+        run_diagnostics(&thread, &filename, &fileinput);
+        Ok(())
+    }))
 }
 
 fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
@@ -726,26 +671,11 @@ pub fn run() {
 }
 
 pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
-    let (io, exit_receiver, work_queue, _cpu_pool) = initialize_rpc(&thread);
-
-    // Spawn a separate thread which runs a returns diagnostic information
-    let diagnostics_handle = {
-        let work_queue = work_queue.clone();
-        thread::Builder::new()
-            .name("diagnostics".to_string())
-            .spawn(move || {
-                let diagnostics = DiagnosticProcessor {
-                    thread: thread,
-                    work_queue: work_queue,
-                };
-                diagnostics.run();
-            })
-            .unwrap()
-    };
+    let mut core = reactor::Core::new().unwrap();
+    let (io, exit_receiver, _cpu_pool) = initialize_rpc(&thread, core.remote());
 
     let input = BufReader::new(async_io::async_read(io::stdin()));
 
-    let mut core = Core::new().unwrap();
     let parts = FramedParts {
         inner: input,
         readbuf: BytesMut::default(),
@@ -770,24 +700,31 @@ pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
             .map_err(|t| t.0),
     )?;
 
-    work_queue.stop();
-    diagnostics_handle.join().unwrap();
-
     Ok(())
 }
 
 fn initialize_rpc(
     thread: &RootedThread,
-) -> (
-    IoHandler,
-    oneshot::Receiver<()>,
-    Arc<UniqueQueue<Url, String>>,
-    CpuPool,
-) {
-    let work_queue = Arc::new(UniqueQueue {
-        queue: Mutex::new(VecDeque::new()),
-        new_work: Condvar::new(),
-    });
+    core_remote: reactor::Remote,
+) -> (IoHandler, oneshot::Receiver<()>, CpuPool) {
+    let cpu_pool = CpuPool::new(2);
+
+    let work_queue = {
+        let thread = thread.clone();
+        let core_remote = core_remote.clone();
+        let cpu_pool = cpu_pool.clone();
+        SharedSink::new(rpc::UniqueQueue::new(
+            rpc::sink_fn::<_, _, ()>(move |entry: Entry<Url, String>| {
+                let thread = thread.clone();
+                let cpu_pool = cpu_pool.clone();
+                core_remote.spawn(move |core_handle| {
+                    schedule_diagnostics(core_handle, &cpu_pool, thread, entry.key, entry.value);
+                    Ok(())
+                });
+                Ok(AsyncSink::Ready)
+            }),
+        ))
+    };
 
     let mut io = IoHandler::new();
     io.add_async_method(
@@ -916,7 +853,6 @@ fn initialize_rpc(
         io.add_async_method("textDocument/documentSymbol", ServerCommand::method(f));
     }
 
-    let cpu_pool = CpuPool::new(1);
     {
         let cpu_pool = cpu_pool.clone();
         let thread = thread.clone();
@@ -964,32 +900,83 @@ fn initialize_rpc(
             exit_sender.send(()).unwrap()
         }
     });
-    io.add_notification(
-        "textDocument/didOpen",
-        ServerCommand::notification(TextDocumentDidOpen(thread.clone())),
-    );
     {
-        let work_queue = work_queue.clone();
-        let sources = Mutex::new(BTreeMap::new());
-        let f = move |change: DidChangeTextDocumentParams| {
-            let mut sources = sources.lock().unwrap();
-            let source = sources
-                .entry(change.text_document.uri.clone())
-                .or_insert(String::new());
-            for change in change.content_changes {
-                let lines = source::Lines::new(source.as_bytes().iter().cloned());
-                match apply_change(source, &lines, change) {
-                    Ok(()) => (),
-                    Err(err) => log_message!("{}", err.message),
-                }
+        let thread = thread.clone();
+        let f = move |change: DidOpenTextDocumentParams| {
+            // FIXME This should be scheduled on the cpu pool but we require that didOpen
+            // finishes before any didChange commands so we run it synchronously for now
+            run_diagnostics(
+                &thread,
+                &change.text_document.uri,
+                &change.text_document.text,
+            );
+        };
+        io.add_notification("textDocument/didOpen", ServerCommand::notification(f));
+    }
+
+    fn did_change<S>(
+        thread: &Thread,
+        sources: &Mutex<BTreeMap<Url, String>>,
+        work_queue: S,
+        change: DidChangeTextDocumentParams,
+    ) -> BoxFuture<(), ()>
+    where
+        S: Sink<SinkItem = Entry<Url, String>, SinkError = ()> + Send + 'static,
+    {
+        let mut sources = sources.lock().unwrap();
+        let source = sources
+            .entry(change.text_document.uri.clone())
+            .or_insert_with(|| {
+                // If it does not exist in sources it should exist in the `import` macro
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let modules = import.importer.0.lock().unwrap();
+                let paths = import.paths.read().unwrap();
+                let module_name = strip_file_prefix(&paths, &change.text_document.uri)
+                    .unwrap_or_else(|err| panic!("{}", err));
+                modules
+                    .get(&module_name)
+                    .expect("textDocument/didChange processed before didOpen")
+                    .source_string
+                    .clone()
+            });
+        for change in change.content_changes {
+            let lines = source::Lines::new(source.as_bytes().iter().cloned());
+            match apply_change(source, &lines, change) {
+                Ok(()) => (),
+                Err(err) => log_message!("{}", err.message),
             }
-            debug!("Change source {}:\n{}", change.text_document.uri, source);
-            work_queue.add_work(change.text_document.uri, source.clone())
+        }
+        debug!("Change source {}:\n{}", change.text_document.uri, source);
+
+        Box::new(
+            work_queue
+                .send(Entry {
+                    key: change.text_document.uri,
+                    value: source.clone(),
+                })
+                .map(|_| ()),
+        )
+    }
+    {
+        let sources = Arc::new(Mutex::new(BTreeMap::new()));
+        let thread = thread.clone();
+        let f = move |change: DidChangeTextDocumentParams| {
+            let work_queue = work_queue.clone();
+            let sources = sources.clone();
+            let thread = thread.clone();
+            core_remote.spawn(move |_| {
+                let work_queue = work_queue.clone();
+                let sources = sources.clone();
+                did_change(&thread, &sources, work_queue.clone(), change)
+            });
         };
 
         io.add_notification("textDocument/didChange", ServerCommand::notification(f));
     }
-    (io, exit_receiver, work_queue, cpu_pool)
+    (io, exit_receiver, cpu_pool)
 }
 
 #[cfg(test)]

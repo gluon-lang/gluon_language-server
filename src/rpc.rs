@@ -1,10 +1,12 @@
+use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
-use futures::{self, Future, IntoFuture};
+use futures::{self, Async, AsyncSink, Future, IntoFuture, Poll, Sink, StartSend};
 
 use serde;
 use serde_json::{from_value, to_string, to_value};
@@ -246,10 +248,13 @@ impl Decoder for LanguageServerDecoder {
                 if src.starts_with(PREFIX.as_bytes()) {
                     let removed_len;
                     let content_length = {
-                        let len = src[PREFIX.len()..].split(|&b| b == b'\r').next().unwrap();
-                        removed_len = PREFIX.len() + len.len() + 1;
+                        removed_len = match src.iter().position(|&b| b == b'\r') {
+                            Some(x) => x + 1,
+                            None => return Ok(None),
+                        };
+                        let len = &src[PREFIX.len()..removed_len];
                         debug!("Parsing content length: {:?}", str::from_utf8(len));
-                        str::from_utf8(len)?.parse::<usize>()?
+                        str::from_utf8(len)?.trim().parse::<usize>()?
                     };
                     src.split_to(removed_len);
                     self.message_length = Some(content_length);
@@ -279,5 +284,134 @@ impl Encoder for LanguageServerEncoder {
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         write_message_str(dst.writer(), &item)?;
         Ok(())
+    }
+}
+
+pub struct Entry<K, V> {
+    pub key: K,
+    pub value: V,
+}
+
+#[derive(Debug)]
+pub struct SharedSink<S>(Arc<Mutex<S>>);
+
+impl<S> Clone for SharedSink<S> {
+    fn clone(&self) -> Self {
+        SharedSink(self.0.clone())
+    }
+}
+
+impl<S> SharedSink<S> {
+    pub fn new(sink: S) -> SharedSink<S> {
+        SharedSink(Arc::new(Mutex::new(sink)))
+    }
+}
+
+impl<S> Sink for SharedSink<S>
+where
+    S: Sink,
+{
+    type SinkItem = S::SinkItem;
+    type SinkError = S::SinkError;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        self.0.lock().unwrap().start_send(item)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        self.0.lock().unwrap().poll_complete()
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        self.0.lock().unwrap().close()
+    }
+}
+
+/// Queue which only keeps the latest work item for each key
+pub struct UniqueQueue<S, K, V> {
+    sink: S,
+    queue: VecDeque<Entry<K, V>>,
+}
+
+impl<S, K, V> UniqueQueue<S, K, V> {
+    pub fn new(sink: S) -> Self {
+        UniqueQueue {
+            sink,
+            queue: VecDeque::new(),
+        }
+    }
+}
+
+impl<S, K, V> Sink for UniqueQueue<S, K, V>
+where
+    S: Sink<SinkItem = Entry<K, V>>,
+    K: PartialEq,
+{
+    type SinkItem = Entry<K, V>;
+    type SinkError = S::SinkError;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        match self.sink.start_send(item)? {
+            AsyncSink::Ready => Ok(AsyncSink::Ready),
+            AsyncSink::NotReady(item) => {
+                if let Some(entry) = self.queue.iter_mut().find(|entry| entry.key == item.key) {
+                    entry.value = item.value;
+                }
+                Ok(AsyncSink::Ready)
+            }
+        }
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        while let Some(item) = self.queue.pop_front() {
+            match self.sink.start_send(item)? {
+                AsyncSink::Ready => (),
+                AsyncSink::NotReady(item) => {
+                    self.queue.push_front(item);
+                    break;
+                }
+            }
+        }
+        if self.queue.is_empty() {
+            self.sink.poll_complete()
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        try_ready!(self.poll_complete());
+        self.sink.close()
+    }
+}
+
+pub struct SinkFn<F, I> {
+    f: F,
+    _marker: PhantomData<fn(I) -> I>,
+}
+
+pub fn sink_fn<F, I, E>(f: F) -> SinkFn<F, I>
+where
+    F: FnMut(I) -> StartSend<I, E>,
+{
+    SinkFn {
+        f,
+        _marker: PhantomData,
+    }
+}
+
+impl<F, I, E> Sink for SinkFn<F, I>
+where
+    F: FnMut(I) -> StartSend<I, E>,
+{
+    type SinkItem = I;
+    type SinkError = E;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        (self.f)(item)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
     }
 }

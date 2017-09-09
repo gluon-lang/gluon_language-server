@@ -239,16 +239,19 @@ test2
             "test",
             Range {
                 start: Position {
-                    line: 4,
+                    line: 3,
                     character: 2,
                 },
                 end: Position {
-                    line: 4,
+                    line: 3,
                     character: 5,
                 },
             },
             "st1",
         );
+
+        // FIXME Don't rely on sleep to give the change a chance to propagate
+        ::std::thread::sleep(::std::time::Duration::from_secs(2));
 
         completion(
             stdin,
@@ -264,12 +267,6 @@ test2
     assert_eq!(
         completions,
         vec![
-            CompletionItem {
-                label: "test".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("Int".into()),
-                ..CompletionItem::default()
-            },
             CompletionItem {
                 label: "test1".into(),
                 kind: Some(CompletionItemKind::Variable),
