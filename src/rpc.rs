@@ -1,3 +1,5 @@
+extern crate combine;
+
 use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
@@ -221,57 +223,64 @@ impl LanguageServerDecoder {
     }
 }
 
+use self::combine::range::{range, take};
+use self::combine::{skip_many, Parser, many1};
+use self::combine::primitives::{Error as CombineError, ParseError};
+use self::combine::byte::digit;
+
+fn combine_decode<'a, P>(
+    mut parser: P,
+    src: &'a [u8],
+) -> Result<Option<(P::Output, usize)>, ParseError<usize, u8, String>>
+where
+    P: Parser<Input = &'a [u8]>,
+{
+    match parser.parse(&src[..]) {
+        Ok((message, rest)) => Ok(Some((message, src.len() - rest.len()))),
+        Err(err) => {
+            return if err.errors
+                .iter()
+                .any(|err| *err == CombineError::end_of_input())
+            {
+                Ok(None)
+            } else {
+                Err(
+                    err.map_range(|r| {
+                        str::from_utf8(r)
+                            .ok()
+                            .map_or_else(|| format!("{:?}", r), |s| s.to_string())
+                    }).map_position(|p| p.translate_position(&src[..])),
+                )
+            }
+        }
+    }
+}
+
 impl Decoder for LanguageServerDecoder {
     type Item = String;
     type Error = Box<::std::error::Error>;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        match self.message_length {
-            Some(message_length) if message_length <= src.len() => {
-                let newlines_offset = src.iter()
-                    .position(|&b| b != b'\n' && b != b'\r')
-                    .unwrap_or(src.len());
-                if newlines_offset != 0 {
-                    src.split_to(newlines_offset);
-                    return self.decode(src);
-                }
-                // Message is at least
-                let result = String::from_utf8(src[..message_length].to_owned());
-                src.split_to(message_length);
-                // Start reading the next message
-                self.message_length = None;
-                Ok(Some(result?))
+        let (result, removed_len) = {
+            let parser = (
+                skip_many(range(&b"\r\n"[..])),
+                range(&b"Content-Length: "[..]),
+                many1(digit()),
+                range(&b"\r\n\r\n"[..]),
+            ).map(|t| t.2)
+                .and_then(|digits: Vec<u8>| unsafe {
+                    String::from_utf8_unchecked(digits).parse::<usize>()
+                })
+                .then(|message_length| take(message_length))
+                .map(|bytes: &[u8]| bytes.to_owned());
+
+            match combine_decode(parser, &src[..])? {
+                None => return Ok(None),
+                Some(x) => x,
             }
-            Some(_) => Ok(None),
-            None => {
-                const PREFIX: &str = "Content-Length: ";
-                if src.starts_with(PREFIX.as_bytes()) {
-                    let removed_len;
-                    let content_length = {
-                        removed_len = match src.iter().position(|&b| b == b'\r') {
-                            Some(x) => x + 1,
-                            None => return Ok(None),
-                        };
-                        let len = &src[PREFIX.len()..removed_len];
-                        debug!("Parsing content length: {:?}", str::from_utf8(len));
-                        str::from_utf8(len)?.trim().parse::<usize>()?
-                    };
-                    src.split_to(removed_len);
-                    self.message_length = Some(content_length);
-                    self.decode(src)
-                } else {
-                    let newlines_offset = src.iter()
-                        .position(|&b| b != b'\n' && b != b'\r')
-                        .unwrap_or(src.len());
-                    if newlines_offset != 0 {
-                        src.split_to(newlines_offset);
-                        self.decode(src)
-                    } else {
-                        Ok(None)
-                    }
-                }
-            }
-        }
+        };
+        src.split_to(removed_len);
+        Ok(Some(String::from_utf8(result)?))
     }
 }
 
