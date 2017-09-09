@@ -68,14 +68,12 @@ use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic;
-use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use languageserver_types::*;
 
-use futures::{Async, Future, IntoFuture, Stream};
-use futures::future::poll_fn;
+use futures::{Future, IntoFuture, Stream};
+use futures::sync::oneshot;
 
 use futures_cpupool::CpuPool;
 
@@ -728,7 +726,7 @@ pub fn run() {
 }
 
 pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
-    let (io, exit_token, work_queue, _cpu_pool) = initialize_rpc(&thread);
+    let (io, exit_receiver, work_queue, _cpu_pool) = initialize_rpc(&thread);
 
     // Spawn a separate thread which runs a returns diagnostic information
     let diagnostics_handle = {
@@ -767,13 +765,7 @@ pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
 
     core.run(
         future
-            .select(poll_fn(|| -> futures::Poll<_, _> {
-                Ok(if exit_token.load(atomic::Ordering::SeqCst) {
-                    Async::Ready(())
-                } else {
-                    Async::NotReady
-                })
-            }))
+            .select(exit_receiver.map_err(|_| "Exit was canceled".into()))
             .map(|t| t.0)
             .map_err(|t| t.0),
     )?;
@@ -788,7 +780,7 @@ fn initialize_rpc(
     thread: &RootedThread,
 ) -> (
     IoHandler,
-    Arc<AtomicBool>,
+    oneshot::Receiver<()>,
     Arc<UniqueQueue<Url, String>>,
     CpuPool,
 ) {
@@ -964,13 +956,14 @@ fn initialize_rpc(
     }
 
     io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
-    let exit_token = Arc::new(AtomicBool::new(false));
-    {
-        let exit_token = exit_token.clone();
-        io.add_notification("exit", move |_| {
-            exit_token.store(true, atomic::Ordering::SeqCst)
-        });
-    }
+
+    let (exit_sender, exit_receiver) = oneshot::channel();
+    let exit_sender = Mutex::new(Some(exit_sender));
+    io.add_notification("exit", move |_| {
+        if let Some(exit_sender) = exit_sender.lock().unwrap().take() {
+            exit_sender.send(()).unwrap()
+        }
+    });
     io.add_notification(
         "textDocument/didOpen",
         ServerCommand::notification(TextDocumentDidOpen(thread.clone())),
@@ -996,7 +989,7 @@ fn initialize_rpc(
 
         io.add_notification("textDocument/didChange", ServerCommand::notification(f));
     }
-    (io, exit_token, work_queue, cpu_pool)
+    (io, exit_receiver, work_queue, cpu_pool)
 }
 
 #[cfg(test)]
