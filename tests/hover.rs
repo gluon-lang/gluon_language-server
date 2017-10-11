@@ -11,8 +11,8 @@ mod support;
 
 use std::io::Write;
 
-use languageserver_types::{Hover, MarkedString, Position, TextDocumentPositionParams,
-                           TextDocumentIdentifier};
+use languageserver_types::{Hover, MarkedString, Position, Range, TextDocumentIdentifier,
+                           TextDocumentPositionParams};
 
 fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where
@@ -22,7 +22,9 @@ where
         "textDocument/hover",
         id,
         TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: support::test_url(uri) },
+            text_document: TextDocumentIdentifier {
+                uri: support::test_url(uri),
+            },
             position: position,
         },
     );
@@ -31,9 +33,9 @@ where
 }
 
 const STREAM_SOURCE: &'static str = r#"
-let prelude = import "std/prelude.glu"
-and { Option, Num } = prelude
-and { (+) } = prelude.num_Int
+let prelude = import! "std/prelude.glu"
+let { Num } = prelude
+let { Option } = import! "std/option.glu"
 
 type Stream_ a =
     | Value a (Stream a)
@@ -44,8 +46,8 @@ let from f : (Int -> Option a) -> Stream a =
         let from_ i =
                 lazy (\_ ->
                     match f i with
-                        | Some x -> Value x (from_ (i + 1))
-                        | None -> Empty
+                    | Some x -> Value x (from_ (i + 1))
+                    | None -> Empty
                 )
         in from_ 0
 
@@ -54,7 +56,7 @@ let from f : (Int -> Option a) -> Stream a =
 
 #[test]
 fn simple_hover() {
-    let hover: Hover = support::send_rpc(|mut stdin| {
+    let hover: Hover = support::send_rpc(|stdin| {
         let uri = "file:///c%3A/test/test.glu";
         support::did_open(stdin, uri, "123");
 
@@ -73,14 +75,23 @@ fn simple_hover() {
         hover,
         Hover {
             contents: vec![MarkedString::String("Int".into())],
-            range: None,
+            range: Some(Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 3,
+                },
+            }),
         }
     );
 }
 
 #[test]
 fn identifier() {
-    let hover: Hover = support::send_rpc(|mut stdin| {
+    let hover: Hover = support::send_rpc(|stdin| {
         let src = r#"
 let test = 1
 test
@@ -102,14 +113,23 @@ test
         hover,
         Hover {
             contents: vec![MarkedString::String("Int".into())],
-            range: None,
+            range: Some(Range {
+                start: Position {
+                    line: 2,
+                    character: 0,
+                },
+                end: Position {
+                    line: 2,
+                    character: 4,
+                },
+            }),
         }
     );
 }
 
 #[test]
 fn stream() {
-    let hover: Hover = support::send_rpc(|mut stdin| {
+    let hover: Hover = support::send_rpc(|stdin| {
 
         support::did_open(stdin, "stream", STREAM_SOURCE);
 
@@ -128,7 +148,16 @@ fn stream() {
         hover,
         Hover {
             contents: vec![MarkedString::String("Int".into())],
-            range: None,
+            range: Some(Range {
+                start: Position {
+                    line: 13,
+                    character: 28,
+                },
+                end: Position {
+                    line: 13,
+                    character: 29,
+                },
+            }),
         }
     );
 }

@@ -13,7 +13,7 @@ use jsonrpc_core::id::Id;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::ser::Serializer;
-use serde_json::{Value, to_value, from_str, from_value};
+use serde_json::{from_str, from_value, to_value, Value};
 
 use url::Url;
 
@@ -112,7 +112,6 @@ where
         .expect("folder")
         .join("gluon_language-server");
     let mut child = Command::new(&*server_path)
-        .arg("--quiet")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -142,7 +141,11 @@ where
         if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
             value = from_value(response.result).ok();
         }
-        if let Ok(Notification { params: Some(params), .. }) = from_str(&json) {
+        if let Ok(Notification {
+            params: Some(params),
+            ..
+        }) = from_str(&json)
+        {
             let json_value = match params {
                 Params::Map(map) => Value::Object(map),
                 Params::Array(array) => Value::Array(array),

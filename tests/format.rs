@@ -2,11 +2,11 @@ extern crate gluon_language_server;
 extern crate languageserver_types;
 
 extern crate jsonrpc_core;
-extern crate serde_json;
-extern crate serde;
-extern crate url;
 #[macro_use]
 extern crate pretty_assertions;
+extern crate serde;
+extern crate serde_json;
+extern crate url;
 
 #[allow(unused)]
 mod support;
@@ -23,7 +23,9 @@ where
         "textDocument/formatting",
         id,
         DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: support::test_url(uri) },
+            text_document: TextDocumentIdentifier {
+                uri: support::test_url(uri),
+            },
             options: FormattingOptions {
                 tab_size: 4,
                 insert_spaces: true,
@@ -38,8 +40,7 @@ where
 #[test]
 fn simple() {
     let text = r#"
-let x =
-         1
+let x =           1
 x   +
    2
 "#;
@@ -47,7 +48,7 @@ x   +
 let x = 1
 x + 2
 "#;
-    let edits: Vec<TextEdit> = support::send_rpc(|mut stdin| {
+    let edits: Vec<TextEdit> = support::send_rpc(|stdin| {
         support::did_open(stdin, "test", text);
 
         format(stdin, 2, "test")
@@ -63,7 +64,7 @@ x + 2
                         character: 0,
                     },
                     end: Position {
-                        line: 5,
+                        line: 4,
                         character: 0,
                     },
                 },
