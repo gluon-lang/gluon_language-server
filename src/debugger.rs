@@ -201,7 +201,11 @@ impl LaunchHandler {
             })
                 .map(|_| ());
             let mut result = match run_future {
-                FutureValue::Value(_) => Ok(Async::Ready(())),
+                FutureValue::Value(Ok(_)) => Ok(Async::Ready(())),
+                FutureValue::Value(Err(err)) => {
+                    run_future = FutureValue::Value(Ok(()));
+                    Err(err)
+                }
                 _ => Ok(Async::NotReady),
             };
             loop {
@@ -959,6 +963,7 @@ where
 }
 
 pub fn main() {
+    ::std::thread::sleep_ms(10000);
     env_logger::init().unwrap();
 
     let matches = App::new("debugger")

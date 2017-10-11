@@ -2,11 +2,11 @@ extern crate gluon_language_server;
 extern crate languageserver_types;
 
 extern crate jsonrpc_core;
-extern crate serde_json;
-extern crate serde;
-extern crate url;
 #[macro_use]
 extern crate pretty_assertions;
+extern crate serde;
+extern crate serde_json;
+extern crate url;
 
 #[allow(unused)]
 mod support;
@@ -40,8 +40,7 @@ where
 #[test]
 fn simple() {
     let text = r#"
-let x =
-         1
+let x =           1
 x   +
    2
 "#;
@@ -65,7 +64,7 @@ x + 2
                         character: 0,
                     },
                     end: Position {
-                        line: 5,
+                        line: 4,
                         character: 0,
                     },
                 },
