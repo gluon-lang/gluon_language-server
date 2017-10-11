@@ -45,8 +45,7 @@ x   +
    2
 "#;
     let expected = r#"
-let x =
-    1
+let x = 1
 x + 2
 "#;
     let edits: Vec<TextEdit> = support::send_rpc(|stdin| {

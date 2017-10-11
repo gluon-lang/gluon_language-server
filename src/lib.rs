@@ -51,7 +51,6 @@ use gluon::base::pos::{self, BytePos, Line, Span, Spanned};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
 use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
-use gluon::check::completion::{self, CompletionSymbol};
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
@@ -59,6 +58,8 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::compiler_pipeline::{MacroExpandable, MacroValue, TypecheckValue, Typecheckable};
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
+
+use completion::CompletionSymbol;
 
 use std::collections::BTreeMap;
 use std::env;
