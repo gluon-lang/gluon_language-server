@@ -23,6 +23,10 @@ The language server is available at [crates.io][] and can be installed by runnin
 
 * Hover support
 
+* Symbol highlighting
+
+* Symbol lookup
+
 * Code formatting (May still eat your laundry)
 
 
