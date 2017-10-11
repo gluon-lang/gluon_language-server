@@ -211,14 +211,20 @@ use tokio_io::codec::{Decoder, Encoder};
 use self::bytes::{BufMut, BytesMut};
 
 #[derive(Debug)]
+enum State {
+    Nothing,
+    ContentLength(usize),
+}
+
+#[derive(Debug)]
 pub struct LanguageServerDecoder {
-    message_length: Option<usize>,
+    state: State,
 }
 
 impl LanguageServerDecoder {
     pub fn new() -> LanguageServerDecoder {
         LanguageServerDecoder {
-            message_length: None,
+            state: State::Nothing,
         }
     }
 }
@@ -228,12 +234,12 @@ use self::combine::{skip_many, Parser, many1};
 use self::combine::primitives::{Error as CombineError, ParseError};
 use self::combine::byte::digit;
 
-fn combine_decode<'a, P>(
+fn combine_decode<'a, P, R>(
     mut parser: P,
     src: &'a [u8],
-) -> Result<Option<(P::Output, usize)>, ParseError<usize, u8, String>>
+) -> Result<Option<(R, usize)>, ParseError<usize, u8, String>>
 where
-    P: Parser<Input = &'a [u8]>,
+    P: Parser<Input = &'a [u8], Output = R>,
 {
     match parser.parse(&src[..]) {
         Ok((message, rest)) => Ok(Some((message, src.len() - rest.len()))),
@@ -256,31 +262,54 @@ where
     }
 }
 
+macro_rules! decode {
+    ($parser: expr, $src: expr) => {
+        {
+            let (output, removed_len) = {
+                match combine_decode($parser, &$src[..])? {
+                    None => return Ok(None),
+                    Some(x) => x,
+                }
+            };
+            $src.split_to(removed_len);
+            output
+        }
+    };
+}
+
 impl Decoder for LanguageServerDecoder {
     type Item = String;
     type Error = Box<::std::error::Error>;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let (result, removed_len) = {
-            let parser = (
-                skip_many(range(&b"\r\n"[..])),
-                range(&b"Content-Length: "[..]),
-                many1(digit()),
-                range(&b"\r\n\r\n"[..]),
-            ).map(|t| t.2)
-                .and_then(|digits: Vec<u8>| unsafe {
-                    String::from_utf8_unchecked(digits).parse::<usize>()
-                })
-                .then(|message_length| take(message_length))
-                .map(|bytes: &[u8]| bytes.to_owned());
+        loop {
+            match self.state {
+                State::Nothing => {
+                    let value = decode!(
+                        (
+                            skip_many(range(&b"\r\n"[..])),
+                            range(&b"Content-Length: "[..]),
+                            many1(digit()),
+                            range(&b"\r\n\r\n"[..]),
+                        ).map(|t| t.2)
+                            .and_then(|digits: Vec<u8>| unsafe {
+                                String::from_utf8_unchecked(digits).parse::<usize>()
+                            }),
+                        src
+                    );
 
-            match combine_decode(parser, &src[..])? {
-                None => return Ok(None),
-                Some(x) => x,
+                    self.state = State::ContentLength(value);
+                }
+                State::ContentLength(message_length) => {
+                    let message = decode!(
+                        take(message_length).map(|bytes: &[u8]| bytes.to_owned()),
+                        src
+                    );
+                    self.state = State::Nothing;
+                    return Ok(Some(String::from_utf8(message)?));
+                }
             }
-        };
-        src.split_to(removed_len);
-        Ok(Some(String::from_utf8(result)?))
+        }
     }
 }
 
