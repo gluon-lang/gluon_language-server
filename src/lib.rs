@@ -612,6 +612,7 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
     let diagnostics = match typecheck(thread, filename, fileinput) {
         Ok(_) => Some((filename.clone(), vec![])).into_iter().collect(),
         Err(err) => {
+            debug!("Diagnostics result on `{}`: {}", filename, err);
             let mut diagnostics = BTreeMap::new();
             create_diagnostics(&mut diagnostics, filename, err);
             diagnostics

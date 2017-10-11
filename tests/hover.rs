@@ -33,9 +33,9 @@ where
 }
 
 const STREAM_SOURCE: &'static str = r#"
-let prelude = import "std/prelude.glu"
-and { Option, Num } = prelude
-and { (+) } = prelude.num_Int
+let prelude = import! "std/prelude.glu"
+let { Num } = prelude
+let { Option } = import! "std/option.glu"
 
 type Stream_ a =
     | Value a (Stream a)
