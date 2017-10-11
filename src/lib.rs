@@ -13,6 +13,7 @@ extern crate futures;
 extern crate log;
 extern crate env_logger;
 extern crate gluon;
+extern crate gluon_format;
 extern crate url;
 extern crate url_serde;
 
@@ -684,7 +685,7 @@ pub fn run() {
                 let thread = thread.clone();
                 let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<TextEdit>, _> {
                     retrieve_expr(&thread, &params.text_document.uri, |module| {
-                        use gluon::parser::format_expr;
+                        use gluon_format::format_expr;
                         let formatted = format_expr(&module.source_string)?;
                         Ok(vec![
                             TextEdit {
