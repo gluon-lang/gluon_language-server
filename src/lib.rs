@@ -4,46 +4,64 @@
 extern crate clap;
 
 extern crate serde;
-extern crate serde_json;
 #[macro_use]
 extern crate serde_derive;
-
-extern crate jsonrpc_core;
-extern crate futures;
+extern crate serde_json;
 
 #[macro_use]
-extern crate log;
+extern crate futures;
+extern crate futures_cpupool;
+extern crate jsonrpc_core;
+extern crate tokio_core;
+extern crate tokio_io;
+
 extern crate env_logger;
 extern crate gluon;
-extern crate gluon_format;
 extern crate gluon_completion as completion;
+extern crate gluon_format;
+#[macro_use]
+extern crate log;
 extern crate url;
 extern crate url_serde;
 
+extern crate bytes;
+
 extern crate languageserver_types;
 
-pub mod rpc;
+macro_rules! log_message {
+    ($($ts: tt)+) => {
+        if log_enabled!(::log::LogLevel::Debug) {
+            ::log_message(format!( $($ts)+ ))
+        }
+    }
+}
 
-use jsonrpc_core::{IoHandler, Params, RpcNotificationSimple, Value};
+pub mod rpc;
+mod async_io;
+
+use jsonrpc_core::{IoHandler, Value};
 
 use url::Url;
 
-use gluon::base::ast::{SpannedExpr, Typed};
+use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
 use gluon::base::metadata::Metadata;
-use gluon::base::pos::{self, BytePos, Line, Span};
+use gluon::base::pos::{self, BytePos, Line, Span, Spanned};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
-use gluon::base::types::TypeCache;
+use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::vm::macros::Error as MacroError;
+use gluon::compiler_pipeline::{MacroExpandable, MacroValue, TypecheckValue, Typecheckable};
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
 
-use std::collections::{BTreeMap, VecDeque};
+use completion::CompletionSymbol;
+
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
@@ -51,42 +69,24 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::str;
-use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic;
-use std::sync::atomic::AtomicBool;
-use std::thread;
+use std::sync::{Arc, Mutex};
 
 use languageserver_types::*;
 
-use futures::{BoxFuture, Future, IntoFuture};
+use futures::{AsyncSink, Future, IntoFuture, Sink, Stream};
+use futures::sync::oneshot;
+
+use futures_cpupool::CpuPool;
+
+use tokio_core::reactor;
+
+use tokio_io::codec::{Framed, FramedParts};
+
+use bytes::BytesMut;
+
+pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
-
-macro_rules! log_message {
-    ($($ts: tt)+) => {
-        if log_enabled!(log::LogLevel::Debug) {
-            log_message(format!( $($ts)+ ))
-        }
-    }
-}
-
-impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
-where
-    T: LanguageServerNotification<P>,
-    P: for<'de> serde::Deserialize<'de> + 'static,
-{
-    fn execute(&self, param: Params) {
-        match param {
-            Params::Map(map) => match serde_json::from_value(Value::Object(map)) {
-                Ok(value) => {
-                    self.0.execute(value);
-                }
-                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
-            },
-            _ => log_message!("Invalid parameters: {:?}", param),
-        }
-    }
-}
 
 fn log_message(message: String) {
     debug!("{}", message);
@@ -100,10 +100,62 @@ fn log_message(message: String) {
     print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
 }
 
+fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
+    match expr.value {
+        // import! "std/prelude.glu" will replace itself with a symbol like `std.prelude
+        Expr::Ident(ref id) if id.name.declared_name().contains('.') => SymbolKind::Module,
+        _ => type_to_kind(typ),
+    }
+}
+
+fn type_to_kind(typ: &ArcType) -> SymbolKind {
+    match **typ {
+        _ if typ.as_function().is_some() => SymbolKind::Function,
+        Type::Ident(ref id) if id.declared_name() == "Bool" => SymbolKind::Boolean,
+        Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
+        Type::Builtin(builtin) => match builtin {
+            BuiltinType::Char | BuiltinType::String => SymbolKind::String,
+            BuiltinType::Byte | BuiltinType::Int | BuiltinType::Float => SymbolKind::Number,
+            BuiltinType::Array => SymbolKind::Array,
+            BuiltinType::Function => SymbolKind::Function,
+        },
+        _ => SymbolKind::Variable,
+    }
+}
+
+fn completion_symbol_to_symbol_information(
+    lines: &source::Lines,
+    symbol: Spanned<CompletionSymbol, BytePos>,
+    uri: Url,
+) -> Result<SymbolInformation, ServerError<()>> {
+    let (kind, name) = match symbol.value {
+        CompletionSymbol::Type { ref name, .. } => (SymbolKind::Class, name),
+        CompletionSymbol::Value {
+            ref name,
+            ref typ,
+            ref expr,
+        } => {
+            let kind = expr_to_kind(expr, typ);
+            (kind, name)
+        }
+    };
+    Ok(SymbolInformation {
+        kind,
+        location: Location {
+            uri,
+
+            range: byte_span_to_range(lines, symbol.span)?,
+        },
+        name: name.declared_name().to_string(),
+        container_name: None,
+    })
+}
+
 struct Module {
     lines: source::Lines,
     expr: SpannedExpr<Symbol>,
     source_string: String,
+    uri: Url,
 }
 
 #[derive(Clone)]
@@ -122,11 +174,8 @@ impl Importer for CheckImporter {
         input: &str,
         expr: SpannedExpr<Symbol>,
     ) -> Result<(), MacroError> {
-        use gluon::compiler_pipeline::{MacroValue, Typecheckable, TypecheckValue};
-
         let macro_value = MacroValue { expr: expr };
-        let TypecheckValue { expr, typ } =
-            try!(macro_value.typecheck(compiler, vm, module_name, input));
+        let TypecheckValue { expr, typ } = macro_value.typecheck(compiler, vm, module_name, input)?;
 
         let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
@@ -136,13 +185,12 @@ impl Importer for CheckImporter {
                 lines: lines,
                 expr: expr,
                 source_string: input.into(),
+                uri: module_name_to_file_(module_name)?,
             },
         );
         // Insert a global to ensure the globals type can be looked up
-        try!(
-            vm.global_env()
-                .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0))
-        );
+        vm.global_env()
+            .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0))?;
         Ok(())
     }
 }
@@ -162,19 +210,23 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         if let Some(ref path) = change.root_path {
             import.add_path(path);
         }
-        Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncKind::Full),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(true),
-                    trigger_characters: vec![".".into()],
-                }),
-                hover_provider: Some(true),
-                document_formatting_provider: Some(true),
-                ..ServerCapabilities::default()
-            },
-        }).into_future()
-            .boxed()
+        Box::new(
+            Ok(InitializeResult {
+                capabilities: ServerCapabilities {
+                    text_document_sync: Some(TextDocumentSyncKind::Incremental),
+                    completion_provider: Some(CompletionOptions {
+                        resolve_provider: Some(true),
+                        trigger_characters: vec![".".into()],
+                    }),
+                    hover_provider: Some(true),
+                    document_formatting_provider: Some(true),
+                    document_highlight_provider: Some(true),
+                    document_symbol_provider: Some(true),
+                    workspace_symbol_provider: Some(true),
+                    ..ServerCapabilities::default()
+                },
+            }).into_future(),
+        )
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -193,7 +245,7 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let source_module = try!(importer.get(&module).ok_or_else(|| {
+    let source_module = importer.get(&module).ok_or_else(|| {
         ServerError {
             message: format!(
                 "Module `{}` is not defined\n{:?}",
@@ -202,7 +254,7 @@ where
             ),
             data: None,
         }
-    }));
+    })?;
     f(source_module)
 }
 
@@ -229,8 +281,7 @@ where
 
 #[derive(Serialize, Deserialize)]
 pub struct CompletionData {
-    #[serde(with = "url_serde")]
-    pub text_document_uri: Url,
+    #[serde(with = "url_serde")] pub text_document_uri: Url,
     pub position: Position,
 }
 
@@ -242,10 +293,10 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
         &self,
         change: TextDocumentPositionParams,
     ) -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
-        (|| -> Result<_, _> {
+        let result = (move || -> Result<_, _> {
             let thread = &self.0;
             let suggestions = retrieve_expr_with_pos(
-                thread,
+                &thread,
                 &change.text_document.uri,
                 &change.position,
                 |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
@@ -275,8 +326,8 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
             Ok(items)
-        })().into_future()
-            .boxed()
+        })();
+        Box::new(result.into_future())
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -289,12 +340,10 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     type Output = Hover;
     type Error = ();
     fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
-        (|| -> Result<_, _> {
-            let thread = &self.0;
-            retrieve_expr(
-                thread,
-                &change.text_document.uri,
-                |module| {
+        Box::new(
+            (|| -> Result<_, _> {
+                let thread = &self.0;
+                retrieve_expr(thread, &change.text_document.uri, |module| {
                     let expr = &module.expr;
                     let byte_pos = position_to_byte_pos(&module.lines, &change.position)?;
 
@@ -302,27 +351,29 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
                     let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
                     let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
-                    Ok(completion::completion(extract, expr, byte_pos)
-                    .map(|(typ, span)| {
-                        let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                            Some(comment) => format!("{}\n\n{}", typ, comment),
-                            None => format!("{}", typ),
-                        };
-                        Hover {
-                            contents: vec![MarkedString::String(contents)],
-                            range: byte_span_to_range(&module.lines, span).ok(),
-                        }
-                    })
-                    .unwrap_or_else(|()| {
-                        Hover {
-                            contents: vec![],
-                            range: None,
-                        }
-                    }))
-                },
-            )
-        })().into_future()
-            .boxed()
+                    Ok(
+                        completion::completion(extract, expr, byte_pos)
+                            .map(|(typ, span)| {
+                                let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                                    Some(comment) => format!("{}\n\n{}", typ, comment),
+                                    None => format!("{}", typ),
+                                };
+                                Hover {
+                                    contents: vec![MarkedString::String(contents)],
+                                    range: byte_span_to_range(&module.lines, span).ok(),
+                                }
+                            })
+                            .unwrap_or_else(|()| {
+                                Hover {
+                                    contents: vec![],
+                                    range: None,
+                                }
+                            }),
+                    )
+                })
+            })()
+                .into_future(),
+        )
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {
@@ -344,11 +395,9 @@ fn span_to_range(span: &Span<pos::Location>) -> Range {
 }
 
 fn byte_pos_to_position(lines: &source::Lines, pos: BytePos) -> Result<Position, ServerError<()>> {
-    Ok(location_to_position(&lines
-        .location(pos)
-        .ok_or_else(|| {
-            ServerError::from(&"Unable to translate index to location")
-        })?))
+    Ok(location_to_position(&lines.location(pos).ok_or_else(|| {
+        ServerError::from(&"Unable to translate index to location")
+    })?))
 }
 
 fn byte_span_to_range(
@@ -361,9 +410,13 @@ fn byte_span_to_range(
     })
 }
 
-fn position_to_byte_pos(lines: &source::Lines, position: &Position) -> Result<BytePos, ServerError<()>> {
-    let line_pos = try!(lines.line(Line::from(position.line as usize),).ok_or_else(
-        || {
+fn position_to_byte_pos(
+    lines: &source::Lines,
+    position: &Position,
+) -> Result<BytePos, ServerError<()>> {
+    let line_pos = lines
+        .line(Line::from(position.line as usize))
+        .ok_or_else(|| {
             ServerError {
                 message: format!(
                     "Position ({}, {}) is out of range",
@@ -372,32 +425,57 @@ fn position_to_byte_pos(lines: &source::Lines, position: &Position) -> Result<By
                 ),
                 data: None,
             }
-        },
-    ));
+        })?;
     Ok(line_pos + BytePos::from(position.character as usize))
 }
 
-struct TextDocumentDidOpen(RootedThread);
-impl LanguageServerNotification<DidOpenTextDocumentParams> for TextDocumentDidOpen {
-    fn execute(&self, change: DidOpenTextDocumentParams) {
-        run_diagnostics(
-            &self.0,
-            &change.text_document.uri,
-            &change.text_document.text,
-        );
-    }
+fn range_to_byte_span(
+    lines: &source::Lines,
+    range: &Range,
+) -> Result<Span<BytePos>, ServerError<()>> {
+    Ok(Span::new(
+        position_to_byte_pos(lines, &range.start)?,
+        position_to_byte_pos(lines, &range.end)?,
+    ))
 }
 
-struct TextDocumentDidChange(Arc<UniqueQueue<Url, String>>);
-impl LanguageServerNotification<DidChangeTextDocumentParams> for TextDocumentDidChange {
-    fn execute(&self, mut change: DidChangeTextDocumentParams) {
-        use std::mem::replace;
-        self.0.add_work(
-            change.text_document.uri,
-            replace(&mut change.content_changes[0].text, String::new()),
-        )
-    }
+
+fn apply_change(
+    source: &mut String,
+    lines: &source::Lines,
+    change: TextDocumentContentChangeEvent,
+) -> Result<(), ServerError<()>> {
+    info!("Applying change: {:?}", change);
+    let span = match (change.range, change.range_length) {
+        (None, None) => Span::new(0.into(), source.len().into()),
+        (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
+        (None, Some(_)) => return Err("Invalid change".into()),
+    };
+    source.drain(span.start.to_usize()..span.end.to_usize());
+    source.insert_str(span.start.to_usize(), &change.text);
+    Ok(())
 }
+
+fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
+    let mut result = s.replace(".", "/");
+    result.push_str(".glu");
+    let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
+        Ok(path) => Ok(path.join(result)),
+        Err(_) => Err(err),
+    })?;
+    Ok(url::Url::from_file_path(path)
+        .or_else(|_| url::Url::from_file_path(s))
+        .map_err(|_| {
+            format!("Unable to convert module name to a url: `{}`", s)
+        })?)
+}
+
+// FIXME This may not be correct as this assumes the module can be located from the current working
+// directory
+fn module_name_to_file(s: &str) -> Url {
+    module_name_to_file_(s).unwrap()
+}
+
 
 fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     let import = thread.get_macros().get("import").expect("Import macro");
@@ -436,10 +514,8 @@ pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<Std
     ))
 }
 
-fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()> {
-    use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
-
-    let filename = strip_file_prefix_with_thread(thread, filename);
+fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResult<()> {
+    let filename = strip_file_prefix_with_thread(thread, uri_filename);
     let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
     let mut errors = Errors::new();
@@ -469,11 +545,9 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
         }
     };
     let metadata = Metadata::default();
-    try!(
-        thread
-            .global_env()
-            .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0))
-    );
+    thread
+        .global_env()
+        .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0))?;
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -487,6 +561,7 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
             lines: lines,
             expr: expr,
             source_string: fileinput.into(),
+            uri: uri_filename.clone(),
         },
     );
     if errors.is_empty() {
@@ -496,55 +571,6 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
     }
 }
 
-struct Entry<K, V> {
-    key: K,
-    value: V,
-}
-
-/// Queue which only keeps the latest work item for each key
-struct UniqueQueue<K, V> {
-    queue: Mutex<VecDeque<Entry<K, V>>>,
-    new_work: Condvar,
-}
-
-impl<K, V> UniqueQueue<K, V>
-where
-    K: PartialEq,
-{
-    fn add_work(&self, key: K, value: V) {
-        let mut queue = self.queue.lock().unwrap();
-        // Overwrite the previous item if one exists already for this key
-        if let Some(entry) = queue.iter_mut().find(|entry| entry.key == key) {
-            entry.value = value;
-            return;
-        }
-        queue.push_back(Entry {
-            key: key,
-            value: value,
-        });
-        self.new_work.notify_one();
-    }
-}
-
-struct DiagnosticProcessor {
-    thread: RootedThread,
-    work_queue: Arc<UniqueQueue<Url, String>>,
-}
-
-impl DiagnosticProcessor {
-    fn run(&self) {
-        let mut work_queue = self.work_queue.queue.lock().unwrap();
-        loop {
-            while let Some(entry) = work_queue.pop_front() {
-                // Don't block the producers while we run diagnostics
-                drop(work_queue);
-                run_diagnostics(&self.thread, &entry.key, &entry.value);
-                work_queue = self.work_queue.queue.lock().unwrap();
-            }
-            work_queue = self.work_queue.new_work.wait(work_queue).unwrap();
-        }
-    }
-}
 
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
@@ -559,28 +585,9 @@ fn create_diagnostics(
             message: format!("{}", err.value),
             severity: Some(DiagnosticSeverity::Error),
             range: span_to_range(&err.span),
+            source: Some("gluon".to_string()),
             ..Diagnostic::default()
         }
-    }
-
-    fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError>> {
-        let mut result = s.replace(".", "/");
-        result.push_str(".glu");
-        let path = fs::canonicalize(&*result).or_else(
-            |err| match env::current_dir() {
-                Ok(path) => Ok(path.join(result)),
-                Err(_) => Err(err),
-            },
-        )?;
-        Ok(url::Url::from_file_path(path)
-            .or_else(|_| url::Url::from_file_path(s))
-            .map_err(|_| {
-                format!("Unable to convert module name to a url: `{}`", s)
-            })?)
-    }
-
-    fn module_name_to_file(s: &str) -> Url {
-        module_name_to_file_(s).unwrap()
     }
 
     match err {
@@ -604,6 +611,19 @@ fn create_diagnostics(
                 ..Diagnostic::default()
             }),
     }
+}
+
+fn schedule_diagnostics(
+    handle: &reactor::Handle,
+    cpu_pool: &CpuPool,
+    thread: RootedThread,
+    filename: Url,
+    fileinput: String,
+) {
+    handle.spawn(cpu_pool.spawn_fn(move || {
+        run_diagnostics(&thread, &filename, &fileinput);
+        Ok(())
+    }))
 }
 
 fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
@@ -640,151 +660,324 @@ pub fn run() {
     let _matches = clap::App::new("debugger")
         .version(env!("CARGO_PKG_VERSION"))
         .get_matches();
-    start_server()
+
+    let thread = new_vm();
+    {
+        let macros = thread.get_macros();
+        let import = Import::new(CheckImporter::new());
+        macros.insert("import".into(), import);
+    }
+
+    start_server(thread).unwrap();
 }
 
-fn start_server() {
-    let thread = new_vm();
-    let work_queue = Arc::new(UniqueQueue {
-        queue: Mutex::new(VecDeque::new()),
-        new_work: Condvar::new(),
+pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
+    let mut core = reactor::Core::new().unwrap();
+    let (io, exit_receiver, _cpu_pool) = initialize_rpc(&thread, core.remote());
+
+    let input = BufReader::new(async_io::async_read(io::stdin()));
+
+    let parts = FramedParts {
+        inner: input,
+        readbuf: BytesMut::default(),
+        writebuf: BytesMut::default(),
+    };
+    let future = Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(|json| {
+        debug!("Handle: {}", json);
+        io.handle_request(&json).then(|result| {
+            if let Ok(Some(response)) = result {
+                let mut output = io::stdout();
+                write_message_str(&mut output, &response)?;
+                output.flush()?;
+            }
+            Ok(())
+        })
     });
 
-    let handle = {
-        let work_queue = work_queue.clone();
+    core.run(
+        future
+            .select(exit_receiver.map_err(|_| "Exit was canceled".into()))
+            .map(|t| t.0)
+            .map_err(|t| t.0),
+    )?;
+
+    Ok(())
+}
+
+fn initialize_rpc(
+    thread: &RootedThread,
+    core_remote: reactor::Remote,
+) -> (IoHandler, oneshot::Receiver<()>, CpuPool) {
+    let cpu_pool = CpuPool::new(2);
+
+    let work_queue = {
         let thread = thread.clone();
-        thread::spawn(move || {
-
-            let import = Import::new(CheckImporter::new());
-            thread.get_macros().insert("import".into(), import);
-
-            let mut io = IoHandler::new();
-            io.add_async_method("initialize", ServerCommand::new(Initialize(thread.clone())));
-            io.add_async_method(
-                "textDocument/completion",
-                ServerCommand::new(Completion(thread.clone())),
-            );
-
-            {
+        let core_remote = core_remote.clone();
+        let cpu_pool = cpu_pool.clone();
+        SharedSink::new(rpc::UniqueQueue::new(
+            rpc::sink_fn::<_, _, ()>(move |entry: Entry<Url, String>| {
                 let thread = thread.clone();
-                let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
-                    let data: CompletionData =
-                        serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
-
-                    log_message(format!("{:?}", data.text_document_uri));
-                    retrieve_expr_with_pos(
-                        &thread,
-                        &data.text_document_uri,
-                        &data.position,
-                        |expr, byte_pos| {
-                            let type_env = thread.global_env().get_env();
-                            let (_, metadata_map) =
-                                gluon::check::metadata::metadata(&*type_env, expr);
-                            log_message(format!("{}  {:?}", item.label, metadata_map));
-                            Ok(
-                                completion::suggest_metadata(
-                                    &metadata_map,
-                                    &*type_env,
-                                    expr,
-                                    byte_pos,
-                                    &item.label,
-                                ).and_then(|metadata| metadata.comment.clone()),
-                            )
-                        },
-                    ).map(|comment| {
-                        log_message(format!("{:?}", comment));
-                        item.documentation = comment;
-                        item
-                    })
-                        .into_future()
-                        .boxed()
-                };
-                io.add_async_method("completionItem/resolve", ServerCommand::new(resolve));
-            }
-
-            io.add_async_method(
-                "textDocument/hover",
-                ServerCommand::new(HoverCommand(thread.clone())),
-            );
-
-            {
-                let thread = thread.clone();
-                let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<TextEdit>, _> {
-                    retrieve_expr(&thread, &params.text_document.uri, |module| {
-                        use gluon_format::format_expr;
-                        let formatted = format_expr(&module.source_string)?;
-                        Ok(vec![
-                            TextEdit {
-                                range: byte_span_to_range(
-                                    &module.lines,
-                                    Span::new(0.into(), module.source_string.len().into()),
-                                )?,
-                                new_text: formatted,
-                            },
-                        ])
-                    }).into_future()
-                        .boxed()
-                };
-                io.add_async_method("textDocument/formatting", ServerCommand::new(format));
-            }
-
-            io.add_async_method("shutdown", |_| futures::finished(Value::from(0)).boxed());
-            let exit_token = Arc::new(AtomicBool::new(false));
-            {
-                let exit_token = exit_token.clone();
-                io.add_notification("exit", move |_| {
-                    exit_token.store(true, atomic::Ordering::SeqCst)
+                let cpu_pool = cpu_pool.clone();
+                core_remote.spawn(move |core_handle| {
+                    schedule_diagnostics(core_handle, &cpu_pool, thread, entry.key, entry.value);
+                    Ok(())
                 });
-            }
-            io.add_notification(
-                "textDocument/didOpen",
-                ServerCommand::new(TextDocumentDidOpen(thread.clone())),
-            );
-            io.add_notification(
-                "textDocument/didChange",
-                ServerCommand::new(TextDocumentDidChange(work_queue.clone())),
-            );
-
-            let mut input = BufReader::new(io::stdin());
-            let mut output = io::stdout();
-
-            (|| -> Result<(), Box<StdError>> {
-                while !exit_token.load(atomic::Ordering::SeqCst) {
-                    match try!(read_message(&mut input)) {
-                        Some(json) => {
-                            debug!("Handle: {}", json);
-                            if let Some(response) = io.handle_request_sync(&json) {
-                                try!(write_message_str(&mut output, &response));
-                                try!(output.flush());
-                            }
-                        }
-                        None => return Ok(()),
-                    }
-                }
-                Ok(())
-            })().unwrap();
-        })
+                Ok(AsyncSink::Ready)
+            }),
+        ))
     };
 
-    // Spawn a separate thread which runs a returns diagnostic information
-    thread::Builder::new()
-        .name("diagnostics".to_string())
-        .spawn(move || {
-            let diagnostics = DiagnosticProcessor {
-                thread: thread,
-                work_queue: work_queue,
-            };
-            diagnostics.run();
-        })
-        .unwrap();
+    let mut io = IoHandler::new();
+    io.add_async_method(
+        "initialize",
+        ServerCommand::method(Initialize(thread.clone())),
+    );
+    io.add_async_method(
+        "textDocument/completion",
+        ServerCommand::method(Completion(thread.clone())),
+    );
 
-    if let Err(err) = handle.join() {
-        let msg = err.downcast_ref::<&'static str>()
-            .cloned()
-            .or_else(|| err.downcast_ref::<String>().map(|s| &s[..]))
-            .unwrap_or("Any");
-        log_message!("Panic: `{}`", msg);
+    {
+        let thread = thread.clone();
+        let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
+            let data: CompletionData =
+                serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
+
+            log_message(format!("{:?}", data.text_document_uri));
+            Box::new(
+                retrieve_expr_with_pos(
+                    &thread,
+                    &data.text_document_uri,
+                    &data.position,
+                    |expr, byte_pos| {
+                        let type_env = thread.global_env().get_env();
+                        let (_, metadata_map) = gluon::check::metadata::metadata(&*type_env, expr);
+                        log_message(format!("{}  {:?}", item.label, metadata_map));
+                        Ok(
+                            completion::suggest_metadata(
+                                &metadata_map,
+                                &*type_env,
+                                expr,
+                                byte_pos,
+                                &item.label,
+                            ).and_then(
+                                |metadata| metadata.comment.clone(),
+                            ),
+                        )
+                    },
+                ).map(|comment| {
+                    log_message(format!("{:?}", comment));
+                    item.documentation = comment;
+                    item
+                })
+                    .into_future(),
+            )
+        };
+        io.add_async_method("completionItem/resolve", ServerCommand::method(resolve));
     }
+
+    io.add_async_method(
+        "textDocument/hover",
+        ServerCommand::method(HoverCommand(thread.clone())),
+    );
+
+    {
+        let thread = thread.clone();
+        let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let formatted = gluon_format::format_expr(&module.source_string)?;
+                    Ok(vec![
+                        TextEdit {
+                            range: byte_span_to_range(
+                                &module.lines,
+                                Span::new(0.into(), module.source_string.len().into()),
+                            )?,
+                            new_text: formatted,
+                        },
+                    ])
+                }).into_future(),
+            )
+        };
+        io.add_async_method("textDocument/formatting", ServerCommand::method(format));
+    }
+
+    {
+        let thread = thread.clone();
+        let f = move |params: TextDocumentPositionParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let expr = &module.expr;
+                    let byte_pos = position_to_byte_pos(&module.lines, &params.position)?;
+
+                    let symbol_spans = completion::find_all_symbols(expr, byte_pos)
+                        .map(|t| t.1)
+                        .unwrap_or(Vec::new());
+
+                    symbol_spans
+                        .into_iter()
+                        .map(|span| {
+                            Ok(DocumentHighlight {
+                                kind: None,
+                                range: byte_span_to_range(&module.lines, span)?,
+                            })
+                        })
+                        .collect::<Result<_, _>>()
+                }).into_future(),
+            )
+        };
+        io.add_async_method("textDocument/documentHighlight", ServerCommand::method(f));
+    }
+
+    {
+        let thread = thread.clone();
+        let f = move |params: DocumentSymbolParams| -> BoxFuture<Vec<_>, _> {
+            Box::new(
+                retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let expr = &module.expr;
+
+                    let symbols = completion::all_symbols(expr);
+
+                    symbols
+                        .into_iter()
+                        .map(|symbol| {
+                            completion_symbol_to_symbol_information(
+                                &module.lines,
+                                symbol,
+                                params.text_document.uri.clone(),
+                            )
+                        })
+                        .collect::<Result<_, _>>()
+                }).into_future(),
+            )
+        };
+        io.add_async_method("textDocument/documentSymbol", ServerCommand::method(f));
+    }
+
+    {
+        let cpu_pool = cpu_pool.clone();
+        let thread = thread.clone();
+        let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Vec<_>, ServerError<()>> {
+            let thread = thread.clone();
+            Box::new(cpu_pool.spawn_fn(move || {
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let modules = import.importer.0.lock().unwrap();
+
+                let mut symbols = Vec::<SymbolInformation>::new();
+                for module in modules.values() {
+                    symbols.extend(completion::all_symbols(&module.expr)
+                        .into_iter()
+                        .filter(|symbol| match symbol.value {
+                            CompletionSymbol::Value { ref name, .. } |
+                            CompletionSymbol::Type { ref name, .. } => {
+                                name.declared_name().contains(&params.query)
+                            }
+                        })
+                        .map(|symbol| {
+                            completion_symbol_to_symbol_information(
+                                &module.lines,
+                                symbol,
+                                module.uri.clone(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?);
+                }
+
+                Ok(symbols)
+            }))
+        };
+        io.add_async_method("workspace/symbol", ServerCommand::method(f));
+    }
+
+    io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
+
+    let (exit_sender, exit_receiver) = oneshot::channel();
+    let exit_sender = Mutex::new(Some(exit_sender));
+    io.add_notification("exit", move |_| {
+        if let Some(exit_sender) = exit_sender.lock().unwrap().take() {
+            exit_sender.send(()).unwrap()
+        }
+    });
+    {
+        let thread = thread.clone();
+        let f = move |change: DidOpenTextDocumentParams| {
+            // FIXME This should be scheduled on the cpu pool but we require that didOpen
+            // finishes before any didChange commands so we run it synchronously for now
+            run_diagnostics(
+                &thread,
+                &change.text_document.uri,
+                &change.text_document.text,
+            );
+        };
+        io.add_notification("textDocument/didOpen", ServerCommand::notification(f));
+    }
+
+    fn did_change<S>(
+        thread: &Thread,
+        sources: &Mutex<BTreeMap<Url, String>>,
+        work_queue: S,
+        change: DidChangeTextDocumentParams,
+    ) -> BoxFuture<(), ()>
+    where
+        S: Sink<SinkItem = Entry<Url, String>, SinkError = ()> + Send + 'static,
+    {
+        let mut sources = sources.lock().unwrap();
+        let source = sources
+            .entry(change.text_document.uri.clone())
+            .or_insert_with(|| {
+                // If it does not exist in sources it should exist in the `import` macro
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                let modules = import.importer.0.lock().unwrap();
+                let paths = import.paths.read().unwrap();
+                let module_name = strip_file_prefix(&paths, &change.text_document.uri)
+                    .unwrap_or_else(|err| panic!("{}", err));
+                modules
+                    .get(&module_name)
+                    .expect("textDocument/didChange processed before didOpen")
+                    .source_string
+                    .clone()
+            });
+        for change in change.content_changes {
+            let lines = source::Lines::new(source.as_bytes().iter().cloned());
+            match apply_change(source, &lines, change) {
+                Ok(()) => (),
+                Err(err) => log_message!("{}", err.message),
+            }
+        }
+        debug!("Change source {}:\n{}", change.text_document.uri, source);
+
+        Box::new(
+            work_queue
+                .send(Entry {
+                    key: change.text_document.uri,
+                    value: source.clone(),
+                })
+                .map(|_| ()),
+        )
+    }
+    {
+        let sources = Arc::new(Mutex::new(BTreeMap::new()));
+        let thread = thread.clone();
+        let f = move |change: DidChangeTextDocumentParams| {
+            let work_queue = work_queue.clone();
+            let sources = sources.clone();
+            let thread = thread.clone();
+            core_remote.spawn(move |_| {
+                let work_queue = work_queue.clone();
+                let sources = sources.clone();
+                did_change(&thread, &sources, work_queue.clone(), change)
+            });
+        };
+
+        io.add_notification("textDocument/didChange", ServerCommand::notification(f));
+    }
+    (io, exit_receiver, cpu_pool)
 }
 
 #[cfg(test)]

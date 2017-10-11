@@ -1,13 +1,19 @@
+extern crate combine;
+
+use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
-use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, Value};
-use futures::{self, BoxFuture, Future, IntoFuture};
+use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
+use futures::{self, Async, AsyncSink, Future, IntoFuture, Poll, Sink, StartSend};
 
 use serde;
 use serde_json::{from_value, to_string, to_value};
+
+use BoxFuture;
 
 pub struct ServerError<E> {
     pub message: String,
@@ -67,7 +73,19 @@ where
 pub struct ServerCommand<T, P>(pub T, PhantomData<fn(P)>);
 
 impl<T, P> ServerCommand<T, P> {
-    pub fn new(command: T) -> ServerCommand<T, P> {
+    pub fn method(command: T) -> ServerCommand<T, P>
+    where
+        T: LanguageServerCommand<P>,
+        P: for<'de> serde::Deserialize<'de> + 'static,
+    {
+        ServerCommand(command, PhantomData)
+    }
+
+    pub fn notification(command: T) -> ServerCommand<T, P>
+    where
+        T: LanguageServerNotification<P>,
+        P: for<'de> serde::Deserialize<'de> + 'static,
+    {
         ServerCommand(command, PhantomData)
     }
 }
@@ -85,9 +103,8 @@ where
         };
         let err = match from_value(value.clone()) {
             Ok(value) => {
-                return self.0
-                    .execute(value)
-                    .then(|result| match result {
+                return Box::new(self.0.execute(value).then(|result| {
+                    match result {
                         Ok(value) => Ok(
                             to_value(&value).expect("result data could not be serialized"),
                         ).into_future(),
@@ -99,20 +116,39 @@ where
                                 .as_ref()
                                 .map(|v| to_value(v).expect("error data could not be serialized")),
                         }).into_future(),
-                    })
-                    .boxed()
+                    }
+                }))
             }
             Err(err) => err,
         };
         let data = self.0.invalid_params();
-        futures::failed(Error {
+        Box::new(futures::failed(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {}", err),
             data: data.as_ref()
                 .map(|v| to_value(v).expect("error data could not be serialized")),
-        }).boxed()
+        }))
     }
 }
+
+impl<T, P> RpcNotificationSimple for ServerCommand<T, P>
+where
+    T: LanguageServerNotification<P>,
+    P: for<'de> serde::Deserialize<'de> + 'static,
+{
+    fn execute(&self, param: Params) {
+        match param {
+            Params::Map(map) => match from_value(Value::Object(map)) {
+                Ok(value) => {
+                    self.0.execute(value);
+                }
+                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
+            },
+            _ => log_message!("Invalid parameters: {:?}", param),
+        }
+    }
+}
+
 
 pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
 where
@@ -164,4 +200,256 @@ where
     ));
     try!(output.flush());
     Ok(())
+}
+
+
+extern crate bytes;
+
+use std::str;
+
+use tokio_io::codec::{Decoder, Encoder};
+use self::bytes::{BufMut, BytesMut};
+
+#[derive(Debug)]
+enum State {
+    Nothing,
+    ContentLength(usize),
+}
+
+#[derive(Debug)]
+pub struct LanguageServerDecoder {
+    state: State,
+}
+
+impl LanguageServerDecoder {
+    pub fn new() -> LanguageServerDecoder {
+        LanguageServerDecoder {
+            state: State::Nothing,
+        }
+    }
+}
+
+use self::combine::range::{range, take};
+use self::combine::{skip_many, Parser, many1};
+use self::combine::primitives::{Error as CombineError, ParseError};
+use self::combine::byte::digit;
+
+fn combine_decode<'a, P, R>(
+    mut parser: P,
+    src: &'a [u8],
+) -> Result<Option<(R, usize)>, ParseError<usize, u8, String>>
+where
+    P: Parser<Input = &'a [u8], Output = R>,
+{
+    match parser.parse(&src[..]) {
+        Ok((message, rest)) => Ok(Some((message, src.len() - rest.len()))),
+        Err(err) => {
+            return if err.errors
+                .iter()
+                .any(|err| *err == CombineError::end_of_input())
+            {
+                Ok(None)
+            } else {
+                Err(
+                    err.map_range(|r| {
+                        str::from_utf8(r)
+                            .ok()
+                            .map_or_else(|| format!("{:?}", r), |s| s.to_string())
+                    }).map_position(|p| p.translate_position(&src[..])),
+                )
+            }
+        }
+    }
+}
+
+macro_rules! decode {
+    ($parser: expr, $src: expr) => {
+        {
+            let (output, removed_len) = {
+                match combine_decode($parser, &$src[..])? {
+                    None => return Ok(None),
+                    Some(x) => x,
+                }
+            };
+            $src.split_to(removed_len);
+            output
+        }
+    };
+}
+
+impl Decoder for LanguageServerDecoder {
+    type Item = String;
+    type Error = Box<::std::error::Error>;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        loop {
+            match self.state {
+                State::Nothing => {
+                    let value = decode!(
+                        (
+                            skip_many(range(&b"\r\n"[..])),
+                            range(&b"Content-Length: "[..]),
+                            many1(digit()),
+                            range(&b"\r\n\r\n"[..]),
+                        ).map(|t| t.2)
+                            .and_then(|digits: Vec<u8>| unsafe {
+                                String::from_utf8_unchecked(digits).parse::<usize>()
+                            }),
+                        src
+                    );
+
+                    self.state = State::ContentLength(value);
+                }
+                State::ContentLength(message_length) => {
+                    let message = decode!(
+                        take(message_length).map(|bytes: &[u8]| bytes.to_owned()),
+                        src
+                    );
+                    self.state = State::Nothing;
+                    return Ok(Some(String::from_utf8(message)?));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LanguageServerEncoder;
+
+impl Encoder for LanguageServerEncoder {
+    type Item = String;
+    type Error = Box<::std::error::Error>;
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        write_message_str(dst.writer(), &item)?;
+        Ok(())
+    }
+}
+
+pub struct Entry<K, V> {
+    pub key: K,
+    pub value: V,
+}
+
+#[derive(Debug)]
+pub struct SharedSink<S>(Arc<Mutex<S>>);
+
+impl<S> Clone for SharedSink<S> {
+    fn clone(&self) -> Self {
+        SharedSink(self.0.clone())
+    }
+}
+
+impl<S> SharedSink<S> {
+    pub fn new(sink: S) -> SharedSink<S> {
+        SharedSink(Arc::new(Mutex::new(sink)))
+    }
+}
+
+impl<S> Sink for SharedSink<S>
+where
+    S: Sink,
+{
+    type SinkItem = S::SinkItem;
+    type SinkError = S::SinkError;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        self.0.lock().unwrap().start_send(item)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        self.0.lock().unwrap().poll_complete()
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        self.0.lock().unwrap().close()
+    }
+}
+
+/// Queue which only keeps the latest work item for each key
+pub struct UniqueQueue<S, K, V> {
+    sink: S,
+    queue: VecDeque<Entry<K, V>>,
+}
+
+impl<S, K, V> UniqueQueue<S, K, V> {
+    pub fn new(sink: S) -> Self {
+        UniqueQueue {
+            sink,
+            queue: VecDeque::new(),
+        }
+    }
+}
+
+impl<S, K, V> Sink for UniqueQueue<S, K, V>
+where
+    S: Sink<SinkItem = Entry<K, V>>,
+    K: PartialEq,
+{
+    type SinkItem = Entry<K, V>;
+    type SinkError = S::SinkError;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        match self.sink.start_send(item)? {
+            AsyncSink::Ready => Ok(AsyncSink::Ready),
+            AsyncSink::NotReady(item) => {
+                if let Some(entry) = self.queue.iter_mut().find(|entry| entry.key == item.key) {
+                    entry.value = item.value;
+                }
+                Ok(AsyncSink::Ready)
+            }
+        }
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        while let Some(item) = self.queue.pop_front() {
+            match self.sink.start_send(item)? {
+                AsyncSink::Ready => (),
+                AsyncSink::NotReady(item) => {
+                    self.queue.push_front(item);
+                    break;
+                }
+            }
+        }
+        if self.queue.is_empty() {
+            self.sink.poll_complete()
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        try_ready!(self.poll_complete());
+        self.sink.close()
+    }
+}
+
+pub struct SinkFn<F, I> {
+    f: F,
+    _marker: PhantomData<fn(I) -> I>,
+}
+
+pub fn sink_fn<F, I, E>(f: F) -> SinkFn<F, I>
+where
+    F: FnMut(I) -> StartSend<I, E>,
+{
+    SinkFn {
+        f,
+        _marker: PhantomData,
+    }
+}
+
+impl<F, I, E> Sink for SinkFn<F, I>
+where
+    F: FnMut(I) -> StartSend<I, E>,
+{
+    type SinkItem = I;
+    type SinkError = E;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        (self.f)(item)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
+    }
 }

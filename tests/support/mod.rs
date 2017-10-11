@@ -23,7 +23,6 @@ use gluon_language_server::rpc::read_message;
 
 pub fn test_url(uri: &str) -> Url {
     Url::from_file_path(&env::current_dir().unwrap().join(uri)).unwrap()
-
 }
 
 pub fn write_message<W, V>(writer: &mut W, value: V) -> io::Result<()>
