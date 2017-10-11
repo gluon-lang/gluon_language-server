@@ -251,7 +251,7 @@ test2
         );
 
         // FIXME Don't rely on sleep to give the change a chance to propagate
-        ::std::thread::sleep(::std::time::Duration::from_secs(3));
+        ::std::thread::sleep(::std::time::Duration::from_secs(5));
 
         completion(
             stdin,
