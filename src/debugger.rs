@@ -562,7 +562,7 @@ impl Debugger {
                                     }
                                     Type::Variant(ref row) => {
                                         let type_field = row.row_iter()
-                                            .nth(data.tag as usize)
+                                            .nth(data.tag() as usize)
                                             .expect("Variant tag is out of bounds");
                                         data.fields
                                             .into_iter()
