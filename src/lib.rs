@@ -13,6 +13,7 @@ extern crate futures;
 extern crate log;
 extern crate env_logger;
 extern crate gluon;
+extern crate gluon_completion as completion;
 extern crate url;
 extern crate url_serde;
 
@@ -31,7 +32,7 @@ use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Line, Span};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
-use gluon::check::completion;
+use gluon::base::types::{TypeCache};
 use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
@@ -126,11 +127,11 @@ impl Importer for CheckImporter {
         let TypecheckValue { expr, typ } =
             try!(macro_value.typecheck(compiler, vm, module_name, input));
 
-        let lines = source::Lines::new(input);
+        let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
         self.0.lock().unwrap().insert(
             module_name.into(),
-            Module {
+            self::Module {
                 lines: lines,
                 expr: expr,
                 source_string: input.into(),
@@ -419,7 +420,7 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
     let mut compiler = Compiler::new();
     // The parser may find parse errors but still produce an expression
     // For that case still typecheck the expression but return the parse error afterwards
-    let mut expr = match compiler.parse_partial_expr(&name, fileinput) {
+    let mut expr = match compiler.parse_partial_expr(&TypeCache::new(), &name, fileinput) {
         Ok(expr) => expr,
         Err((None, err)) => return Err(err.into()),
         Err((Some(expr), err)) => {
@@ -453,10 +454,10 @@ fn typecheck(thread: &Thread, filename: &Url, fileinput: &str) -> GluonResult<()
         .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
 
-    let lines = source::Lines::new(fileinput);
+    let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
     importer.insert(
         name.into(),
-        Module {
+        self::Module {
             lines: lines,
             expr: expr,
             source_string: fileinput.into(),
