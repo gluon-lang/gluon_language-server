@@ -231,18 +231,18 @@ impl LanguageServerDecoder {
 
 use self::combine::range::{range, take};
 use self::combine::{skip_many, Parser, many1};
-use self::combine::primitives::{Error as CombineError, ParseError};
+use self::combine::easy::{self, Error as CombineError, Errors};
 use self::combine::byte::digit;
 
 fn combine_decode<'a, P, R>(
     mut parser: P,
     src: &'a [u8],
-) -> Result<Option<(R, usize)>, ParseError<usize, u8, String>>
+) -> Result<Option<(R, usize)>, Errors<usize, u8, String>>
 where
-    P: Parser<Input = &'a [u8], Output = R>,
+    P: Parser<Input = easy::Stream<&'a [u8]>, Output = R>,
 {
-    match parser.parse(&src[..]) {
-        Ok((message, rest)) => Ok(Some((message, src.len() - rest.len()))),
+    match parser.parse(easy::Stream(&src[..])) {
+        Ok((message, rest)) => Ok(Some((message, src.len() - rest.0.len()))),
         Err(err) => {
             return if err.errors
                 .iter()
