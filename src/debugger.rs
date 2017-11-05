@@ -126,6 +126,20 @@ impl LaunchHandler {
             .context()
             .set_hook(Some(Box::new(move |_, debug_info| {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
+                    let stack_info =
+                    debug_info
+                        .stack_info(0)
+                        .unwrap();
+                debug!(
+                    "Debugger at `{}:{}` {}. Reason {}",
+                    stack_info.source_name(),
+                    stack_info.function_name().unwrap(),
+                    stack_info
+                        .line()
+                        .as_ref()
+                        .map_or(&"unknown" as &::std::fmt::Display, |s| s),
+                    pause
+                );
                 let reason = match pause {
                     PAUSE => "pause",
                     STEP_IN => "step",
@@ -157,9 +171,12 @@ impl LaunchHandler {
                     }
                     _ => {
                         let stack_info = debug_info.stack_info(0).unwrap();
-                        match stack_info.line() {
-                            Some(line) if debugger.should_break(stack_info.source_name(), line) => {
-                                "breakpoint"
+                        let line = stack_info.line();
+                        match line {
+                            Some(line) 
+                                if debugger.should_break(stack_info.source_name(), line) => {
+                                    debug!("Breaking on {}", line);
+                                    "breakpoint"
                             }
                             _ => return Ok(Async::Ready(())),
                         }

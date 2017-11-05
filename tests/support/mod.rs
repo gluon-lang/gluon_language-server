@@ -113,6 +113,7 @@ where
     let mut child = Command::new(&*server_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap_or_else(|err| {
             panic!("{}\nWhen opening `{}`", err, server_path.display())
