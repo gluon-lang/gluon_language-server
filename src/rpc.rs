@@ -142,9 +142,9 @@ where
                 Ok(value) => {
                     self.0.execute(value);
                 }
-                Err(err) => log_message!("Invalid parameters. Reason: {}", err),
+                Err(err) => error!("{}", err), // FIXME log_message!("Invalid parameters. Reason: {}", err),
             },
-            _ => log_message!("Invalid parameters: {:?}", param),
+            _ => (), // FIXME log_message!("Invalid parameters: {:?}", param),
         }
     }
 }
@@ -279,7 +279,7 @@ macro_rules! decode {
 
 impl Decoder for LanguageServerDecoder {
     type Item = String;
-    type Error = Box<::std::error::Error>;
+    type Error = Box<::std::error::Error + Send + Sync>;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         loop {

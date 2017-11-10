@@ -29,9 +29,11 @@ extern crate bytes;
 extern crate languageserver_types;
 
 macro_rules! log_message {
-    ($($ts: tt)+) => {
+    ($sender: expr, $($ts: tt)+) => {
         if log_enabled!(::log::LogLevel::Debug) {
-            ::log_message(format!( $($ts)+ ))
+            ::log_message($sender, format!( $($ts)+ ))
+        } else {
+            Box::new(Ok(()).into_future())
         }
     }
 }
@@ -66,15 +68,17 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, Mutex};
 
 use languageserver_types::*;
 
-use futures::{AsyncSink, Future, IntoFuture, Sink, Stream};
+use futures::{future, AsyncSink, Future, IntoFuture, Sink, Stream};
+use futures::future::Either;
 use futures::sync::oneshot;
+use futures::sync::mpsc;
 
 use futures_cpupool::CpuPool;
 
@@ -88,7 +92,7 @@ pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
 
-fn log_message(message: String) {
+fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), ()> {
     debug!("{}", message);
     let r = format!(
         r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
@@ -97,7 +101,7 @@ fn log_message(message: String) {
             message: message,
         }).unwrap()
     );
-    print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
+    Box::new(sender.send(r).map(|_| ()).map_err(|_| ()))
 }
 
 fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
@@ -265,7 +269,8 @@ fn retrieve_expr_with_pos<F, R>(
     f: F,
 ) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>,
+    F: FnOnce(&SpannedExpr<Symbol>, BytePos)
+        -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, |module| {
         let Module {
@@ -486,7 +491,10 @@ fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     strip_file_prefix(&paths, url).unwrap_or_else(|err| panic!("{}", err))
 }
 
-pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, Box<StdError>> {
+pub fn strip_file_prefix(
+    paths: &[PathBuf],
+    url: &Url,
+) -> Result<String, Box<StdError + Send + Sync>> {
     use std::env;
 
     let path = url.to_file_path().map_err(|_| "Expected a file uri")?;
@@ -668,36 +676,73 @@ pub fn run() {
         macros.insert("import".into(), import);
     }
 
-    start_server(thread).unwrap();
+    start_server(thread, io::stdin(), io::stdout()).unwrap();
 }
 
-pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
+pub fn start_server<R, W>(
+    thread: RootedThread,
+    input: R,
+    mut output: W,
+) -> Result<(), Box<StdError + Send + Sync>>
+where
+    R: io::Read + Send + 'static,
+    W: io::Write + Send,
+{
     let mut core = reactor::Core::new().unwrap();
-    let (io, exit_receiver, _cpu_pool) = initialize_rpc(&thread, core.remote());
+    let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) =
+        initialize_rpc(&thread, core.remote());
 
-    let input = BufReader::new(async_io::async_read(io::stdin()));
+    let input = BufReader::new(async_io::async_read(input));
 
     let parts = FramedParts {
         inner: input,
         readbuf: BytesMut::default(),
         writebuf: BytesMut::default(),
     };
-    let future = Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(|json| {
-        debug!("Handle: {}", json);
-        io.handle_request(&json).then(|result| {
-            if let Ok(Some(response)) = result {
-                let mut output = io::stdout();
-                write_message_str(&mut output, &response)?;
-                output.flush()?;
-            }
-            Ok(())
-        })
-    });
+    let future: BoxFuture<(), Box<StdError + Send + Sync>> = Box::new(
+        Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(move |json| {
+            debug!("Handle: {}", json);
+            let message_log = message_log.clone();
+            io.handle_request(&json).then(move |result| {
+                if let Ok(Some(response)) = result {
+                    Either::A(
+                        message_log
+                            .clone()
+                            .send(response)
+                            .map(|_| ())
+                            .map_err(|_| "Unable to send".into()),
+                    )
+                } else {
+                    Either::B(Ok(()).into_future())
+                }
+            })
+        }),
+    );
+
+    let log_messages = Box::new(
+        message_log_receiver
+            .map_err(|_| {
+                let x: Box<StdError + Send + Sync> = "Unable to log message".into();
+                x
+            })
+            .for_each(|message| -> Result<(), Box<StdError + Send + Sync>> {
+                write!(
+                    output,
+                    "Content-Length: {}\r\n\r\n{}",
+                    message.len(),
+                    message
+                )?;
+                output.flush().unwrap();
+                Ok(())
+            }),
+    );
 
     core.run(
-        future
-            .select(exit_receiver.map_err(|_| "Exit was canceled".into()))
-            .map(|t| t.0)
+        future::select_all(vec![
+            future,
+            Box::new(exit_receiver.map_err(|_| "Exit was canceled".into())),
+            log_messages,
+        ]).map(|t| t.0)
             .map_err(|t| t.0),
     )?;
 
@@ -707,8 +752,16 @@ pub fn start_server(thread: RootedThread) -> Result<(), Box<StdError>> {
 fn initialize_rpc(
     thread: &RootedThread,
     core_remote: reactor::Remote,
-) -> (IoHandler, oneshot::Receiver<()>, CpuPool) {
+) -> (
+    IoHandler,
+    oneshot::Receiver<()>,
+    CpuPool,
+    mpsc::Receiver<String>,
+    mpsc::Sender<String>,
+) {
     let cpu_pool = CpuPool::new(2);
+
+    let (message_log, message_log_receiver) = mpsc::channel(1);
 
     let work_queue = {
         let thread = thread.clone();
@@ -739,38 +792,45 @@ fn initialize_rpc(
 
     {
         let thread = thread.clone();
+        let message_log = message_log.clone();
         let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
             let data: CompletionData =
                 serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
 
-            log_message(format!("{:?}", data.text_document_uri));
+            let message_log2 = message_log.clone();
+            let thread = thread.clone();
+            let label = item.label.clone();
             Box::new(
-                retrieve_expr_with_pos(
-                    &thread,
-                    &data.text_document_uri,
-                    &data.position,
-                    |expr, byte_pos| {
-                        let type_env = thread.global_env().get_env();
-                        let (_, metadata_map) = gluon::check::metadata::metadata(&*type_env, expr);
-                        log_message(format!("{}  {:?}", item.label, metadata_map));
-                        Ok(
-                            completion::suggest_metadata(
-                                &metadata_map,
-                                &*type_env,
-                                expr,
-                                byte_pos,
-                                &item.label,
-                            ).and_then(
-                                |metadata| metadata.comment.clone(),
-                            ),
+                log_message!(message_log.clone(), "{:?}", data.text_document_uri)
+                    .then(move |_| {
+                        retrieve_expr_with_pos(
+                            &thread,
+                            &data.text_document_uri,
+                            &data.position,
+                            |expr, byte_pos| {
+                                let type_env = thread.global_env().get_env();
+                                let (_, metadata_map) =
+                                    gluon::check::metadata::metadata(&*type_env, expr);
+                                Ok(
+                                    completion::suggest_metadata(
+                                        &metadata_map,
+                                        &*type_env,
+                                        expr,
+                                        byte_pos,
+                                        &label,
+                                    ).and_then(|metadata| metadata.comment.clone()),
+                                )
+                            },
                         )
-                    },
-                ).map(|comment| {
-                    log_message(format!("{:?}", comment));
-                    item.documentation = comment;
-                    item
-                })
-                    .into_future(),
+                    })
+                    .and_then(move |comment| {
+                        log_message!(message_log2, "{:?}", comment)
+                            .map(move |()| {
+                                item.documentation = comment;
+                                item
+                            })
+                            .map_err(|_| panic!("Unable to send log message"))
+                    }),
             )
         };
         io.add_async_method("completionItem/resolve", ServerCommand::method(resolve));
@@ -918,6 +978,7 @@ fn initialize_rpc(
     fn did_change<S>(
         thread: &Thread,
         sources: &Mutex<BTreeMap<Url, String>>,
+        message_log: mpsc::Sender<String>,
         work_queue: S,
         change: DidChangeTextDocumentParams,
     ) -> BoxFuture<(), ()>
@@ -937,9 +998,17 @@ fn initialize_rpc(
                 let paths = import.paths.read().unwrap();
                 let module_name = strip_file_prefix(&paths, &change.text_document.uri)
                     .unwrap_or_else(|err| panic!("{}", err));
+                let module_name = filename_to_module(&module_name);
                 modules
                     .get(&module_name)
-                    .expect("textDocument/didChange processed before didOpen")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "textDocument/didChange processed before didOpen for module `{}`.\n \
+                             Loaded modules: {:?}",
+                            module_name,
+                            modules.keys().collect::<Vec<_>>()
+                        )
+                    })
                     .source_string
                     .clone()
             });
@@ -947,7 +1016,7 @@ fn initialize_rpc(
             let lines = source::Lines::new(source.as_bytes().iter().cloned());
             match apply_change(source, &lines, change) {
                 Ok(()) => (),
-                Err(err) => log_message!("{}", err.message),
+                Err(err) => return log_message!(message_log.clone(), "{}", err.message),
             }
         }
         debug!("Change source {}:\n{}", change.text_document.uri, source);
@@ -964,20 +1033,34 @@ fn initialize_rpc(
     {
         let sources = Arc::new(Mutex::new(BTreeMap::new()));
         let thread = thread.clone();
+        let message_log = message_log.clone();
         let f = move |change: DidChangeTextDocumentParams| {
             let work_queue = work_queue.clone();
             let sources = sources.clone();
             let thread = thread.clone();
+            let message_log = message_log.clone();
             core_remote.spawn(move |_| {
                 let work_queue = work_queue.clone();
                 let sources = sources.clone();
-                did_change(&thread, &sources, work_queue.clone(), change)
+                did_change(
+                    &thread,
+                    &sources,
+                    message_log.clone(),
+                    work_queue.clone(),
+                    change,
+                )
             });
         };
 
         io.add_notification("textDocument/didChange", ServerCommand::notification(f));
     }
-    (io, exit_receiver, cpu_pool)
+    (
+        io,
+        exit_receiver,
+        cpu_pool,
+        message_log_receiver,
+        message_log,
+    )
 }
 
 #[cfg(test)]
