@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::env;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::str;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 
@@ -102,42 +102,32 @@ where
     did_open_uri(stdin, test_url(uri), text)
 }
 
-
-pub fn send_rpc<F, T>(f: F) -> T
+pub fn expect_response<R, T>(mut output: R) -> T
 where
-    F: FnOnce(&mut Write),
     T: DeserializeOwned,
+    R: BufRead,
 {
-    let (stdin_read, mut stdin_write) = pipe();
-    let (mut stdout_read, stdout_write) = pipe();
-
-    ::std::thread::spawn(move || {
-        let thread = new_vm();
-
-        ::gluon_language_server::start_server(thread, stdin_read, stdout_write).unwrap();
-    });
-
-    {
-        f(&mut stdin_write);
-
-        let exit = Call::Notification(Notification {
-            jsonrpc: Some(Version::V2),
-            method: "exit".into(),
-            params: None,
-        });
-        write_message(&mut stdin_write, exit).unwrap();
-        drop(stdin_write);
-    }
-
-    let mut stdout = Vec::new();
-    stdout_read.read_to_end(&mut stdout).unwrap();
-
-    let mut value = None;
-    let mut output = &stdout[..];
     while let Some(json) = read_message(&mut output).unwrap() {
-        if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
-            value = from_value(response.result).ok();
+        // Skip all notifications
+        if let Ok(Notification { .. }) = from_str(&json) {
+            continue;
         }
+
+        if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
+            return from_value(response.result).unwrap();
+        } else {
+            panic!("Expected response, got `{}`", json)
+        }
+    }
+    panic!("Expected a response")
+}
+
+pub fn expect_notification<R, T>(mut output: R) -> T
+where
+    T: DeserializeOwned,
+    R: BufRead,
+{
+    while let Some(json) = read_message(&mut output).unwrap() {
         if let Ok(Notification {
             params: Some(params),
             ..
@@ -148,15 +138,39 @@ where
                 Params::Array(array) => Value::Array(array),
                 Params::None => Value::Null,
             };
-            value = from_value(json_value).ok();
+            return from_value(json_value).unwrap();
+        } else {
+            panic!("Expected notification, got `{}`", json)
         }
     }
-    value.unwrap_or_else(|| {
-        panic!(
-            "Could not find the expected response out of:\n`{}`",
-            str::from_utf8(&stdout).expect("UTF8")
-        )
-    })
+    panic!("Expected a notification")
+}
+
+pub fn send_rpc<F>(f: F)
+where
+    F: FnOnce(&mut Write, &mut BufRead),
+{
+    let (stdin_read, mut stdin_write) = pipe();
+    let (stdout_read, stdout_write) = pipe();
+    let mut stdout_read = BufReader::new(stdout_read);
+
+    ::std::thread::spawn(move || {
+        let thread = new_vm();
+
+        ::gluon_language_server::start_server(thread, stdin_read, stdout_write).unwrap();
+    });
+
+    {
+        f(&mut stdin_write, &mut stdout_read);
+
+        let exit = Call::Notification(Notification {
+            jsonrpc: Some(Version::V2),
+            method: "exit".into(),
+            params: None,
+        });
+        write_message(&mut stdin_write, exit).unwrap();
+        drop(stdin_write);
+    }
 }
 
 

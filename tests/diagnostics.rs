@@ -13,27 +13,30 @@ use languageserver_types::{DiagnosticSeverity, Position, PublishDiagnosticsParam
 
 #[test]
 fn type_error() {
-    let diagnostic: PublishDiagnosticsParams = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let text = r#"
 "" + 1
 "#;
         support::did_open(stdin, "test", text);
+
+        let diagnostic: PublishDiagnosticsParams = support::expect_notification(stdout);
+
+        assert_eq!(diagnostic.uri, support::test_url("test.glu"));
+        assert_eq!(diagnostic.diagnostics.len(), 1);
+        let error = &diagnostic.diagnostics[0];
+        assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
+        assert_eq!(
+            error.range,
+            Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 2,
+                },
+            }
+        );
     });
-    assert_eq!(diagnostic.uri, support::test_url("test.glu"));
-    assert_eq!(diagnostic.diagnostics.len(), 1);
-    let error = &diagnostic.diagnostics[0];
-    assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
-    assert_eq!(
-        error.range,
-        Range {
-            start: Position {
-                line: 1,
-                character: 0,
-            },
-            end: Position {
-                line: 1,
-                character: 6,
-            },
-        }
-    );
 }

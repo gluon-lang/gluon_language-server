@@ -11,9 +11,12 @@ extern crate url;
 #[allow(unused)]
 mod support;
 
+
 use std::io::Write;
 
 use languageserver_types::*;
+
+use support::{expect_notification, expect_response};
 
 fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
 where
@@ -48,28 +51,32 @@ x   +
 let x = 1
 x + 2
 "#;
-    let edits: Vec<TextEdit> = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         support::did_open(stdin, "test", text);
 
-        format(stdin, 2, "test")
-    });
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
-    assert_eq!(
-        edits,
-        vec![
-            TextEdit {
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
+        format(stdin, 2, "test");
+
+        let edits: Vec<TextEdit> = expect_response(stdout);
+
+        assert_eq!(
+            edits,
+            vec![
+                TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 4,
+                            character: 0,
+                        },
                     },
-                    end: Position {
-                        line: 4,
-                        character: 0,
-                    },
+                    new_text: expected.to_string(),
                 },
-                new_text: expected.to_string(),
-            },
-        ]
-    );
+            ]
+        );
+    });
 }

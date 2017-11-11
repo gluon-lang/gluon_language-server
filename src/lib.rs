@@ -77,6 +77,7 @@ use languageserver_types::*;
 
 use futures::{future, AsyncSink, Future, IntoFuture, Sink, Stream};
 use futures::future::Either;
+use futures::stream;
 use futures::sync::oneshot;
 use futures::sync::mpsc;
 
@@ -158,12 +159,12 @@ fn completion_symbol_to_symbol_information(
 struct Module {
     lines: source::Lines,
     expr: SpannedExpr<Symbol>,
-    source_string: String,
+    source: Arc<String>,
     uri: Url,
 }
 
 #[derive(Clone)]
-struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
+struct CheckImporter(Arc<Mutex<FnvMap<String, Source>>>);
 impl CheckImporter {
     fn new() -> CheckImporter {
         CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
@@ -185,12 +186,12 @@ impl Importer for CheckImporter {
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
         self.0.lock().unwrap().insert(
             module_name.into(),
-            self::Module {
+            Source::Opened(self::Module {
                 lines: lines,
                 expr: expr,
-                source_string: input.into(),
+                source: Arc::new(input.into()),
                 uri: module_name_to_file_(module_name)?,
-            },
+            }),
         );
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
@@ -249,16 +250,19 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let source_module = importer.get(&module).ok_or_else(|| {
-        ServerError {
-            message: format!(
-                "Module `{}` is not defined\n{:?}",
-                module,
-                importer.keys().collect::<Vec<_>>()
-            ),
-            data: None,
-        }
-    })?;
+    let source_module = importer
+        .get(&module)
+        .and_then(|m| m.as_module())
+        .ok_or_else(|| {
+            ServerError {
+                message: format!(
+                    "Module `{}` is not defined\n{:?}",
+                    module,
+                    importer.keys().collect::<Vec<_>>()
+                ),
+                data: None,
+            }
+        })?;
     f(source_module)
 }
 
@@ -444,6 +448,29 @@ fn range_to_byte_span(
     ))
 }
 
+fn apply_changes(
+    message_log: &mpsc::Sender<String>,
+    arc_source: &mut Arc<String>,
+    uri: &Url,
+    content_changes: Vec<TextDocumentContentChangeEvent>,
+) -> BoxFuture<Arc<String>, ()> {
+    {
+        let source = Arc::make_mut(arc_source);
+        debug!("Change source {}:\n{}", uri, source);
+        for change in content_changes {
+            let lines = source::Lines::new(source.as_bytes().iter().cloned());
+            match apply_change(source, &lines, change) {
+                Ok(()) => (),
+                Err(err) => {
+                    return Box::new(
+                        log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())),
+                    )
+                }
+            }
+        }
+    }
+    Box::new(Ok(arc_source.clone()).into_future())
+}
 
 fn apply_change(
     source: &mut String,
@@ -565,12 +592,12 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
     let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
     importer.insert(
         name.into(),
-        self::Module {
+        Source::Opened(self::Module {
             lines: lines,
             expr: expr,
-            source_string: fileinput.into(),
+            source: Arc::new(fileinput.into()),
             uri: uri_filename.clone(),
-        },
+        }),
     );
     if errors.is_empty() {
         Ok(())
@@ -623,18 +650,23 @@ fn create_diagnostics(
 
 fn schedule_diagnostics(
     handle: &reactor::Handle,
+    message_log: mpsc::Sender<String>,
     cpu_pool: &CpuPool,
     thread: RootedThread,
     filename: Url,
-    fileinput: String,
+    fileinput: Arc<String>,
 ) {
     handle.spawn(cpu_pool.spawn_fn(move || {
-        run_diagnostics(&thread, &filename, &fileinput);
-        Ok(())
+        run_diagnostics(&thread, message_log, &filename, &fileinput)
     }))
 }
 
-fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
+fn run_diagnostics(
+    thread: &Thread,
+    message_log: mpsc::Sender<String>,
+    filename: &Url,
+    fileinput: &str,
+) -> BoxFuture<(), ()> {
     info!("Running diagnostics on {}", filename);
 
     let diagnostics = match typecheck(thread, filename, fileinput) {
@@ -646,20 +678,28 @@ fn run_diagnostics(thread: &Thread, filename: &Url, fileinput: &str) {
             diagnostics
         }
     };
-    for (source_name, diagnostic) in diagnostics {
-        let r = format!(
-            r#"{{
+
+    let diagnostics_stream =
+        stream::futures_ordered(diagnostics.into_iter().map(|(source_name, diagnostic)| {
+            Ok(format!(
+                r#"{{
                             "jsonrpc": "2.0",
                             "method": "textDocument/publishDiagnostics",
                             "params": {}
                         }}"#,
-            serde_json::to_value(&PublishDiagnosticsParams {
-                uri: source_name,
-                diagnostics: diagnostic,
-            }).unwrap()
-        );
-        print!("Content-Length: {}\r\n\r\n{}", r.len(), r);
-    }
+                serde_json::to_value(&PublishDiagnosticsParams {
+                    uri: source_name,
+                    diagnostics: diagnostic,
+                }).unwrap()
+            ))
+        }));
+
+    Box::new(
+        message_log
+            .send_all(diagnostics_stream)
+            .map(|_| ())
+            .map_err(|_| ()),
+    )
 }
 
 pub fn run() {
@@ -684,7 +724,7 @@ where
     W: io::Write + Send,
 {
     let _ = ::env_logger::init();
-    
+
     {
         let macros = thread.get_macros();
         let mut check_import = Import::new(CheckImporter::new());
@@ -717,24 +757,23 @@ where
         writebuf: BytesMut::default(),
     };
     let future: BoxFuture<(), Box<StdError + Send + Sync>> = Box::new(
-        Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
-            .for_each(move |json| {
-                debug!("Handle: {}", json);
-                let message_log = message_log.clone();
-                io.handle_request(&json).then(move |result| {
-                    if let Ok(Some(response)) = result {
-                        Either::A(
-                            message_log
-                                .clone()
-                                .send(response)
-                                .map(|_| ())
-                                .map_err(|_| "Unable to send".into()),
-                        )
-                    } else {
-                        Either::B(Ok(()).into_future())
-                    }
-                })
-            }),
+        Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(move |json| {
+            debug!("Handle: {}", json);
+            let message_log = message_log.clone();
+            io.handle_request(&json).then(move |result| {
+                if let Ok(Some(response)) = result {
+                    Either::A(
+                        message_log
+                            .clone()
+                            .send(response)
+                            .map(|_| ())
+                            .map_err(|_| "Unable to send".into()),
+                    )
+                } else {
+                    Either::B(Ok(()).into_future())
+                }
+            })
+        }),
     );
 
     let log_messages = Box::new(
@@ -773,6 +812,20 @@ where
     Ok(())
 }
 
+enum Source {
+    Opened(Module),
+    UncommitedChanges(Vec<TextDocumentContentChangeEvent>),
+}
+
+impl Source {
+    fn as_module(&self) -> Option<&Module> {
+        match *self {
+            Source::Opened(ref module) => Some(module),
+            Source::UncommitedChanges(_) => None,
+        }
+    }
+}
+
 fn initialize_rpc(
     thread: &RootedThread,
     core_remote: reactor::Remote,
@@ -794,17 +847,28 @@ fn initialize_rpc(
         let thread = thread.clone();
         let core_remote = core_remote.clone();
         let cpu_pool = cpu_pool.clone();
-        SharedSink::new(rpc::UniqueQueue::new(
-            rpc::sink_fn::<_, _, ()>(move |entry: Entry<Url, String>| {
+        let message_log = message_log.clone();
+
+        SharedSink::new(rpc::UniqueQueue::new(rpc::sink_fn::<_, _, ()>(
+            move |entry: Entry<Url, Arc<String>>| {
                 let thread = thread.clone();
                 let cpu_pool = cpu_pool.clone();
+                let message_log = message_log.clone();
+
                 core_remote.spawn(move |core_handle| {
-                    schedule_diagnostics(core_handle, &cpu_pool, thread, entry.key, entry.value);
+                    schedule_diagnostics(
+                        core_handle,
+                        message_log,
+                        &cpu_pool,
+                        thread,
+                        entry.key,
+                        entry.value,
+                    );
                     Ok(())
                 });
                 Ok(AsyncSink::Ready)
-            }),
-        ))
+            },
+        )))
     };
 
     let mut io = IoHandler::new();
@@ -873,12 +937,13 @@ fn initialize_rpc(
         let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<_>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let formatted = gluon_format::format_expr(&module.source_string)?;
+                    let source = &module.source;
+                    let formatted = gluon_format::format_expr(source)?;
                     Ok(vec![
                         TextEdit {
                             range: byte_span_to_range(
                                 &module.lines,
-                                Span::new(0.into(), module.source_string.len().into()),
+                                Span::new(0.into(), source.len().into()),
                             )?,
                             new_text: formatted,
                         },
@@ -954,7 +1019,8 @@ fn initialize_rpc(
                 let modules = import.importer.0.lock().unwrap();
 
                 let mut symbols = Vec::<SymbolInformation>::new();
-                for module in modules.values() {
+
+                for module in modules.values().filter_map(|m| m.as_module()) {
                     symbols.extend(completion::all_symbols(&module.expr)
                         .into_iter()
                         .filter(|symbol| match symbol.value {
@@ -990,92 +1056,88 @@ fn initialize_rpc(
     });
     {
         let thread = thread.clone();
+        let message_log = message_log.clone();
+        let core_remote = core_remote.clone();
+        let cpu_pool = cpu_pool.clone();
+
         let f = move |change: DidOpenTextDocumentParams| {
-            // FIXME This should be scheduled on the cpu pool but we require that didOpen
-            // finishes before any didChange commands so we run it synchronously for now
-            run_diagnostics(
-                &thread,
-                &change.text_document.uri,
-                &change.text_document.text,
-            );
+            let message_log = message_log.clone();
+            let thread = thread.clone();
+            let cpu_pool = cpu_pool.clone();
+
+            core_remote.spawn(move |core_handle| {
+                schedule_diagnostics(
+                    core_handle,
+                    message_log,
+                    &cpu_pool,
+                    thread,
+                    change.text_document.uri,
+                    Arc::new(change.text_document.text),
+                );
+                Ok(())
+            });
         };
         io.add_notification("textDocument/didOpen", ServerCommand::notification(f));
     }
 
     fn did_change<S>(
         thread: &Thread,
-        sources: &Mutex<BTreeMap<Url, String>>,
         message_log: mpsc::Sender<String>,
         work_queue: S,
         change: DidChangeTextDocumentParams,
     ) -> BoxFuture<(), ()>
     where
-        S: Sink<SinkItem = Entry<Url, String>, SinkError = ()> + Send + 'static,
+        S: Sink<SinkItem = Entry<Url, Arc<String>>, SinkError = ()> + Send + 'static,
     {
-        let mut sources = sources.lock().unwrap();
-        let source = sources
-            .entry(change.text_document.uri.clone())
-            .or_insert_with(|| {
-                // If it does not exist in sources it should exist in the `import` macro
-                let import = thread.get_macros().get("import").expect("Import macro");
-                let import = import
-                    .downcast_ref::<Import<CheckImporter>>()
-                    .expect("Check importer");
-                let modules = import.importer.0.lock().unwrap();
-                let paths = import.paths.read().unwrap();
-                let module_name = strip_file_prefix(&paths, &change.text_document.uri)
-                    .unwrap_or_else(|err| panic!("{}", err));
-                let module_name = filename_to_module(&module_name);
-                modules
-                    .get(&module_name)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "textDocument/didChange processed before didOpen for module `{}`.\n \
-                             Loaded modules: {:?}",
-                            module_name,
-                            modules.keys().collect::<Vec<_>>()
-                        )
-                    })
-                    .source_string
-                    .clone()
-            });
-        for change in change.content_changes {
-            let lines = source::Lines::new(source.as_bytes().iter().cloned());
-            match apply_change(source, &lines, change) {
-                Ok(()) => (),
-                Err(err) => return log_message!(message_log.clone(), "{}", err.message),
+        // If it does not exist in sources it should exist in the `import` macro
+        let import = thread.get_macros().get("import").expect("Import macro");
+        let import = import
+            .downcast_ref::<Import<CheckImporter>>()
+            .expect("Check importer");
+        let mut modules = import.importer.0.lock().unwrap();
+        let paths = import.paths.read().unwrap();
+        let module_name = strip_file_prefix(&paths, &change.text_document.uri)
+            .unwrap_or_else(|err| panic!("{}", err));
+        let module_name = filename_to_module(&module_name);
+        let source = modules
+            .entry(module_name)
+            .or_insert_with(|| Source::UncommitedChanges(vec![]));
+
+        match *source {
+            Source::Opened(ref mut module) => {
+                let uri = change.text_document.uri;
+                let fut = apply_changes(
+                    &message_log,
+                    &mut module.source,
+                    &uri,
+                    change.content_changes,
+                );
+                Box::new(fut.and_then(|arc_source| {
+                    work_queue
+                        .send(Entry {
+                            key: uri,
+                            value: arc_source,
+                        })
+                        .map(|_| ())
+                }))
+            }
+            Source::UncommitedChanges(ref mut changes) => {
+                changes.extend(change.content_changes);
+                Box::new(Ok(()).into_future())
             }
         }
-        debug!("Change source {}:\n{}", change.text_document.uri, source);
-
-        Box::new(
-            work_queue
-                .send(Entry {
-                    key: change.text_document.uri,
-                    value: source.clone(),
-                })
-                .map(|_| ()),
-        )
     }
     {
-        let sources = Arc::new(Mutex::new(BTreeMap::new()));
         let thread = thread.clone();
         let message_log = message_log.clone();
+
         let f = move |change: DidChangeTextDocumentParams| {
             let work_queue = work_queue.clone();
-            let sources = sources.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
             core_remote.spawn(move |_| {
                 let work_queue = work_queue.clone();
-                let sources = sources.clone();
-                did_change(
-                    &thread,
-                    &sources,
-                    message_log.clone(),
-                    work_queue.clone(),
-                    change,
-                )
+                did_change(&thread, message_log.clone(), work_queue.clone(), change)
             });
         };
 

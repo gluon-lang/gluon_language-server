@@ -17,11 +17,14 @@ use std::io::Write;
 use url::Url;
 
 use languageserver_types::{CompletionItem, CompletionItemKind, DidChangeTextDocumentParams,
-                           Position, Range, TextDocumentContentChangeEvent,
-                           TextDocumentIdentifier, TextDocumentPositionParams,
-                           VersionedTextDocumentIdentifier};
+                           Position, PublishDiagnosticsParams, Range,
+                           TextDocumentContentChangeEvent, TextDocumentIdentifier,
+                           TextDocumentPositionParams, VersionedTextDocumentIdentifier};
 
 use gluon_language_server::CompletionData;
+
+use support::{expect_notification, expect_response};
+
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where
@@ -84,13 +87,15 @@ fn remove_completion_data(mut completions: Vec<CompletionItem>) -> Vec<Completio
 
 #[test]
 fn local_completion() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let text = r#"
 let test = 2
 let test1 = ""
 te
 "#;
         support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         completion(
             stdin,
@@ -100,32 +105,36 @@ te
                 line: 3,
                 character: 2,
             },
-        )
+        );
+
+        let completions: Vec<CompletionItem> = expect_response(stdout);
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "test".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("Int".into()),
+                    ..CompletionItem::default()
+                },
+                CompletionItem {
+                    label: "test1".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("String".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
     });
-    let completions = remove_completion_data(completions);
-    assert_eq!(
-        completions,
-        vec![
-            CompletionItem {
-                label: "test".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("Int".into()),
-                ..CompletionItem::default()
-            },
-            CompletionItem {
-                label: "test1".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("String".into()),
-                ..CompletionItem::default()
-            },
-        ]
-    );
 }
 
 #[test]
 fn prelude_completion() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         support::did_open(stdin, "test", "no");
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         completion(
             stdin,
@@ -135,40 +144,43 @@ fn prelude_completion() {
                 line: 0,
                 character: 1,
             },
-        )
+        );
+
+        let completions: Vec<CompletionItem> = expect_response(stdout);
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "not".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("std.types.Bool -> std.types.Bool".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
     });
-    let completions = remove_completion_data(completions);
-    assert_eq!(
-        completions,
-        vec![
-            CompletionItem {
-                label: "not".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("std.types.Bool -> std.types.Bool".into()),
-                ..CompletionItem::default()
-            },
-        ]
-    );
 }
 
 #[test]
 fn resolve_completion() {
-    let completion = CompletionItem {
-        label: "test".into(),
-        kind: Some(CompletionItemKind::Variable),
-        detail: Some("Int".into()),
-        data: Some(
-            serde_json::to_value(CompletionData {
-                text_document_uri: support::test_url("test"),
-                position: Position {
-                    character: 2,
-                    line: 4,
-                },
-            }).unwrap(),
-        ),
-        ..CompletionItem::default()
-    };
-    let actual: CompletionItem = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
+        let completion = CompletionItem {
+            label: "test".into(),
+            kind: Some(CompletionItemKind::Variable),
+            detail: Some("Int".into()),
+            data: Some(
+                serde_json::to_value(CompletionData {
+                    text_document_uri: support::test_url("test"),
+                    position: Position {
+                        character: 2,
+                        line: 4,
+                    },
+                }).unwrap(),
+            ),
+            ..CompletionItem::default()
+        };
+
         let text = r#"
 /// doc
 let test = 2
@@ -177,26 +189,33 @@ te
 "#;
         support::did_open(stdin, "test", text);
 
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
         resolve(stdin, 1, &completion);
+
+        let actual: CompletionItem = expect_response(&mut *stdout);
+
+        assert_eq!(
+            actual,
+            CompletionItem {
+                documentation: Some("doc".to_string()),
+                ..completion
+            }
+        );
     });
-    assert_eq!(
-        actual,
-        CompletionItem {
-            documentation: Some("doc".to_string()),
-            ..completion
-        }
-    );
 }
 
 #[test]
 fn url_encoded_path() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let text = r#"
 let r = { abc = 1 }
 r.
 "#;
         let uri: Url = "file:///C%3A/examples/test.glu".parse().unwrap();
         support::did_open_uri(stdin, uri.clone(), text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         let hover = support::method_call(
             "textDocument/completion",
@@ -211,24 +230,26 @@ r.
         );
 
         support::write_message(stdin, hover).unwrap();
+
+        let completions = expect_response(stdout);
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "abc".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("Int".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
     });
-    let completions = remove_completion_data(completions);
-    assert_eq!(
-        completions,
-        vec![
-            CompletionItem {
-                label: "abc".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("Int".into()),
-                ..CompletionItem::default()
-            },
-        ]
-    );
 }
 
 #[test]
 fn local_completion_with_update() {
-    let completions: Vec<CompletionItem> = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let text = r#"
 let test = 2
 let test1 = ""
@@ -236,6 +257,8 @@ test2
 "#;
 
         support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         did_change(
             stdin,
@@ -253,8 +276,7 @@ test2
             "st1",
         );
 
-        // FIXME Don't rely on sleep to give the change a chance to propagate
-        ::std::thread::sleep(::std::time::Duration::from_secs(5));
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         completion(
             stdin,
@@ -264,18 +286,21 @@ test2
                 line: 3,
                 character: 2,
             },
-        )
+        );
+
+        let completions = expect_response(stdout);
+
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "test1".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("String".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
     });
-    let completions = remove_completion_data(completions);
-    assert_eq!(
-        completions,
-        vec![
-            CompletionItem {
-                label: "test1".into(),
-                kind: Some(CompletionItemKind::Variable),
-                detail: Some("String".into()),
-                ..CompletionItem::default()
-            },
-        ]
-    );
 }
