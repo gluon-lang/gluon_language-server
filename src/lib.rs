@@ -57,7 +57,7 @@ use gluon::import::{Import, Importer};
 use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::vm::macros::Error as MacroError;
-use gluon::compiler_pipeline::{MacroExpandable, MacroValue, TypecheckValue, Typecheckable};
+use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
 
@@ -175,28 +175,43 @@ impl Importer for CheckImporter {
         &self,
         compiler: &mut Compiler,
         vm: &Thread,
+        _earlier_errors_exist: bool,
         module_name: &str,
         input: &str,
-        expr: SpannedExpr<Symbol>,
-    ) -> Result<(), MacroError> {
-        let macro_value = MacroValue { expr: expr };
-        let TypecheckValue { expr, typ } = macro_value.typecheck(compiler, vm, module_name, input)?;
+        mut expr: SpannedExpr<Symbol>,
+    ) -> Result<(), (Option<ArcType>, MacroError)> {
+        let result = MacroValue { expr: &mut expr }
+            .typecheck(compiler, vm, module_name, input)
+            .map(|res| res.typ);
+
+        let typ = result
+            .as_ref()
+            .ok()
+            .map_or_else(|| expr.env_type_of(&*vm.get_env()), |typ| typ.clone());
 
         let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
+
         self.0.lock().unwrap().insert(
             module_name.into(),
             Source::Opened(self::Module {
                 lines: lines,
                 expr: expr,
                 source: Arc::new(input.into()),
-                uri: module_name_to_file_(module_name)?,
+                uri: module_name_to_file_(module_name).map_err(|err| (None, err.into()))?,
             }),
         );
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
-            .set_global(Symbol::from(module_name), typ, metadata, GluonValue::Int(0))?;
-        Ok(())
+            .set_global(
+                Symbol::from(module_name),
+                typ.clone(),
+                metadata,
+                GluonValue::Int(0),
+            )
+            .map_err(|err| (None, err.into()))?;
+
+        result.map(|_| ()).map_err(|err| (Some(typ), err.into()))
     }
 }
 
@@ -273,8 +288,7 @@ fn retrieve_expr_with_pos<F, R>(
     f: F,
 ) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&SpannedExpr<Symbol>, BytePos)
-        -> Result<R, ServerError<()>>,
+    F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, |module| {
         let Module {
@@ -565,7 +579,7 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
             expr
         }
     };
-    if let Err(err) = expr.expand_macro(&mut compiler, thread, &name) {
+    if let Err((_, err)) = expr.expand_macro(&mut compiler, thread, &name) {
         errors.push(err);
     }
 
@@ -1024,8 +1038,8 @@ fn initialize_rpc(
                     symbols.extend(completion::all_symbols(&module.expr)
                         .into_iter()
                         .filter(|symbol| match symbol.value {
-                            CompletionSymbol::Value { ref name, .. } |
-                            CompletionSymbol::Type { ref name, .. } => {
+                            CompletionSymbol::Value { ref name, .. }
+                            | CompletionSymbol::Type { ref name, .. } => {
                                 name.declared_name().contains(&params.query)
                             }
                         })
