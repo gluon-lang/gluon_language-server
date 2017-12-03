@@ -17,7 +17,7 @@ use std::io::Write;
 use url::Url;
 
 use languageserver_types::{CompletionItem, CompletionItemKind, DidChangeTextDocumentParams,
-                           Position, PublishDiagnosticsParams, Range,
+                           Documentation, Position, PublishDiagnosticsParams, Range,
                            TextDocumentContentChangeEvent, TextDocumentIdentifier,
                            TextDocumentPositionParams, VersionedTextDocumentIdentifier};
 
@@ -198,7 +198,7 @@ te
         assert_eq!(
             actual,
             CompletionItem {
-                documentation: Some("doc".to_string()),
+                documentation: Some(Documentation::String("doc".to_string())),
                 ..completion
             }
         );

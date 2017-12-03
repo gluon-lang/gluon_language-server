@@ -43,7 +43,7 @@ serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-languageserver-types = "0.11.0"
+languageserver-types = { path = "../languageserver-types" }
 debugserver-types = "0.3.0"
 
 gluon = "0.6.1"

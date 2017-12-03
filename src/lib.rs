@@ -26,6 +26,7 @@ extern crate url_serde;
 
 extern crate bytes;
 
+#[macro_use]
 extern crate languageserver_types;
 
 macro_rules! log_message {
@@ -360,9 +361,12 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
 
 struct HoverCommand(RootedThread);
 impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
-    type Output = Hover;
+    type Output = Option<Hover>;
     type Error = ();
-    fn execute(&self, change: TextDocumentPositionParams) -> BoxFuture<Hover, ServerError<()>> {
+    fn execute(
+        &self,
+        change: TextDocumentPositionParams,
+    ) -> BoxFuture<Option<Hover>, ServerError<()>> {
         Box::new(
             (|| -> Result<_, _> {
                 let thread = &self.0;
@@ -380,17 +384,12 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                                 Some(comment) => format!("{}\n\n{}", typ, comment),
                                 None => format!("{}", typ),
                             };
-                            Hover {
-                                contents: vec![MarkedString::String(contents)],
+                            Some(Hover {
+                                contents: HoverContents::Scalar(MarkedString::String(contents)),
                                 range: byte_span_to_range(&module.lines, span).ok(),
-                            }
+                            })
                         })
-                        .unwrap_or_else(|()| {
-                            Hover {
-                                contents: vec![],
-                                range: None,
-                            }
-                        }))
+                        .unwrap_or_else(|()| None))
                 })
             })()
                 .into_future(),
@@ -973,7 +972,7 @@ fn initialize_rpc(
                     .and_then(move |comment| {
                         log_message!(message_log2, "{:?}", comment)
                             .map(move |()| {
-                                item.documentation = comment;
+                                item.documentation = comment.map(Documentation::String);
                                 item
                             })
                             .map_err(|_| panic!("Unable to send log message"))

@@ -10,8 +10,8 @@ mod support;
 
 use std::io::Write;
 
-use languageserver_types::{Hover, MarkedString, Position, PublishDiagnosticsParams, Range,
-                           TextDocumentIdentifier, TextDocumentPositionParams};
+use languageserver_types::{Hover, HoverContents, MarkedString, Position, PublishDiagnosticsParams,
+                           Range, TextDocumentIdentifier, TextDocumentPositionParams};
 
 use support::{expect_notification, expect_response};
 
@@ -77,7 +77,7 @@ fn simple_hover() {
         assert_eq!(
             hover,
             Hover {
-                contents: vec![MarkedString::String("Int".into())],
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
                 range: Some(Range {
                     start: Position {
                         line: 0,
@@ -119,7 +119,7 @@ test
         assert_eq!(
             hover,
             Hover {
-                contents: vec![MarkedString::String("Int".into())],
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
                 range: Some(Range {
                     start: Position {
                         line: 2,
@@ -157,7 +157,7 @@ fn stream() {
         assert_eq!(
             hover,
             Hover {
-                contents: vec![MarkedString::String("Int".into())],
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
                 range: Some(Range {
                     start: Position {
                         line: 13,
