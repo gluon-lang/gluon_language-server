@@ -17,7 +17,7 @@ fn type_error() {
         let text = r#"
 "" + 1
 "#;
-        support::did_open(stdin, "test", text);
+        support::did_open(stdin, "test.glu", text);
 
         let diagnostic: PublishDiagnosticsParams = support::expect_notification(stdout);
 

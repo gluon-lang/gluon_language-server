@@ -40,14 +40,14 @@ where
     };
     thread::Builder::new()
         .name("input reader".to_string())
-        .spawn(move || {
-            match read_func(read, &size_receiver, &result_sender) {
+        .spawn(
+            move || match read_func(read, &size_receiver, &result_sender) {
                 Ok(()) => (),
                 Err(err) => {
                     let _ = result_sender.send(Err(err));
                 }
-            }
-        })
+            },
+        )
         .unwrap();
     AsyncRead {
         size_sender,

@@ -374,25 +374,23 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
                     let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
                     let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
-                    Ok(
-                        completion::completion(extract, expr, byte_pos)
-                            .map(|(typ, span)| {
-                                let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                                    Some(comment) => format!("{}\n\n{}", typ, comment),
-                                    None => format!("{}", typ),
-                                };
-                                Hover {
-                                    contents: vec![MarkedString::String(contents)],
-                                    range: byte_span_to_range(&module.lines, span).ok(),
-                                }
-                            })
-                            .unwrap_or_else(|()| {
-                                Hover {
-                                    contents: vec![],
-                                    range: None,
-                                }
-                            }),
-                    )
+                    Ok(completion::completion(extract, expr, byte_pos)
+                        .map(|(typ, span)| {
+                            let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                                Some(comment) => format!("{}\n\n{}", typ, comment),
+                                None => format!("{}", typ),
+                            };
+                            Hover {
+                                contents: vec![MarkedString::String(contents)],
+                                range: byte_span_to_range(&module.lines, span).ok(),
+                            }
+                        })
+                        .unwrap_or_else(|()| {
+                            Hover {
+                                contents: vec![],
+                                range: None,
+                            }
+                        }))
                 })
             })()
                 .into_future(),
@@ -417,10 +415,19 @@ fn span_to_range(span: &Span<pos::Location>) -> Range {
     }
 }
 
+fn byte_pos_to_location(
+    lines: &source::Lines,
+    pos: BytePos,
+) -> Result<gluon::base::pos::Location, ServerError<()>> {
+    Ok(lines
+        .location(pos)
+        .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?)
+}
+
 fn byte_pos_to_position(lines: &source::Lines, pos: BytePos) -> Result<Position, ServerError<()>> {
-    Ok(location_to_position(&lines.location(pos).ok_or_else(|| {
-        ServerError::from(&"Unable to translate index to location")
-    })?))
+    Ok(location_to_position(&lines.location(pos).ok_or_else(
+        || ServerError::from(&"Unable to translate index to location"),
+    )?))
 }
 
 fn byte_span_to_range(
@@ -511,15 +518,17 @@ fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
     })?;
     Ok(url::Url::from_file_path(path)
         .or_else(|_| url::Url::from_file_path(s))
-        .map_err(|_| {
-            format!("Unable to convert module name to a url: `{}`", s)
-        })?)
+        .map_err(|_| format!("Unable to convert module name to a url: `{}`", s))?)
 }
 
-// FIXME This may not be correct as this assumes the module can be located from the current working
-// directory
-fn module_name_to_file(s: &str) -> Url {
-    module_name_to_file_(s).unwrap()
+fn module_name_to_file(importer: &CheckImporter, s: &str) -> Url {
+    importer
+        .0
+        .lock()
+        .unwrap()
+        .get(s)
+        .map(|source| source.uri().clone())
+        .unwrap_or_else(|| module_name_to_file_(s).unwrap())
 }
 
 
@@ -623,9 +632,11 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
 
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
+    importer: &CheckImporter,
     filename: &Url,
+    lines: &source::Lines,
     err: GluonError,
-) {
+) -> Result<(), ServerError<()>> {
     fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
     where
         T: fmt::Display,
@@ -641,16 +652,24 @@ fn create_diagnostics(
 
     match err {
         GluonError::Typecheck(err) => diagnostics
-            .entry(module_name_to_file(&err.source_name))
+            .entry(module_name_to_file(importer, &err.source_name))
             .or_insert(Vec::new())
             .extend(err.errors().into_iter().map(into_diagnostic)),
         GluonError::Parse(err) => diagnostics
-            .entry(module_name_to_file(&err.source_name))
+            .entry(module_name_to_file(importer, &err.source_name))
             .or_insert(Vec::new())
             .extend(err.errors().into_iter().map(into_diagnostic)),
         GluonError::Multiple(errors) => for err in errors {
-            create_diagnostics(diagnostics, filename, err);
+            create_diagnostics(diagnostics, importer, filename, lines, err)?;
         },
+        GluonError::Macro(error) => diagnostics
+            .entry(filename.clone())
+            .or_insert(Vec::new())
+            .push(into_diagnostic(pos::spanned2(
+                byte_pos_to_location(lines, error.span.start)?,
+                byte_pos_to_location(lines, error.span.end)?,
+                error.value,
+            ))),
         err => diagnostics
             .entry(filename.clone())
             .or_insert(Vec::new())
@@ -660,6 +679,7 @@ fn create_diagnostics(
                 ..Diagnostic::default()
             }),
     }
+    Ok(())
 }
 
 fn schedule_diagnostics(
@@ -670,9 +690,9 @@ fn schedule_diagnostics(
     filename: Url,
     fileinput: Arc<String>,
 ) {
-    handle.spawn(cpu_pool.spawn_fn(move || {
-        run_diagnostics(&thread, message_log, &filename, &fileinput)
-    }))
+    handle.spawn(
+        cpu_pool.spawn_fn(move || run_diagnostics(&thread, message_log, &filename, &fileinput)),
+    )
 }
 
 fn run_diagnostics(
@@ -688,7 +708,24 @@ fn run_diagnostics(
         Err(err) => {
             debug!("Diagnostics result on `{}`: {}", filename, err);
             let mut diagnostics = BTreeMap::new();
-            create_diagnostics(&mut diagnostics, filename, err);
+            let source = source::Source::new(fileinput);
+
+            let import = thread.get_macros().get("import").expect("Import macro");
+            let import = import
+                .downcast_ref::<Import<CheckImporter>>()
+                .expect("Check importer");
+
+            let result = create_diagnostics(
+                &mut diagnostics,
+                &import.importer,
+                filename,
+                &source.lines(),
+                err,
+            );
+            if let Err(err) = result {
+                error!("Unable to create diagnostics: {}", err.message);
+                return Box::new(Err(()).into_future());
+            }
             diagnostics
         }
     };
@@ -828,14 +865,21 @@ where
 
 enum Source {
     Opened(Module),
-    UncommitedChanges(Vec<TextDocumentContentChangeEvent>),
+    UncommitedChanges(Vec<TextDocumentContentChangeEvent>, Url),
 }
 
 impl Source {
     fn as_module(&self) -> Option<&Module> {
         match *self {
             Source::Opened(ref module) => Some(module),
-            Source::UncommitedChanges(_) => None,
+            Source::UncommitedChanges(..) => None,
+        }
+    }
+
+    fn uri(&self) -> &Url {
+        match *self {
+            Source::Opened(ref module) => &module.uri,
+            Source::UncommitedChanges(_, ref uri) => uri,
         }
     }
 }
@@ -916,15 +960,13 @@ fn initialize_rpc(
                                 let type_env = thread.global_env().get_env();
                                 let (_, metadata_map) =
                                     gluon::check::metadata::metadata(&*type_env, expr);
-                                Ok(
-                                    completion::suggest_metadata(
-                                        &metadata_map,
-                                        &*type_env,
-                                        expr,
-                                        byte_pos,
-                                        &label,
-                                    ).and_then(|metadata| metadata.comment.clone()),
-                                )
+                                Ok(completion::suggest_metadata(
+                                    &metadata_map,
+                                    &*type_env,
+                                    expr,
+                                    byte_pos,
+                                    &label,
+                                ).and_then(|metadata| metadata.comment.clone()))
                             },
                         )
                     })
@@ -1115,11 +1157,18 @@ fn initialize_rpc(
         let module_name = filename_to_module(&module_name);
         let source = modules
             .entry(module_name)
-            .or_insert_with(|| Source::UncommitedChanges(vec![]));
+            .or_insert_with(|| Source::UncommitedChanges(vec![], change.text_document.uri.clone()));
 
         match *source {
             Source::Opened(ref mut module) => {
                 let uri = change.text_document.uri;
+                // If the module was loaded via `import!` before we open it in the editor
+                // `module.uri` has been set by looking at the current working directory which is
+                // not necessarily correct (works in VS code but not with (neo)vim) so update the
+                // uri to match the one supplied by the client to mensure errors show up.
+                if module.uri != uri {
+                    module.uri.clone_from(&uri);
+                }
                 let fut = apply_changes(
                     &message_log,
                     &mut module.source,
@@ -1135,7 +1184,7 @@ fn initialize_rpc(
                         .map(|_| ())
                 }))
             }
-            Source::UncommitedChanges(ref mut changes) => {
+            Source::UncommitedChanges(ref mut changes, _) => {
                 changes.extend(change.content_changes);
                 Box::new(Ok(()).into_future())
             }

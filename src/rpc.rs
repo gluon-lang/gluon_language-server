@@ -105,9 +105,9 @@ where
             Ok(value) => {
                 return Box::new(self.0.execute(value).then(|result| {
                     match result {
-                        Ok(value) => Ok(
-                            to_value(&value).expect("result data could not be serialized"),
-                        ).into_future(),
+                        Ok(value) => Ok(to_value(&value)
+                            .expect("result data could not be serialized"))
+                            .into_future(),
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
                             message: error.message,
@@ -250,13 +250,11 @@ where
             {
                 Ok(None)
             } else {
-                Err(
-                    err.map_range(|r| {
-                        str::from_utf8(r)
-                            .ok()
-                            .map_or_else(|| format!("{:?}", r), |s| s.to_string())
-                    }).map_position(|p| p.translate_position(&src[..])),
-                )
+                Err(err.map_range(|r| {
+                    str::from_utf8(r)
+                        .ok()
+                        .map_or_else(|| format!("{:?}", r), |s| s.to_string())
+                }).map_position(|p| p.translate_position(&src[..])))
             }
         }
     }
