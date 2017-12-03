@@ -42,7 +42,7 @@ macro_rules! log_message {
 pub mod rpc;
 mod async_io;
 
-use jsonrpc_core::{IoHandler, Value};
+use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use url::Url;
 
@@ -310,13 +310,10 @@ pub struct CompletionData {
 }
 
 struct Completion(RootedThread);
-impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
-    type Output = Vec<CompletionItem>;
+impl LanguageServerCommand<CompletionParams> for Completion {
+    type Output = CompletionResponse;
     type Error = ();
-    fn execute(
-        &self,
-        change: TextDocumentPositionParams,
-    ) -> BoxFuture<Vec<CompletionItem>, ServerError<()>> {
+    fn execute(&self, change: CompletionParams) -> BoxFuture<CompletionResponse, ServerError<()>> {
         let result = (move || -> Result<_, _> {
             let thread = &self.0;
             let suggestions = retrieve_expr_with_pos(
@@ -349,7 +346,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for Completion {
 
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
-            Ok(items)
+            Ok(CompletionResponse::Array(items))
         })();
         Box::new(result.into_future())
     }
@@ -883,6 +880,47 @@ impl Source {
     }
 }
 
+trait Handler {
+    fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
+    where
+        T: ::languageserver_types::request::Request,
+        U: LanguageServerCommand<T::Params, Output = T::Result>,
+        T::Params: serde::de::DeserializeOwned + 'static,
+        T::Result: serde::Serialize;
+    fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
+    where
+        T: ::languageserver_types::notification::Notification,
+        T::Params: serde::de::DeserializeOwned + 'static,
+        U: LanguageServerNotification<T::Params>;
+}
+
+impl Handler for IoHandler {
+    fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
+    where
+        T: ::languageserver_types::request::Request,
+        U: LanguageServerCommand<T::Params, Output = T::Result>,
+        T::Params: serde::de::DeserializeOwned + 'static,
+        T::Result: serde::Serialize,
+    {
+        MetaIoHandler::add_async_method(self, T::METHOD, ServerCommand::method(method))
+    }
+    fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
+    where
+        T: ::languageserver_types::notification::Notification,
+        T::Params: serde::de::DeserializeOwned + 'static,
+        U: LanguageServerNotification<T::Params>,
+    {
+        MetaIoHandler::add_notification(self, T::METHOD, ServerCommand::notification(notification))
+    }
+}
+
+macro_rules! request {
+    ($t: tt) => { ::std::option::Option::None::<lsp_request!($t)> };
+}
+macro_rules! notification {
+    ($t: tt) => { ::std::option::Option::None::<lsp_notification!($t)> };
+}
+
 fn initialize_rpc(
     thread: &RootedThread,
     core_remote: reactor::Remote,
@@ -929,13 +967,10 @@ fn initialize_rpc(
     };
 
     let mut io = IoHandler::new();
+    io.add_async_method(request!("initialize"), Initialize(thread.clone()));
     io.add_async_method(
-        "initialize",
-        ServerCommand::method(Initialize(thread.clone())),
-    );
-    io.add_async_method(
-        "textDocument/completion",
-        ServerCommand::method(Completion(thread.clone())),
+        request!("textDocument/completion"),
+        Completion(thread.clone()),
     );
 
     {
@@ -979,22 +1014,19 @@ fn initialize_rpc(
                     }),
             )
         };
-        io.add_async_method("completionItem/resolve", ServerCommand::method(resolve));
+        io.add_async_method(request!("completionItem/resolve"), resolve);
     }
 
-    io.add_async_method(
-        "textDocument/hover",
-        ServerCommand::method(HoverCommand(thread.clone())),
-    );
+    io.add_async_method(request!("textDocument/hover"), HoverCommand(thread.clone()));
 
     {
         let thread = thread.clone();
-        let format = move |params: DocumentFormattingParams| -> BoxFuture<Vec<_>, _> {
+        let format = move |params: DocumentFormattingParams| -> BoxFuture<Option<Vec<_>>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
                     let source = &module.source;
                     let formatted = gluon_format::format_expr(source)?;
-                    Ok(vec![
+                    Ok(Some(vec![
                         TextEdit {
                             range: byte_span_to_range(
                                 &module.lines,
@@ -1002,16 +1034,16 @@ fn initialize_rpc(
                             )?,
                             new_text: formatted,
                         },
-                    ])
+                    ]))
                 }).into_future(),
             )
         };
-        io.add_async_method("textDocument/formatting", ServerCommand::method(format));
+        io.add_async_method(request!("textDocument/formatting"), format);
     }
 
     {
         let thread = thread.clone();
-        let f = move |params: TextDocumentPositionParams| -> BoxFuture<Vec<_>, _> {
+        let f = move |params: TextDocumentPositionParams| -> BoxFuture<Option<Vec<_>>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
                     let expr = &module.expr;
@@ -1030,15 +1062,16 @@ fn initialize_rpc(
                             })
                         })
                         .collect::<Result<_, _>>()
+                        .map(Some)
                 }).into_future(),
             )
         };
-        io.add_async_method("textDocument/documentHighlight", ServerCommand::method(f));
+        io.add_async_method(request!("textDocument/documentHighlight"), f);
     }
 
     {
         let thread = thread.clone();
-        let f = move |params: DocumentSymbolParams| -> BoxFuture<Vec<_>, _> {
+        let f = move |params: DocumentSymbolParams| -> BoxFuture<Option<Vec<_>>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
                     let expr = &module.expr;
@@ -1055,16 +1088,17 @@ fn initialize_rpc(
                             )
                         })
                         .collect::<Result<_, _>>()
+                        .map(Some)
                 }).into_future(),
             )
         };
-        io.add_async_method("textDocument/documentSymbol", ServerCommand::method(f));
+        io.add_async_method(request!("textDocument/documentSymbol"), f);
     }
 
     {
         let cpu_pool = cpu_pool.clone();
         let thread = thread.clone();
-        let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Vec<_>, ServerError<()>> {
+        let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Option<Vec<_>>, ServerError<()>> {
             let thread = thread.clone();
             Box::new(cpu_pool.spawn_fn(move || {
                 let import = thread.get_macros().get("import").expect("Import macro");
@@ -1094,17 +1128,20 @@ fn initialize_rpc(
                         .collect::<Result<Vec<_>, _>>()?);
                 }
 
-                Ok(symbols)
+                Ok(Some(symbols))
             }))
         };
-        io.add_async_method("workspace/symbol", ServerCommand::method(f));
+        io.add_async_method(request!("workspace/symbol"), f);
     }
 
-    io.add_async_method("shutdown", |_| Box::new(futures::finished(Value::from(0))));
+    io.add_async_method(
+        request!("shutdown"),
+        |_| -> BoxFuture<(), ServerError<()>> { Box::new(futures::finished(())) },
+    );
 
     let (exit_sender, exit_receiver) = oneshot::channel();
     let exit_sender = Mutex::new(Some(exit_sender));
-    io.add_notification("exit", move |_| {
+    io.add_notification(notification!("exit"), move |_| {
         if let Some(exit_sender) = exit_sender.lock().unwrap().take() {
             exit_sender.send(()).unwrap()
         }
@@ -1132,7 +1169,7 @@ fn initialize_rpc(
                 Ok(())
             });
         };
-        io.add_notification("textDocument/didOpen", ServerCommand::notification(f));
+        io.add_notification(notification!("textDocument/didOpen"), f);
     }
 
     fn did_change<S>(
@@ -1203,7 +1240,7 @@ fn initialize_rpc(
             });
         };
 
-        io.add_notification("textDocument/didChange", ServerCommand::notification(f));
+        io.add_notification(notification!("textDocument/didChange"), f);
     }
     (
         io,
