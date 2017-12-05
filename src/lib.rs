@@ -316,12 +316,15 @@ impl LanguageServerCommand<CompletionParams> for Completion {
     fn execute(&self, change: CompletionParams) -> BoxFuture<CompletionResponse, ServerError<()>> {
         let result = (move || -> Result<_, _> {
             let thread = &self.0;
-            let suggestions = retrieve_expr_with_pos(
-                &thread,
-                &change.text_document.uri,
-                &change.position,
-                |expr, byte_pos| Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)),
-            )?;
+            let suggestions = retrieve_expr(&thread, &change.text_document.uri, |module| {
+                let Module {
+                    ref expr,
+                    ref lines,
+                    ..
+                } = *module;
+                let byte_pos = position_to_byte_pos(lines, &change.position)?;
+                Ok(completion::suggest(&*thread.get_env(), expr, byte_pos))
+            })?;
 
             let mut items: Vec<_> = suggestions
                 .into_iter()
@@ -330,7 +333,12 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                     let name: &str = ident.name.as_ref();
                     let label = String::from(name.split(':').next().unwrap_or(ident.name.as_ref()));
                     CompletionItem {
-                        label: label,
+                        insert_text: if label.starts_with(char::is_alphabetic) {
+                            None
+                        } else {
+                            Some(format!("({})", label))
+                        },
+                        label,
                         detail: Some(format!("{}", ident.typ)),
                         kind: Some(CompletionItemKind::Variable),
                         data: Some(

@@ -130,6 +130,40 @@ te
 }
 
 #[test]
+fn operator_completion_on_whitespace() {
+    support::send_rpc(|stdin, stdout| {
+        let text = r#"
+let {  } = { (*>) = 1 }
+()
+"#;
+        support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        let insert_pos = Position {
+            line: 1,
+            character: 7,
+        };
+        completion(stdin, 1, "test", insert_pos);
+
+        let completions: Vec<CompletionItem> = expect_response(stdout);
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "*>".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("Int".into()),
+                    insert_text: Some("(*>)".to_string()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
+    });
+}
+
+#[test]
 fn prelude_completion() {
     support::send_rpc(|stdin, stdout| {
         support::did_open(stdin, "test", "no");
