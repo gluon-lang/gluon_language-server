@@ -128,19 +128,20 @@ where
     R: BufRead,
 {
     while let Some(json) = read_message(&mut output).unwrap() {
-        if let Ok(Notification {
-            params: Some(params),
-            ..
-        }) = from_str(&json)
-        {
-            let json_value = match params {
-                Params::Map(map) => Value::Object(map),
-                Params::Array(array) => Value::Array(array),
-                Params::None => Value::Null,
-            };
-            return from_value(json_value).unwrap();
-        } else {
-            panic!("Expected notification, got `{}`", json)
+        match from_str(&json) {
+            Ok(Notification {
+                params: Some(params),
+                ..
+            }) => {
+                let json_value = match params {
+                    Params::Map(map) => Value::Object(map),
+                    Params::Array(array) => Value::Array(array),
+                    Params::None => Value::Null,
+                };
+                return from_value(json_value).unwrap();
+            }
+            Ok(_) => panic!("Expected notification\n{}", json),
+            Err(err) => panic!("Expected notification, got `{}`\n{}", err, json),
         }
     }
     panic!("Expected a notification")
