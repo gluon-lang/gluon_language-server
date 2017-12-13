@@ -15,6 +15,7 @@ use serde_json::{from_value, to_string, to_value};
 
 use BoxFuture;
 
+#[derive(Debug)]
 pub struct ServerError<E> {
     pub message: String,
     pub data: Option<E>,

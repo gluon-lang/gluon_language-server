@@ -49,6 +49,7 @@ macro_rules! try_future {
 }
 
 pub mod rpc;
+mod text_edit;
 mod async_io;
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
@@ -73,11 +74,12 @@ use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as
 
 use completion::CompletionSymbol;
 
-use std::collections::BTreeMap;
+use std::collections::{hash_map, BTreeMap};
 use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
+use std::mem;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::str;
@@ -102,6 +104,7 @@ use bytes::BytesMut;
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
+use text_edit::TextChanges;
 
 fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), ()> {
     debug!("{}", message);
@@ -166,6 +169,7 @@ fn completion_symbol_to_symbol_information(
     })
 }
 
+
 struct Module {
     lines: source::Lines,
     expr: SpannedExpr<Symbol>,
@@ -173,10 +177,27 @@ struct Module {
     uri: Url,
     dirty: bool,
     waiters: Vec<oneshot::Sender<()>>,
+    version: Option<u64>,
+    text_changes: TextChanges,
+}
+
+impl Module {
+    fn empty(uri: Url) -> Module {
+        Module {
+            lines: source::Lines::new("".bytes()),
+            expr: pos::spanned2(0.into(), 0.into(), Expr::Error(None)),
+            source: Arc::new("".to_string()),
+            uri,
+            dirty: false,
+            waiters: Vec::new(),
+            version: None,
+            text_changes: TextChanges::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
-struct CheckImporter(Arc<Mutex<FnvMap<String, Source>>>, reactor::Remote);
+struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>, reactor::Remote);
 impl CheckImporter {
     fn new(remote: reactor::Remote) -> CheckImporter {
         CheckImporter(Arc::new(Mutex::new(FnvMap::default())), remote)
@@ -206,16 +227,18 @@ impl Importer for CheckImporter {
 
         let previous = self.0.lock().unwrap().insert(
             module_name.into(),
-            Source::Opened(self::Module {
+            self::Module {
                 lines: lines,
                 expr: expr,
                 source: Arc::new(input.into()),
                 uri: module_name_to_file_(module_name).map_err(|err| (None, err.into()))?,
                 dirty: false,
                 waiters: Vec::new(),
-            }),
+                version: None,
+                text_changes: TextChanges::new(),
+            },
         );
-        if let Some(Source::Opened(previous_module)) = previous {
+        if let Some(previous_module) = previous {
             self.1.spawn(move |_| {
                 future::join_all(
                     previous_module
@@ -295,7 +318,7 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
-    match importer.get_mut(&module).and_then(|m| m.as_mut_module()) {
+    match importer.get_mut(&module) {
         Some(source_module) => return f(source_module),
         None => (),
     }
@@ -322,19 +345,16 @@ where
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let source_module = importer
-        .get(&module)
-        .and_then(|m| m.as_module())
-        .ok_or_else(|| {
-            ServerError {
-                message: format!(
-                    "Module `{}` is not defined\n{:?}",
-                    module,
-                    importer.keys().collect::<Vec<_>>()
-                ),
-                data: None,
-            }
-        })?;
+    let source_module = importer.get(&module).ok_or_else(|| {
+        ServerError {
+            message: format!(
+                "Module `{}` is not defined\n{:?}",
+                module,
+                importer.keys().collect::<Vec<_>>()
+            ),
+            data: None,
+        }
+    })?;
     f(source_module)
 }
 
@@ -550,46 +570,6 @@ fn range_to_byte_span(
     ))
 }
 
-fn apply_changes(
-    message_log: &mpsc::Sender<String>,
-    arc_source: &mut Arc<String>,
-    uri: &Url,
-    content_changes: Vec<TextDocumentContentChangeEvent>,
-) -> BoxFuture<Arc<String>, ()> {
-    {
-        let source = Arc::make_mut(arc_source);
-        debug!("Change source {}:\n{}", uri, source);
-        for change in content_changes {
-            let lines = source::Lines::new(source.as_bytes().iter().cloned());
-            match apply_change(source, &lines, change) {
-                Ok(()) => (),
-                Err(err) => {
-                    return Box::new(
-                        log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())),
-                    )
-                }
-            }
-        }
-    }
-    Box::new(Ok(arc_source.clone()).into_future())
-}
-
-fn apply_change(
-    source: &mut String,
-    lines: &source::Lines,
-    change: TextDocumentContentChangeEvent,
-) -> Result<(), ServerError<()>> {
-    info!("Applying change: {:?}", change);
-    let span = match (change.range, change.range_length) {
-        (None, None) => Span::new(0.into(), source.len().into()),
-        (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
-        (None, Some(_)) => return Err("Invalid change".into()),
-    };
-    source.drain(span.start.to_usize()..span.end.to_usize());
-    source.insert_str(span.start.to_usize(), &change.text);
-    Ok(())
-}
-
 fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
     let mut result = s.replace(".", "/");
     result.push_str(".glu");
@@ -608,7 +588,7 @@ fn module_name_to_file(importer: &CheckImporter, s: &str) -> Url {
         .lock()
         .unwrap()
         .get(s)
-        .map(|source| source.uri().clone())
+        .map(|source| source.uri.clone())
         .unwrap_or_else(|| module_name_to_file_(s).unwrap())
 }
 
@@ -657,6 +637,7 @@ fn typecheck(
     thread: &Thread,
     remote: &reactor::Remote,
     uri_filename: &Url,
+    version: u64,
     fileinput: &str,
 ) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
@@ -702,27 +683,36 @@ fn typecheck(
     let mut importer = import.importer.0.lock().unwrap();
 
     let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
-    let previous = importer.insert(
-        name.into(),
-        Source::Opened(self::Module {
-            lines: lines,
-            expr: expr,
-            source: Arc::new(fileinput.into()),
-            uri: uri_filename.clone(),
-            dirty: false,
-            waiters: Vec::new(),
-        }),
-    );
-    if let Some(Source::Opened(previous_module)) = previous {
-        remote.spawn(move |_| {
-            future::join_all(
-                previous_module
-                    .waiters
-                    .into_iter()
-                    .map(|sender| sender.send(())),
-            ).map(|_| ())
-                .map_err(|_| ())
-        });
+    match importer.entry(name.into()) {
+        hash_map::Entry::Occupied(mut entry) => {
+            let module = entry.get_mut();
+
+            module.lines = lines;
+            module.expr = expr;
+            module.source = Arc::new(fileinput.into());
+            module.uri = uri_filename.clone();
+
+            module.dirty = false;
+
+            let waiters = mem::replace(&mut module.waiters, Vec::new());
+            remote.spawn(move |_| {
+                future::join_all(waiters.into_iter().map(|sender| sender.send(())))
+                    .map(|_| ())
+                    .map_err(|_| ())
+            });
+        }
+        hash_map::Entry::Vacant(entry) => {
+            entry.insert(self::Module {
+                lines: lines,
+                expr: expr,
+                source: Arc::new(fileinput.into()),
+                uri: uri_filename.clone(),
+                dirty: false,
+                waiters: Vec::new(),
+                version: Some(version),
+                text_changes: TextChanges::new(),
+            });
+        }
     }
 
     if errors.is_empty() {
@@ -792,13 +782,19 @@ fn schedule_diagnostics(
     cpu_pool: &CpuPool,
     thread: RootedThread,
     filename: Url,
+    version: u64,
     fileinput: Arc<String>,
 ) {
-    handle.spawn(
-        cpu_pool.spawn_fn(move || {
-            run_diagnostics(&thread, &remote, message_log, &filename, &fileinput)
-        }),
-    )
+    handle.spawn(cpu_pool.spawn_fn(move || {
+        run_diagnostics(
+            &thread,
+            &remote,
+            message_log,
+            &filename,
+            version,
+            &fileinput,
+        )
+    }))
 }
 
 fn run_diagnostics(
@@ -806,11 +802,12 @@ fn run_diagnostics(
     remote: &reactor::Remote,
     message_log: mpsc::Sender<String>,
     filename: &Url,
+    version: u64,
     fileinput: &str,
 ) -> BoxFuture<(), ()> {
     info!("Running diagnostics on {}", filename);
 
-    let diagnostics = match typecheck(thread, remote, filename, fileinput) {
+    let diagnostics = match typecheck(thread, remote, filename, version, fileinput) {
         Ok(_) => Some((filename.clone(), vec![])).into_iter().collect(),
         Err(err) => {
             debug!("Diagnostics result on `{}`: {}", filename, err);
@@ -963,34 +960,6 @@ where
     Ok(())
 }
 
-enum Source {
-    Opened(Module),
-    UncommitedChanges(Vec<TextDocumentContentChangeEvent>, Url),
-}
-
-impl Source {
-    fn as_module(&self) -> Option<&Module> {
-        match *self {
-            Source::Opened(ref module) => Some(module),
-            Source::UncommitedChanges(..) => None,
-        }
-    }
-
-    fn as_mut_module(&mut self) -> Option<&mut Module> {
-        match *self {
-            Source::Opened(ref mut module) => Some(module),
-            Source::UncommitedChanges(..) => None,
-        }
-    }
-
-    fn uri(&self) -> &Url {
-        match *self {
-            Source::Opened(ref module) => &module.uri,
-            Source::UncommitedChanges(_, ref uri) => uri,
-        }
-    }
-}
-
 trait Handler {
     fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
     where
@@ -1070,6 +1039,7 @@ fn initialize_rpc(
                         &cpu_pool,
                         thread,
                         entry.key,
+                        0, // Dummy value (the module should exist already in which case we don't use this)
                         entry.value,
                     );
                     Ok(())
@@ -1222,7 +1192,7 @@ fn initialize_rpc(
 
                 let mut symbols = Vec::<SymbolInformation>::new();
 
-                for module in modules.values().filter_map(|m| m.as_module()) {
+                for module in modules.values() {
                     symbols.extend(completion::all_symbols(&module.expr)
                         .into_iter()
                         .filter(|symbol| match symbol.value {
@@ -1279,6 +1249,10 @@ fn initialize_rpc(
                     &cpu_pool,
                     thread,
                     change.text_document.uri,
+                    change
+                        .text_document
+                        .version
+                        .expect("Text document version must exist"),
                     Arc::new(change.text_document.text),
                 );
                 Ok(())
@@ -1306,40 +1280,51 @@ fn initialize_rpc(
         let module_name = strip_file_prefix(&paths, &change.text_document.uri)
             .unwrap_or_else(|err| panic!("{}", err));
         let module_name = filename_to_module(&module_name);
-        let source = modules
+        let module = modules
             .entry(module_name)
-            .or_insert_with(|| Source::UncommitedChanges(vec![], change.text_document.uri.clone()));
+            .or_insert_with(|| self::Module::empty(change.text_document.uri.clone()));
 
-        match *source {
-            Source::Opened(ref mut module) => {
-                module.dirty = true;
+        module
+            .text_changes
+            .add(change.text_document.version, change.content_changes);
 
-                let uri = change.text_document.uri;
-                // If the module was loaded via `import!` before we open it in the editor
-                // `module.uri` has been set by looking at the current working directory which is
-                // not necessarily correct (works in VS code but not with (neo)vim) so update the
-                // uri to match the one supplied by the client to mensure errors show up.
-                if module.uri != uri {
-                    module.uri.clone_from(&uri);
+        module.dirty = true;
+
+        let uri = change.text_document.uri;
+        // If the module was loaded via `import!` before we open it in the editor
+        // `module.uri` has been set by looking at the current working directory which is
+        // not necessarily correct (works in VS code but not with (neo)vim) so update the
+        // uri to match the one supplied by the client to ensure errors show up.
+        if module.uri != uri {
+            module.uri.clone_from(&uri);
+        }
+        let result = {
+            let source = Arc::make_mut(&mut module.source);
+            debug!("Change source {}:\n{}", uri, source);
+
+            match module.version {
+                Some(current_version) => module.text_changes.apply_changes(source, current_version),
+                None => return Box::new(Ok(()).into_future()),
+            }
+        };
+        match result {
+            Ok(new_version) => {
+                if Some(new_version) == module.version {
+                    return Box::new(Ok(()).into_future());
                 }
-                let fut = apply_changes(
-                    &message_log,
-                    &mut module.source,
-                    &uri,
-                    change.content_changes,
-                );
-                Box::new(fut.and_then(|arc_source| {
+                module.version = Some(new_version);
+                let arc_source = module.source.clone();
+                Box::new(
                     work_queue
                         .send(Entry {
                             key: uri,
                             value: arc_source,
                         })
-                        .map(|_| ())
-                }))
+                        .map(|_| ()),
+                )
             }
-            Source::UncommitedChanges(ref mut changes, _) => {
-                changes.extend(change.content_changes);
-                Box::new(Ok(()).into_future())
+            Err(err) => {
+                Box::new(log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())))
             }
         }
     }
@@ -1375,7 +1360,7 @@ mod tests {
 
     use url::Url;
 
-    use super::strip_file_prefix;
+    use super::*;
 
     #[test]
     fn test_strip_file_prefix() {

@@ -44,7 +44,7 @@ where
     support::write_message(stdin, hover).unwrap();
 }
 
-fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, range: Range, text: &str)
+fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
 where
     W: Write,
 {
@@ -53,7 +53,7 @@ where
         DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
                 uri: support::test_url(uri),
-                version: 1,
+                version,
             },
             content_changes: vec![
                 TextDocumentContentChangeEvent {
@@ -297,6 +297,7 @@ test2
         did_change(
             stdin,
             "test",
+            2,
             Range {
                 start: Position {
                     line: 3,
@@ -308,6 +309,82 @@ test2
                 },
             },
             "st1",
+        );
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        completion(
+            stdin,
+            1,
+            "test",
+            Position {
+                line: 3,
+                character: 2,
+            },
+        );
+
+        let completions = expect_response(stdout);
+
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "test1".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("String".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
+    });
+}
+
+#[test]
+fn local_completion_out_of_order_update() {
+    support::send_rpc(|stdin, stdout| {
+        let text = r#"
+let test = 2
+let test1 = ""
+test2
+"#;
+
+        support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        did_change(
+            stdin,
+            "test",
+            3,
+            Range {
+                start: Position {
+                    line: 3,
+                    character: 3,
+                },
+                end: Position {
+                    line: 3,
+                    character: 5,
+                },
+            },
+            "t1",
+        );
+
+        did_change(
+            stdin,
+            "test",
+            2,
+            Range {
+                start: Position {
+                    line: 3,
+                    character: 2,
+                },
+                end: Position {
+                    line: 3,
+                    character: 3,
+                },
+            },
+            "s",
         );
 
         let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
