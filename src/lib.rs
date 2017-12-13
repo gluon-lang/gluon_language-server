@@ -909,7 +909,7 @@ impl Handler for IoHandler {
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize,
     {
-        MetaIoHandler::add_async_method(self, T::METHOD, ServerCommand::method(method))
+        MetaIoHandler::add_method(self, T::METHOD, ServerCommand::method(method))
     }
     fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
     where

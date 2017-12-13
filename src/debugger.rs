@@ -666,7 +666,7 @@ where
     });
 
     let mut io = IoHandler::new();
-    io.add_async_method(
+    io.add_method(
         "initialize",
         ServerCommand::method(InitializeHandler {
             debugger: debugger.clone(),
@@ -680,16 +680,16 @@ where
             debugger.continue_barrier.wait();
             Box::new(Ok(()).into_future())
         };
-        io.add_async_method("configurationDone", ServerCommand::method(handler));
+        io.add_method("configurationDone", ServerCommand::method(handler));
     }
 
-    io.add_async_method(
+    io.add_method(
         "launch",
         ServerCommand::method(LaunchHandler {
             debugger: debugger.clone(),
         }),
     );
-    io.add_async_method(
+    io.add_method(
         "disconnect",
         ServerCommand::method(DisconnectHandler {
             exit_token: exit_token.clone(),
@@ -740,7 +740,7 @@ where
             )
         };
 
-        io.add_async_method("setBreakpoints", ServerCommand::method(set_break));
+        io.add_method("setBreakpoints", ServerCommand::method(set_break));
     }
 
     let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
@@ -756,7 +756,7 @@ where
         )
     };
 
-    io.add_async_method("threads", ServerCommand::method(threads));
+    io.add_method("threads", ServerCommand::method(threads));
 
     {
         let debugger = debugger.clone();
@@ -819,7 +819,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("stackTrace", ServerCommand::method(stack_trace));
+        io.add_method("stackTrace", ServerCommand::method(stack_trace));
     }
 
     {
@@ -863,7 +863,7 @@ where
             }
             Box::new(Ok(ScopesResponseBody { scopes: scopes }).into_future())
         };
-        io.add_async_method("scopes", ServerCommand::method(scopes));
+        io.add_method("scopes", ServerCommand::method(scopes));
     }
 
     {
@@ -876,7 +876,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("continue", ServerCommand::method(cont));
+        io.add_method("continue", ServerCommand::method(cont));
     }
 
     {
@@ -897,7 +897,7 @@ where
             };
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("next", ServerCommand::method(cont));
+        io.add_method("next", ServerCommand::method(cont));
     }
 
     {
@@ -907,7 +907,7 @@ where
             debugger.pause.store(STEP_IN, Ordering::Release);
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("stepIn", ServerCommand::method(cont));
+        io.add_method("stepIn", ServerCommand::method(cont));
     }
 
     {
@@ -928,7 +928,7 @@ where
             };
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("stepOut", ServerCommand::method(cont));
+        io.add_method("stepOut", ServerCommand::method(cont));
     }
 
     {
@@ -937,7 +937,7 @@ where
             debugger.pause.store(PAUSE, Ordering::Release);
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("pause", ServerCommand::method(cont));
+        io.add_method("pause", ServerCommand::method(cont));
     }
 
     {
@@ -950,7 +950,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("variables", ServerCommand::method(cont));
+        io.add_method("variables", ServerCommand::method(cont));
     }
 
     // The response needs the command so we need extract it from the request and inject it

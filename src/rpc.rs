@@ -95,6 +95,7 @@ where
     T: LanguageServerCommand<P>,
     P: for<'de> serde::Deserialize<'de> + 'static,
 {
+    type Out = BoxFuture<Value, Error>;
     fn call(&self, param: Params) -> BoxFuture<Value, Error> {
         let value = match param {
             Params::Map(map) => Value::Object(map),
