@@ -39,7 +39,7 @@ use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{arg_iter, ArcType, Type};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
-use gluon::vm::thread::{RootedThread, Thread as GluonThread, ThreadInternal, LINE_FLAG};
+use gluon::vm::thread::{HookFlags, RootedThread, Thread as GluonThread, ThreadInternal};
 use gluon::{filename_to_module, Compiler, Error as GluonError};
 use gluon::import::Import;
 
@@ -99,12 +99,14 @@ impl LanguageServerCommand<Value> for LaunchHandler {
 
 impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
-        let program = args.get("program").and_then(|s| s.as_str()).ok_or_else(|| {
-            ServerError {
-                message: "No program argument found".into(),
-                data: None,
-            }
-        })?;
+        let program = args.get("program")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                ServerError {
+                    message: "No program argument found".into(),
+                    data: None,
+                }
+            })?;
         let program = strip_file_prefix(&self.debugger.thread, program);
         let module = filename_to_module(&program);
         let expr = {
@@ -126,10 +128,7 @@ impl LaunchHandler {
             .context()
             .set_hook(Some(Box::new(move |_, debug_info| {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
-                    let stack_info =
-                    debug_info
-                        .stack_info(0)
-                        .unwrap();
+                let stack_info = debug_info.stack_info(0).unwrap();
                 debug!(
                     "Debugger at `{}:{}` {}. Reason {}",
                     stack_info.source_name(),
@@ -173,10 +172,9 @@ impl LaunchHandler {
                         let stack_info = debug_info.stack_info(0).unwrap();
                         let line = stack_info.line();
                         match line {
-                            Some(line) 
-                                if debugger.should_break(stack_info.source_name(), line) => {
-                                    debug!("Breaking on {}", line);
-                                    "breakpoint"
+                            Some(line) if debugger.should_break(stack_info.source_name(), line) => {
+                                debug!("Breaking on {}", line);
+                                "breakpoint"
                             }
                             _ => return Ok(Async::Ready(())),
                         }
@@ -214,8 +212,11 @@ impl LaunchHandler {
             )).and_then(|compile_value| {
                 // Since we cannot yield while importing modules we don't enable pausing or
                 // breakpoints until we start executing the main module
-                debugger.thread.context().set_hook_mask(LINE_FLAG);
-                compile_value.run_expr(&mut compiler, &debugger.thread, &module, &expr, ())
+                debugger
+                    .thread
+                    .context()
+                    .set_hook_mask(HookFlags::LINE_FLAG);
+                compile_value.run_expr(&mut compiler, &*debugger.thread, &module, &expr, ())
             })
                 .map(|_| ());
             let mut result = match run_future {
@@ -699,14 +700,13 @@ where
         let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
             let breakpoints = args.breakpoints
                 .iter()
-                .flat_map(|bs| {
-                    bs.iter().map(|breakpoint| debugger.line(breakpoint.line))
-                })
+                .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
                 .collect();
 
-            let opt = args.source.path.as_ref().map(|path| {
-                filename_to_module(&strip_file_prefix(&debugger.thread, path))
-            });
+            let opt = args.source
+                .path
+                .as_ref()
+                .map(|path| filename_to_module(&strip_file_prefix(&debugger.thread, path)));
             if let Some(path) = opt {
                 let mut sources = debugger.sources.lock().unwrap();
                 sources.insert(

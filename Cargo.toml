@@ -54,10 +54,10 @@ gluon_format = "0.6.1"
 pretty_assertions = "0.2.0"
 
 [patch.crates-io]
-gluon_base = { git = "https://github.com/gluon-lang/gluon", branch = "master" }
-gluon_parser = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
-gluon_check = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
-gluon_vm = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
-gluon = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
-gluon_completion = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
-gluon_format = { git = "https://github.com/gluon-lang/gluon", branch = "master"  }
+gluon_base = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7" }
+gluon_parser = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
+gluon_check = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
+gluon_vm = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
+gluon = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
+gluon_completion = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
+gluon_format = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }

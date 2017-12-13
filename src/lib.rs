@@ -205,7 +205,7 @@ impl Importer for CheckImporter {
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
             .set_global(
-                Symbol::from(module_name),
+                Symbol::from(format!("@{}", module_name)),
                 typ.clone(),
                 metadata,
                 GluonValue::Int(0),
@@ -323,7 +323,10 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                     ..
                 } = *module;
                 let byte_pos = position_to_byte_pos(lines, &change.position)?;
-                Ok(completion::suggest(&*thread.get_env(), expr, byte_pos))
+                Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)
+                    .into_iter()
+                    .filter(|suggestion| !suggestion.name.starts_with("__"))
+                    .collect::<Vec<_>>())
             })?;
 
             let mut items: Vec<_> = suggestions
@@ -592,7 +595,7 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
             expr
         }
     };
-    if let Err((_, err)) = expr.expand_macro(&mut compiler, thread, &name) {
+    if let Err((_, err)) = (&mut expr).expand_macro(&mut compiler, thread, &name) {
         errors.push(err);
     }
 
@@ -607,9 +610,12 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
         }
     };
     let metadata = Metadata::default();
-    thread
-        .global_env()
-        .set_global(Symbol::from(&name[..]), typ, metadata, GluonValue::Int(0))?;
+    thread.global_env().set_global(
+        Symbol::from(format!("@{}", name)),
+        typ,
+        metadata,
+        GluonValue::Int(0),
+    )?;
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -838,14 +844,7 @@ where
                 x
             })
             .for_each(|message| -> Result<(), Box<StdError + Send + Sync>> {
-                write!(
-                    output,
-                    "Content-Length: {}\r\n\r\n{}",
-                    message.len(),
-                    message
-                )?;
-                output.flush().unwrap();
-                Ok(())
+                Ok(write_message_str(&mut output, &message)?)
             }),
     );
 
