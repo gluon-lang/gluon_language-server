@@ -39,6 +39,15 @@ macro_rules! log_message {
     }
 }
 
+macro_rules! try_future {
+    ($e: expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(err) => return Box::new(Err(err.into()).into_future())
+        }
+    }
+}
+
 pub mod rpc;
 mod async_io;
 
@@ -162,13 +171,15 @@ struct Module {
     expr: SpannedExpr<Symbol>,
     source: Arc<String>,
     uri: Url,
+    dirty: bool,
+    waiters: Vec<oneshot::Sender<()>>,
 }
 
 #[derive(Clone)]
-struct CheckImporter(Arc<Mutex<FnvMap<String, Source>>>);
+struct CheckImporter(Arc<Mutex<FnvMap<String, Source>>>, reactor::Remote);
 impl CheckImporter {
-    fn new() -> CheckImporter {
-        CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
+    fn new(remote: reactor::Remote) -> CheckImporter {
+        CheckImporter(Arc::new(Mutex::new(FnvMap::default())), remote)
     }
 }
 impl Importer for CheckImporter {
@@ -193,15 +204,28 @@ impl Importer for CheckImporter {
         let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
 
-        self.0.lock().unwrap().insert(
+        let previous = self.0.lock().unwrap().insert(
             module_name.into(),
             Source::Opened(self::Module {
                 lines: lines,
                 expr: expr,
                 source: Arc::new(input.into()),
                 uri: module_name_to_file_(module_name).map_err(|err| (None, err.into()))?,
+                dirty: false,
+                waiters: Vec::new(),
             }),
         );
+        if let Some(Source::Opened(previous_module)) = previous {
+            self.1.spawn(move |_| {
+                future::join_all(
+                    previous_module
+                        .waiters
+                        .into_iter()
+                        .map(|sender| sender.send(())),
+                ).map(|_| ())
+                    .map_err(|_| ())
+            });
+        }
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
             .set_global(
@@ -253,6 +277,38 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
     fn invalid_params(&self) -> Option<Self::Error> {
         Some(InitializeError { retry: false })
     }
+}
+
+fn retrieve_expr_future<F, R>(
+    thread: &Thread,
+    text_document_uri: &Url,
+    f: F,
+) -> BoxFuture<R, ServerError<()>>
+where
+    F: FnOnce(&mut Module) -> BoxFuture<R, ServerError<()>>,
+    R: Send + 'static,
+{
+    let filename = strip_file_prefix_with_thread(thread, text_document_uri);
+    let module = filename_to_module(&filename);
+    let import = thread.get_macros().get("import").expect("Import macro");
+    let import = import
+        .downcast_ref::<Import<CheckImporter>>()
+        .expect("Check importer");
+    let mut importer = import.importer.0.lock().unwrap();
+    match importer.get_mut(&module).and_then(|m| m.as_mut_module()) {
+        Some(source_module) => return f(source_module),
+        None => (),
+    }
+    Box::new(
+        Err(ServerError {
+            message: format!(
+                "Module `{}` is not defined\n{:?}",
+                module,
+                importer.keys().collect::<Vec<_>>()
+            ),
+            data: None,
+        }).into_future(),
+    )
 }
 
 fn retrieve_expr<F, R>(thread: &Thread, text_document_uri: &Url, f: F) -> Result<R, ServerError<()>>
@@ -309,25 +365,43 @@ pub struct CompletionData {
     pub position: Position,
 }
 
+#[derive(Clone)]
 struct Completion(RootedThread);
 impl LanguageServerCommand<CompletionParams> for Completion {
     type Output = CompletionResponse;
     type Error = ();
     fn execute(&self, change: CompletionParams) -> BoxFuture<CompletionResponse, ServerError<()>> {
-        let result = (move || -> Result<_, _> {
-            let thread = &self.0;
-            let suggestions = retrieve_expr(&thread, &change.text_document.uri, |module| {
-                let Module {
-                    ref expr,
-                    ref lines,
-                    ..
-                } = *module;
-                let byte_pos = position_to_byte_pos(lines, &change.position)?;
-                Ok(completion::suggest(&*thread.get_env(), expr, byte_pos)
-                    .into_iter()
-                    .filter(|suggestion| !suggestion.name.starts_with("__"))
-                    .collect::<Vec<_>>())
-            })?;
+        let thread = &self.0;
+        let self_ = self.clone();
+        let text_document_uri = change.text_document.uri.clone();
+        let result = retrieve_expr_future(&thread, &text_document_uri, |module| {
+            let Module {
+                ref expr,
+                ref lines,
+                dirty,
+                ref mut waiters,
+                ..
+            } = *module;
+
+            if dirty {
+                let (sender, receiver) = oneshot::channel();
+                waiters.push(sender);
+                return Box::new(
+                    receiver
+                        .map_err(|_| {
+                            let msg = "Completion sender was unexpectedly dropped";
+                            error!("{}", msg);
+                            ServerError::from(msg.to_string())
+                        })
+                        .and_then(move |_| self_.clone().execute(change)),
+                );
+            }
+
+            let byte_pos = try_future!(position_to_byte_pos(lines, &change.position));
+            let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos)
+                .into_iter()
+                .filter(|suggestion| !suggestion.name.starts_with("__"))
+                .collect::<Vec<_>>();
 
             let mut items: Vec<_> = suggestions
                 .into_iter()
@@ -357,8 +431,8 @@ impl LanguageServerCommand<CompletionParams> for Completion {
 
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
-            Ok(CompletionResponse::Array(items))
-        })();
+            Box::new(Ok(CompletionResponse::Array(items)).into_future())
+        });
         Box::new(result.into_future())
     }
 
@@ -579,7 +653,12 @@ pub fn strip_file_prefix(
     ))
 }
 
-fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResult<()> {
+fn typecheck(
+    thread: &Thread,
+    remote: &reactor::Remote,
+    uri_filename: &Url,
+    fileinput: &str,
+) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
     let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
@@ -623,15 +702,29 @@ fn typecheck(thread: &Thread, uri_filename: &Url, fileinput: &str) -> GluonResul
     let mut importer = import.importer.0.lock().unwrap();
 
     let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
-    importer.insert(
+    let previous = importer.insert(
         name.into(),
         Source::Opened(self::Module {
             lines: lines,
             expr: expr,
             source: Arc::new(fileinput.into()),
             uri: uri_filename.clone(),
+            dirty: false,
+            waiters: Vec::new(),
         }),
     );
+    if let Some(Source::Opened(previous_module)) = previous {
+        remote.spawn(move |_| {
+            future::join_all(
+                previous_module
+                    .waiters
+                    .into_iter()
+                    .map(|sender| sender.send(())),
+            ).map(|_| ())
+                .map_err(|_| ())
+        });
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -694,6 +787,7 @@ fn create_diagnostics(
 
 fn schedule_diagnostics(
     handle: &reactor::Handle,
+    remote: reactor::Remote,
     message_log: mpsc::Sender<String>,
     cpu_pool: &CpuPool,
     thread: RootedThread,
@@ -701,19 +795,22 @@ fn schedule_diagnostics(
     fileinput: Arc<String>,
 ) {
     handle.spawn(
-        cpu_pool.spawn_fn(move || run_diagnostics(&thread, message_log, &filename, &fileinput)),
+        cpu_pool.spawn_fn(move || {
+            run_diagnostics(&thread, &remote, message_log, &filename, &fileinput)
+        }),
     )
 }
 
 fn run_diagnostics(
     thread: &Thread,
+    remote: &reactor::Remote,
     message_log: mpsc::Sender<String>,
     filename: &Url,
     fileinput: &str,
 ) -> BoxFuture<(), ()> {
     info!("Running diagnostics on {}", filename);
 
-    let diagnostics = match typecheck(thread, filename, fileinput) {
+    let diagnostics = match typecheck(thread, remote, filename, fileinput) {
         Ok(_) => Some((filename.clone(), vec![])).into_iter().collect(),
         Err(err) => {
             debug!("Diagnostics result on `{}`: {}", filename, err);
@@ -786,9 +883,10 @@ where
 {
     let _ = ::env_logger::init();
 
+    let mut core = reactor::Core::new().unwrap();
     {
         let macros = thread.get_macros();
-        let mut check_import = Import::new(CheckImporter::new());
+        let mut check_import = Import::new(CheckImporter::new(core.remote()));
         {
             let import = macros.get("import").expect("Import macro");
             let import = import.downcast_ref::<Import>().expect("Importer");
@@ -806,7 +904,6 @@ where
         macros.insert("import".into(), check_import);
     }
 
-    let mut core = reactor::Core::new().unwrap();
     let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) =
         initialize_rpc(&thread, core.remote());
 
@@ -875,6 +972,13 @@ impl Source {
     fn as_module(&self) -> Option<&Module> {
         match *self {
             Source::Opened(ref module) => Some(module),
+            Source::UncommitedChanges(..) => None,
+        }
+    }
+
+    fn as_mut_module(&mut self) -> Option<&mut Module> {
+        match *self {
+            Source::Opened(ref mut module) => Some(module),
             Source::UncommitedChanges(..) => None,
         }
     }
@@ -956,10 +1060,12 @@ fn initialize_rpc(
                 let thread = thread.clone();
                 let cpu_pool = cpu_pool.clone();
                 let message_log = message_log.clone();
+                let core_remote2 = core_remote.clone();
 
                 core_remote.spawn(move |core_handle| {
                     schedule_diagnostics(
                         core_handle,
+                        core_remote2,
                         message_log,
                         &cpu_pool,
                         thread,
@@ -1163,10 +1269,12 @@ fn initialize_rpc(
             let message_log = message_log.clone();
             let thread = thread.clone();
             let cpu_pool = cpu_pool.clone();
+            let core_remote2 = core_remote.clone();
 
             core_remote.spawn(move |core_handle| {
                 schedule_diagnostics(
                     core_handle,
+                    core_remote2,
                     message_log,
                     &cpu_pool,
                     thread,
@@ -1204,6 +1312,8 @@ fn initialize_rpc(
 
         match *source {
             Source::Opened(ref mut module) => {
+                module.dirty = true;
+
                 let uri = change.text_document.uri;
                 // If the module was loaded via `import!` before we open it in the editor
                 // `module.uri` has been set by looking at the current working directory which is
