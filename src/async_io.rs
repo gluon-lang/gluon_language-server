@@ -85,7 +85,7 @@ impl Read for AsyncRead {
                         Err(_) => ErrorKind::BrokenPipe.into(),
                     },
                     Ok(AsyncSink::NotReady(_)) => {
-                        Error::new(ErrorKind::Other, "Read thread has stopped")
+                        Error::new(ErrorKind::Other, "Read thread2 has stopped")
                     }
                     Err(_) => match self.result_receiver.poll() {
                         Ok(Async::Ready(Some(Err(err)))) => err,

@@ -217,10 +217,13 @@ impl Importer for CheckImporter {
             .typecheck(compiler, vm, module_name, input)
             .map(|res| res.typ);
 
-        let typ = result
-            .as_ref()
-            .ok()
-            .map_or_else(|| expr.env_type_of(&*vm.get_env()), |typ| typ.clone());
+        let typ = result.as_ref().ok().map_or_else(
+            || {
+                expr.try_type_of(&*vm.get_env())
+                    .unwrap_or_else(|_| Type::hole())
+            },
+            |typ| typ.clone(),
+        );
 
         let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
@@ -666,7 +669,8 @@ fn typecheck(
         Ok(typ) => typ,
         Err(err) => {
             errors.push(err);
-            expr.env_type_of(&*thread.global_env().get_env())
+            expr.try_type_of(&*thread.global_env().get_env())
+                .unwrap_or_else(|_| Type::hole())
         }
     };
     let metadata = Metadata::default();
@@ -912,23 +916,25 @@ where
         writebuf: BytesMut::default(),
     };
     let future: BoxFuture<(), Box<StdError + Send + Sync>> = Box::new(
-        Framed::from_parts(parts, rpc::LanguageServerDecoder::new()).for_each(move |json| {
-            debug!("Handle: {}", json);
-            let message_log = message_log.clone();
-            io.handle_request(&json).then(move |result| {
-                if let Ok(Some(response)) = result {
-                    Either::A(
-                        message_log
-                            .clone()
-                            .send(response)
-                            .map(|_| ())
-                            .map_err(|_| "Unable to send".into()),
-                    )
-                } else {
-                    Either::B(Ok(()).into_future())
-                }
-            })
-        }),
+        Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
+            .map_err(|err| panic!("{}", err))
+            .for_each(move |json| {
+                debug!("Handle: {}", json);
+                let message_log = message_log.clone();
+                io.handle_request(&json).then(move |result| {
+                    if let Ok(Some(response)) = result {
+                        Either::A(
+                            message_log
+                                .clone()
+                                .send(response)
+                                .map(|_| ())
+                                .map_err(|_| "Unable to send".into()),
+                        )
+                    } else {
+                        Either::B(Ok(()).into_future())
+                    }
+                })
+            }),
     );
 
     let log_messages = Box::new(
@@ -1338,7 +1344,16 @@ fn initialize_rpc(
             let message_log = message_log.clone();
             core_remote.spawn(move |_| {
                 let work_queue = work_queue.clone();
-                did_change(&thread, message_log.clone(), work_queue.clone(), change)
+                ::std::panic::AssertUnwindSafe(did_change(
+                    &thread,
+                    message_log.clone(),
+                    work_queue.clone(),
+                    change,
+                )).catch_unwind()
+                    .map_err(|err| {
+                        error!("{:?}", err);
+                    })
+                    .and_then(|result| result)
             });
         };
 
