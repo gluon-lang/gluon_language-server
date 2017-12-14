@@ -49,7 +49,8 @@ impl TextChanges {
     ) -> Result<u64, ServerError<()>> {
         while let Some(change) = self.changes.pop_front() {
             assert!(
-                change.version > version,
+                (change.version == version && change.content_changes.is_empty())
+                    || change.version > version,
                 "BUG: Attempt to apply old change on newer contents"
             );
             if version + 1 != change.version {
