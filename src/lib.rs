@@ -904,7 +904,7 @@ where
     let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) =
         initialize_rpc(&thread, core.remote());
 
-    let input = BufReader::new(async_io::async_read(input));
+    let input = BufReader::new(async_io::async_read(&core.handle(), input));
 
     let parts = FramedParts {
         inner: input,
