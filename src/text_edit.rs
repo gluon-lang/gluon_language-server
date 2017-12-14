@@ -53,6 +53,9 @@ impl TextChanges {
                     || change.version > version,
                 "BUG: Attempt to apply old change on newer contents"
             );
+            if change.content_changes.is_empty() {
+                continue;
+            }
             if version + 1 != change.version {
                 self.changes.push_front(change);
                 break;
