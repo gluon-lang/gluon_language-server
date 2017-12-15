@@ -87,8 +87,11 @@ fn apply_change(
     let span = match (change.range, change.range_length) {
         (None, None) => Span::new(0.into(), source.len().into()),
         (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
-        (None, Some(_)) => return Err("Invalid change".into()),
+        (None, Some(_)) => panic!("Invalid change"),
     };
+    if let Some(range_length) = change.range_length {
+        assert!(range_length as usize == (span.end - span.start).to_usize());
+    }
     source.drain(span.start.to_usize()..span.end.to_usize());
     source.insert_str(span.start.to_usize(), &change.text);
     Ok(())

@@ -26,6 +26,12 @@ extern crate url_serde;
 
 extern crate bytes;
 
+#[cfg(test)]
+extern crate partial_io;
+#[cfg(test)]
+#[macro_use]
+extern crate quickcheck;
+
 #[macro_use]
 extern crate languageserver_types;
 
@@ -640,7 +646,7 @@ fn typecheck(
     thread: &Thread,
     remote: &reactor::Remote,
     uri_filename: &Url,
-    version: u64,
+    version: Option<u64>,
     fileinput: &str,
 ) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
@@ -686,15 +692,16 @@ fn typecheck(
         .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
 
-    let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
     match importer.entry(name.into()) {
         hash_map::Entry::Occupied(mut entry) => {
             let module = entry.get_mut();
 
-            module.lines = lines;
             module.expr = expr;
-            module.source = Arc::new(fileinput.into());
             module.uri = uri_filename.clone();
+
+            if version.is_some() {
+                module.version = version;
+            }
 
             module.dirty = false;
 
@@ -706,6 +713,7 @@ fn typecheck(
             });
         }
         hash_map::Entry::Vacant(entry) => {
+            let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
             entry.insert(self::Module {
                 lines: lines,
                 expr: expr,
@@ -713,7 +721,7 @@ fn typecheck(
                 uri: uri_filename.clone(),
                 dirty: false,
                 waiters: Vec::new(),
-                version: Some(version),
+                version: version,
                 text_changes: TextChanges::new(),
             });
         }
@@ -786,7 +794,7 @@ fn schedule_diagnostics(
     cpu_pool: &CpuPool,
     thread: RootedThread,
     filename: Url,
-    version: u64,
+    version: Option<u64>,
     fileinput: Arc<String>,
 ) {
     handle.spawn(cpu_pool.spawn_fn(move || {
@@ -806,7 +814,7 @@ fn run_diagnostics(
     remote: &reactor::Remote,
     message_log: mpsc::Sender<String>,
     filename: &Url,
-    version: u64,
+    version: Option<u64>,
     fileinput: &str,
 ) -> BoxFuture<(), ()> {
     info!("Running diagnostics on {}", filename);
@@ -1045,7 +1053,7 @@ fn initialize_rpc(
                         &cpu_pool,
                         thread,
                         entry.key,
-                        0, // Dummy value (the module should exist already in which case we don't use this)
+                        None,
                         entry.value,
                     );
                     Ok(())
@@ -1255,10 +1263,12 @@ fn initialize_rpc(
                     &cpu_pool,
                     thread,
                     change.text_document.uri,
-                    change
-                        .text_document
-                        .version
-                        .expect("Text document version must exist"),
+                    Some(
+                        change
+                            .text_document
+                            .version
+                            .expect("Text document version must exist"),
+                    ),
                     Arc::new(change.text_document.text),
                 );
                 Ok(())
@@ -1319,6 +1329,7 @@ fn initialize_rpc(
                     return Box::new(Ok(()).into_future());
                 }
                 module.version = Some(new_version);
+                module.lines = source::Lines::new(module.source.bytes());
                 let arc_source = module.source.clone();
                 Box::new(
                     work_queue
