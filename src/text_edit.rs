@@ -165,7 +165,7 @@ mod tests {
                             character: 3,
                         },
                     }),
-                    range_length: Some(2),
+                    range_length: Some(1),
                     text: "ab".to_string(),
                 },
             ],
