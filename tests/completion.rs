@@ -187,7 +187,7 @@ fn prelude_completion() {
             vec![
                 CompletionItem {
                     label: "not".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::Function),
                     detail: Some("std.types.Bool -> std.types.Bool".into()),
                     ..CompletionItem::default()
                 },

@@ -65,6 +65,7 @@ use url::Url;
 use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
+use gluon::base::kind::ArcKind;
 use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Line, Span, Spanned};
 use gluon::base::source;
@@ -77,6 +78,8 @@ use gluon::vm::macros::Error as MacroError;
 use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
             RootedThread};
+use gluon::either;
+
 
 use completion::CompletionSymbol;
 
@@ -144,6 +147,33 @@ fn type_to_kind(typ: &ArcType) -> SymbolKind {
             BuiltinType::Function => SymbolKind::Function,
         },
         _ => SymbolKind::Variable,
+    }
+}
+
+fn type_to_completion_item_kind(typ: &ArcType) -> CompletionItemKind {
+    match **typ {
+        _ if typ.as_function().is_some() => CompletionItemKind::Function,
+        Type::Alias(ref alias) => type_to_completion_item_kind(alias.unresolved_type()),
+        Type::App(ref f, _) => type_to_completion_item_kind(f),
+        Type::Variant(_) => CompletionItemKind::Enum,
+        Type::Record(_) => CompletionItemKind::Module,
+        _ => CompletionItemKind::Variable,
+    }
+}
+
+fn ident_to_completion_item_kind(
+    id: &str,
+    typ_or_kind: either::Either<&ArcKind, &ArcType>,
+) -> CompletionItemKind {
+    match typ_or_kind {
+        either::Either::Left(_) => CompletionItemKind::Class,
+        either::Either::Right(typ) => {
+            if id.starts_with(char::is_uppercase) {
+                CompletionItemKind::Constructor
+            } else {
+                type_to_completion_item_kind(typ)
+            }
+        }
     }
 }
 
@@ -444,9 +474,9 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                         } else {
                             Some(format!("({})", label))
                         },
+                        kind: Some(ident_to_completion_item_kind(&label, ident.typ.as_ref())),
                         label,
                         detail: Some(format!("{}", ident.typ)),
-                        kind: Some(CompletionItemKind::Variable),
                         data: Some(
                             serde_json::to_value(CompletionData {
                                 text_document_uri: change.text_document.uri.clone(),
