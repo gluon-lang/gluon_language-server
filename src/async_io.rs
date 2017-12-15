@@ -18,7 +18,7 @@ where
     let (size_sender, size_receiver) = channel(1);
     let (result_sender, result_receiver) = channel(1);
 
-    let future = Noisy(size_receiver, "size")
+    let future = size_receiver
         .map_err(|_| {
             panic!("Size sender shut down");
         })
@@ -32,7 +32,7 @@ where
                 Err(err) => Err(err),
             }
         })
-        .forward(Noisy(result_sender, "result").sink_map_err(|_| {
+        .forward(result_sender.sink_map_err(|_| {
             panic!("Result receiver shut down");
         }))
         .map(|_| ());
