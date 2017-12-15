@@ -52,6 +52,8 @@ gluon_format = "0.6.1"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
+partial-io = { version = "0.2.5", features = ["tokio", "quickcheck"] }
+quickcheck = "0.4.1"
 
 [patch.crates-io]
 gluon_base = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7" }
