@@ -35,12 +35,13 @@ use serde_json::Value;
 
 use debugserver_types::*;
 
+use gluon::base::filename_to_module;
 use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{arg_iter, ArcType, Type};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
 use gluon::vm::thread::{HookFlags, RootedThread, Thread as GluonThread, ThreadInternal};
-use gluon::{filename_to_module, Compiler, Error as GluonError};
+use gluon::{Compiler, Error as GluonError};
 use gluon::import::Import;
 
 use gluon_language_server::rpc::{read_message, write_message, write_message_str,
@@ -108,7 +109,7 @@ impl LaunchHandler {
                 }
             })?;
         let program = strip_file_prefix(&self.debugger.thread, program);
-        let module = filename_to_module(&program);
+        let module = format!("@{}", filename_to_module(&program));
         let expr = {
             let mut file = File::open(&*program).map_err(|_| {
                 ServerError {
@@ -703,10 +704,12 @@ where
                 .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
                 .collect();
 
-            let opt = args.source
-                .path
-                .as_ref()
-                .map(|path| filename_to_module(&strip_file_prefix(&debugger.thread, path)));
+            let opt = args.source.path.as_ref().map(|path| {
+                format!(
+                    "@{}",
+                    filename_to_module(&strip_file_prefix(&debugger.thread, path))
+                )
+            });
             if let Some(path) = opt {
                 let mut sources = debugger.sources.lock().unwrap();
                 sources.insert(

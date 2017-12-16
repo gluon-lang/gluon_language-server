@@ -62,6 +62,7 @@ use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use url::Url;
 
+use gluon::base::filename_to_module;
 use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
@@ -76,8 +77,7 @@ use gluon::vm::internal::Value as GluonValue;
 use gluon::vm::thread::{Thread, ThreadInternal};
 use gluon::vm::macros::Error as MacroError;
 use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
-use gluon::{filename_to_module, new_vm, Compiler, Error as GluonError, Result as GluonResult,
-            RootedThread};
+use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 use gluon::either;
 
 
@@ -351,7 +351,7 @@ where
     R: Send + 'static,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
-    let module = filename_to_module(&filename);
+    let module = format!("@{}", filename_to_module(&filename));
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -378,7 +378,7 @@ where
     F: FnOnce(&Module) -> Result<R, ServerError<()>>,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
-    let module = filename_to_module(&filename);
+    let module = format!("@{}", filename_to_module(&filename));
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -457,7 +457,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             }
 
             let byte_pos = try_future!(position_to_byte_pos(lines, &change.position));
-            let suggestions = completion::suggest(&*thread.get_env(), expr, byte_pos)
+
+            let query = completion::SuggestionQuery {
+                modules: with_import(thread, |import| import.modules()),
+                ..completion::SuggestionQuery::default()
+            };
+            let suggestions = query
+                .suggest(&*thread.get_env(), expr, byte_pos)
                 .into_iter()
                 .filter(|suggestion| !suggestion.name.starts_with("__"))
                 .collect::<Vec<_>>();
@@ -631,14 +637,22 @@ fn module_name_to_file(importer: &CheckImporter, s: &str) -> Url {
         .unwrap_or_else(|| module_name_to_file_(s).unwrap())
 }
 
-
-fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
+fn with_import<F, R>(thread: &Thread, f: F) -> R
+where
+    F: FnOnce(&Import<CheckImporter>) -> R,
+{
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    let paths = import.paths.read().unwrap();
-    strip_file_prefix(&paths, url).unwrap_or_else(|err| panic!("{}", err))
+    f(import)
+}
+
+fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
+    with_import(thread, |import| {
+        let paths = import.paths.read().unwrap();
+        strip_file_prefix(&paths, url).unwrap_or_else(|err| panic!("{}", err))
+    })
 }
 
 pub fn strip_file_prefix(
@@ -680,7 +694,7 @@ fn typecheck(
     fileinput: &str,
 ) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
-    let name = filename_to_module(&filename);
+    let name = format!("@{}", filename_to_module(&filename));
     debug!("Loading: `{}`", name);
     let mut errors = Errors::new();
     let mut compiler = Compiler::new();
@@ -1325,7 +1339,7 @@ fn initialize_rpc(
         let paths = import.paths.read().unwrap();
         let module_name = strip_file_prefix(&paths, &change.text_document.uri)
             .unwrap_or_else(|err| panic!("{}", err));
-        let module_name = filename_to_module(&module_name);
+        let module_name = format!("@{}", filename_to_module(&module_name));
         let module = modules
             .entry(module_name)
             .or_insert_with(|| self::Module::empty(change.text_document.uri.clone()));

@@ -46,20 +46,11 @@ serde_derive = "1.0.0"
 languageserver-types = "0.18.0"
 debugserver-types = "0.3.0"
 
-gluon = "0.6.1"
-gluon_completion = "0.6.1"
-gluon_format = "0.6.1"
+gluon = "0.7.0"
+gluon_completion = "0.7.0"
+gluon_format = "0.7.0"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
 partial-io = { version = "0.2.5", features = ["tokio", "quickcheck"] }
 quickcheck = "0.4.1"
-
-[patch.crates-io]
-gluon_base = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7" }
-gluon_parser = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
-gluon_check = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
-gluon_vm = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
-gluon = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
-gluon_completion = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
-gluon_format = { git = "https://github.com/Marwes/gluon", branch = "release_version_0.7"  }
