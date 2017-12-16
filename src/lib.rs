@@ -482,7 +482,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                         },
                         kind: Some(ident_to_completion_item_kind(&label, ident.typ.as_ref())),
                         label,
-                        detail: Some(format!("{}", ident.typ)),
+                        detail: match ident.typ {
+                            either::Either::Right(ref typ) => match **typ {
+                                Type::Hole => None,
+                                _ => Some(format!("{}", ident.typ)),
+                            },
+                            either::Either::Left(_) => Some(format!("{}", ident.typ)),
+                        },
                         data: Some(
                             serde_json::to_value(CompletionData {
                                 text_document_uri: change.text_document.uri.clone(),
