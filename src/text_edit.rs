@@ -6,7 +6,7 @@ use gluon::base::source;
 use gluon::base::pos::Span;
 
 use rpc::ServerError;
-use range_to_byte_span;
+use location_translation::range_to_byte_span;
 
 struct VersionedChange {
     version: u64,

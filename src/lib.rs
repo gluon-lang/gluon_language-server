@@ -57,6 +57,7 @@ macro_rules! try_future {
 pub mod rpc;
 mod text_edit;
 mod async_io;
+mod location_translation;
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
@@ -68,7 +69,7 @@ use gluon::base::error::Errors;
 use gluon::base::fnv::FnvMap;
 use gluon::base::kind::ArcKind;
 use gluon::base::metadata::Metadata;
-use gluon::base::pos::{self, BytePos, Line, Span, Spanned};
+use gluon::base::pos::{self, BytePos, Span, Spanned};
 use gluon::base::source;
 use gluon::base::symbol::Symbol;
 use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
@@ -114,6 +115,8 @@ pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use rpc::*;
 use text_edit::TextChanges;
+use location_translation::{byte_pos_to_location, byte_span_to_range, position_to_byte_pos,
+                           span_to_range};
 
 fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), ()> {
     debug!("{}", message);
@@ -558,132 +561,6 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     fn invalid_params(&self) -> Option<Self::Error> {
         None
     }
-}
-
-fn location_to_position(line: &str, loc: &pos::Location) -> Result<Position, ServerError<()>> {
-    let mut next_character = 0;
-    let found = line.char_indices()
-        .enumerate()
-        .inspect(|&(character, _)| next_character = character + 1)
-        .find(|&(_, (i, _))| i == loc.column.to_usize())
-        .map(|(i, _)| i as u64);
-
-    let character = found
-        .or_else(|| {
-            if line.len() == loc.column.to_usize() {
-                Some(next_character as u64)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| ServerError::from(format!("{} is not a valid location", loc)))?;
-
-    Ok(Position {
-        line: loc.line.to_usize() as u64,
-        character,
-    })
-}
-fn span_to_range(
-    source: &source::Source,
-    span: &Span<pos::Location>,
-) -> Result<Range, ServerError<()>> {
-    let (start_line, end_line) = source
-        .line(Line::from(span.start.line))
-        .and_then(|(_, start_line)| {
-            source
-                .line(Line::from(span.end.line))
-                .map(|(_, end_line)| (start_line, end_line))
-        })
-        .ok_or_else(|| {
-            ServerError::from(format!("{}:{} is not a valid span", span.start, span.end))
-        })?;
-    Ok(Range {
-        start: location_to_position(start_line, &span.start)?,
-        end: location_to_position(end_line, &span.end)?,
-    })
-}
-
-fn byte_pos_to_location(
-    source: &source::Source,
-    pos: BytePos,
-) -> Result<gluon::base::pos::Location, ServerError<()>> {
-    Ok(source
-        .location(pos)
-        .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?)
-}
-
-fn byte_pos_to_position(
-    source: &source::Source,
-    pos: BytePos,
-) -> Result<Position, ServerError<()>> {
-    let (line, location) = source
-        .line_at_byte(pos)
-        .and_then(|(_, line)| source.location(pos).map(|location| (line, location)))
-        .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?;
-    location_to_position(line, &location)
-}
-
-fn byte_span_to_range(
-    source: &source::Source,
-    span: Span<BytePos>,
-) -> Result<Range, ServerError<()>> {
-    Ok(Range {
-        start: byte_pos_to_position(source, span.start)?,
-        end: byte_pos_to_position(source, span.end)?,
-    })
-}
-
-fn character_to_line_offset(line: &str, character: u64) -> Option<BytePos> {
-    let mut next_character = 0;
-    let found = line.char_indices()
-        .enumerate()
-        .inspect(|&(i, _)| next_character = i + 1)
-        .find(|&(i, (_, _))| i as u64 == character)
-        .map(|(_, (byte_offset, _))| byte_offset);
-
-    found
-        .or_else(|| {
-            // Handle positions after the last character on the line
-            if next_character as u64 == character {
-                Some(line.len())
-            } else {
-                None
-            }
-        })
-        .map(BytePos::from)
-}
-
-
-fn position_to_byte_pos(
-    source: &source::Source,
-    position: &Position,
-) -> Result<BytePos, ServerError<()>> {
-    source
-        .line(Line::from(position.line as usize))
-        .and_then(|(line_pos, line_str)| {
-            character_to_line_offset(line_str, position.character)
-                .map(|byte_offset| line_pos + byte_offset)
-        })
-        .ok_or_else(|| {
-            ServerError {
-                message: format!(
-                    "Position ({}, {}) is out of range",
-                    position.line,
-                    position.character
-                ),
-                data: None,
-            }
-        })
-}
-
-fn range_to_byte_span(
-    source: &source::Source,
-    range: &Range,
-) -> Result<Span<BytePos>, ServerError<()>> {
-    Ok(Span::new(
-        position_to_byte_pos(source, &range.start)?,
-        position_to_byte_pos(source, &range.end)?,
-    ))
 }
 
 fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
