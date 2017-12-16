@@ -178,7 +178,7 @@ fn ident_to_completion_item_kind(
 }
 
 fn completion_symbol_to_symbol_information(
-    lines: &source::Lines,
+    source: &source::Source,
     symbol: Spanned<CompletionSymbol, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
@@ -198,7 +198,7 @@ fn completion_symbol_to_symbol_information(
         location: Location {
             uri,
 
-            range: byte_span_to_range(lines, symbol.span)?,
+            range: byte_span_to_range(source, symbol.span)?,
         },
         name: name.declared_name().to_string(),
         container_name: None,
@@ -412,7 +412,10 @@ where
             ref lines,
             ..
         } = *module;
-        let byte_pos = position_to_byte_pos(lines, position)?;
+
+        let source = source::Source::with_lines(&module.source, lines.clone());
+
+        let byte_pos = position_to_byte_pos(&source, position)?;
 
         f(expr, byte_pos)
     })
@@ -456,7 +459,8 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                 );
             }
 
-            let byte_pos = try_future!(position_to_byte_pos(lines, &change.position));
+            let source = source::Source::with_lines(&module.source, lines.clone());
+            let byte_pos = try_future!(position_to_byte_pos(&source, &change.position));
 
             let query = completion::SuggestionQuery {
                 modules: with_import(thread, |import| import.modules()),
@@ -525,7 +529,9 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                 let thread = &self.0;
                 retrieve_expr(thread, &change.text_document.uri, |module| {
                     let expr = &module.expr;
-                    let byte_pos = position_to_byte_pos(&module.lines, &change.position)?;
+
+                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let byte_pos = position_to_byte_pos(&source, &change.position)?;
 
                     let env = thread.get_env();
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
@@ -539,7 +545,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                             };
                             Some(Hover {
                                 contents: HoverContents::Scalar(MarkedString::String(contents)),
-                                range: byte_span_to_range(&module.lines, span).ok(),
+                                range: byte_span_to_range(&source, span).ok(),
                             })
                         })
                         .unwrap_or_else(|()| None))
@@ -554,50 +560,110 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     }
 }
 
-fn location_to_position(loc: &pos::Location) -> Position {
-    Position {
+fn location_to_position(line: &str, loc: &pos::Location) -> Result<Position, ServerError<()>> {
+    let mut next_character = 0;
+    let found = line.char_indices()
+        .enumerate()
+        .inspect(|&(character, _)| next_character = character + 1)
+        .find(|&(_, (i, _))| i == loc.column.to_usize())
+        .map(|(i, _)| i as u64);
+
+    let character = found
+        .or_else(|| {
+            if line.len() == loc.column.to_usize() {
+                Some(next_character as u64)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| ServerError::from(format!("{} is not a valid location", loc)))?;
+
+    Ok(Position {
         line: loc.line.to_usize() as u64,
-        character: loc.column.to_usize() as u64,
-    }
+        character,
+    })
 }
-fn span_to_range(span: &Span<pos::Location>) -> Range {
-    Range {
-        start: location_to_position(&span.start),
-        end: location_to_position(&span.end),
-    }
+fn span_to_range(
+    source: &source::Source,
+    span: &Span<pos::Location>,
+) -> Result<Range, ServerError<()>> {
+    let (start_line, end_line) = source
+        .line(Line::from(span.start.line))
+        .and_then(|(_, start_line)| {
+            source
+                .line(Line::from(span.end.line))
+                .map(|(_, end_line)| (start_line, end_line))
+        })
+        .ok_or_else(|| {
+            ServerError::from(format!("{}:{} is not a valid span", span.start, span.end))
+        })?;
+    Ok(Range {
+        start: location_to_position(start_line, &span.start)?,
+        end: location_to_position(end_line, &span.end)?,
+    })
 }
 
 fn byte_pos_to_location(
-    lines: &source::Lines,
+    source: &source::Source,
     pos: BytePos,
 ) -> Result<gluon::base::pos::Location, ServerError<()>> {
-    Ok(lines
+    Ok(source
         .location(pos)
         .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?)
 }
 
-fn byte_pos_to_position(lines: &source::Lines, pos: BytePos) -> Result<Position, ServerError<()>> {
-    Ok(location_to_position(&lines.location(pos).ok_or_else(
-        || ServerError::from(&"Unable to translate index to location"),
-    )?))
+fn byte_pos_to_position(
+    source: &source::Source,
+    pos: BytePos,
+) -> Result<Position, ServerError<()>> {
+    let (line, location) = source
+        .line_at_byte(pos)
+        .and_then(|(_, line)| source.location(pos).map(|location| (line, location)))
+        .ok_or_else(|| ServerError::from(&"Unable to translate index to location"))?;
+    location_to_position(line, &location)
 }
 
 fn byte_span_to_range(
-    lines: &source::Lines,
+    source: &source::Source,
     span: Span<BytePos>,
 ) -> Result<Range, ServerError<()>> {
     Ok(Range {
-        start: byte_pos_to_position(lines, span.start)?,
-        end: byte_pos_to_position(lines, span.end)?,
+        start: byte_pos_to_position(source, span.start)?,
+        end: byte_pos_to_position(source, span.end)?,
     })
 }
 
+fn character_to_line_offset(line: &str, character: u64) -> Option<BytePos> {
+    let mut next_character = 0;
+    let found = line.char_indices()
+        .enumerate()
+        .inspect(|&(i, _)| next_character = i + 1)
+        .find(|&(i, (_, _))| i as u64 == character)
+        .map(|(_, (byte_offset, _))| byte_offset);
+
+    found
+        .or_else(|| {
+            // Handle positions after the last character on the line
+            if next_character as u64 == character {
+                Some(line.len())
+            } else {
+                None
+            }
+        })
+        .map(BytePos::from)
+}
+
+
 fn position_to_byte_pos(
-    lines: &source::Lines,
+    source: &source::Source,
     position: &Position,
 ) -> Result<BytePos, ServerError<()>> {
-    let line_pos = lines
+    source
         .line(Line::from(position.line as usize))
+        .and_then(|(line_pos, line_str)| {
+            character_to_line_offset(line_str, position.character)
+                .map(|byte_offset| line_pos + byte_offset)
+        })
         .ok_or_else(|| {
             ServerError {
                 message: format!(
@@ -607,17 +673,16 @@ fn position_to_byte_pos(
                 ),
                 data: None,
             }
-        })?;
-    Ok(line_pos + BytePos::from(position.character as usize))
+        })
 }
 
 fn range_to_byte_span(
-    lines: &source::Lines,
+    source: &source::Source,
     range: &Range,
 ) -> Result<Span<BytePos>, ServerError<()>> {
     Ok(Span::new(
-        position_to_byte_pos(lines, &range.start)?,
-        position_to_byte_pos(lines, &range.end)?,
+        position_to_byte_pos(source, &range.start)?,
+        position_to_byte_pos(source, &range.end)?,
     ))
 }
 
@@ -789,42 +854,58 @@ fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
     importer: &CheckImporter,
     filename: &Url,
-    lines: &source::Lines,
+    source: &source::Source,
     err: GluonError,
 ) -> Result<(), ServerError<()>> {
-    fn into_diagnostic<T>(err: pos::Spanned<T, pos::Location>) -> Diagnostic
+    fn into_diagnostic<T>(
+        source: &source::Source,
+        err: pos::Spanned<T, pos::Location>,
+    ) -> Result<Diagnostic, ServerError<()>>
     where
         T: fmt::Display,
     {
-        Diagnostic {
+        Ok(Diagnostic {
             message: format!("{}", err.value),
             severity: Some(DiagnosticSeverity::Error),
-            range: span_to_range(&err.span),
+            range: span_to_range(source, &err.span)?,
             source: Some("gluon".to_string()),
             ..Diagnostic::default()
-        }
+        })
     }
 
     match err {
         GluonError::Typecheck(err) => diagnostics
             .entry(module_name_to_file(importer, &err.source_name))
             .or_insert(Vec::new())
-            .extend(err.errors().into_iter().map(into_diagnostic)),
+            .extend(err.errors()
+                .into_iter()
+                .map(|err| into_diagnostic(source, err))
+                .collect::<Result<Vec<_>, _>>()?),
+
         GluonError::Parse(err) => diagnostics
             .entry(module_name_to_file(importer, &err.source_name))
             .or_insert(Vec::new())
-            .extend(err.errors().into_iter().map(into_diagnostic)),
+            .extend(err.errors()
+                .into_iter()
+                .map(|err| into_diagnostic(source, err))
+                .collect::<Result<Vec<_>, _>>()?),
+
         GluonError::Multiple(errors) => for err in errors {
-            create_diagnostics(diagnostics, importer, filename, lines, err)?;
+            create_diagnostics(diagnostics, importer, filename, source, err)?;
         },
+
         GluonError::Macro(error) => diagnostics
             .entry(filename.clone())
             .or_insert(Vec::new())
-            .push(into_diagnostic(pos::spanned2(
-                byte_pos_to_location(lines, error.span.start)?,
-                byte_pos_to_location(lines, error.span.end)?,
-                error.value,
-            ))),
+            .push(into_diagnostic(
+                source,
+                pos::spanned2(
+                    byte_pos_to_location(source, error.span.start)?,
+                    byte_pos_to_location(source, error.span.end)?,
+                    error.value,
+                ),
+            )?),
+
         err => diagnostics
             .entry(filename.clone())
             .or_insert(Vec::new())
@@ -881,13 +962,8 @@ fn run_diagnostics(
                 .downcast_ref::<Import<CheckImporter>>()
                 .expect("Check importer");
 
-            let result = create_diagnostics(
-                &mut diagnostics,
-                &import.importer,
-                filename,
-                &source.lines(),
-                err,
-            );
+            let result =
+                create_diagnostics(&mut diagnostics, &import.importer, filename, &source, err);
             if let Err(err) = result {
                 error!("Unable to create diagnostics: {}", err.message);
                 return Box::new(Err(()).into_future());
@@ -1176,7 +1252,7 @@ fn initialize_rpc(
                     Ok(Some(vec![
                         TextEdit {
                             range: byte_span_to_range(
-                                &module.lines,
+                                &source::Source::with_lines(source, module.lines.clone()),
                                 Span::new(0.into(), source.len().into()),
                             )?,
                             new_text: formatted,
@@ -1194,7 +1270,10 @@ fn initialize_rpc(
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
                     let expr = &module.expr;
-                    let byte_pos = position_to_byte_pos(&module.lines, &params.position)?;
+
+                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+
+                    let byte_pos = position_to_byte_pos(&source, &params.position)?;
 
                     let symbol_spans = completion::find_all_symbols(expr, byte_pos)
                         .map(|t| t.1)
@@ -1205,7 +1284,7 @@ fn initialize_rpc(
                         .map(|span| {
                             Ok(DocumentHighlight {
                                 kind: None,
-                                range: byte_span_to_range(&module.lines, span)?,
+                                range: byte_span_to_range(&source, span)?,
                             })
                         })
                         .collect::<Result<_, _>>()
@@ -1225,11 +1304,13 @@ fn initialize_rpc(
 
                     let symbols = completion::all_symbols(expr);
 
+                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+
                     symbols
                         .into_iter()
                         .map(|symbol| {
                             completion_symbol_to_symbol_information(
-                                &module.lines,
+                                &source,
                                 symbol,
                                 params.text_document.uri.clone(),
                             )
@@ -1257,6 +1338,8 @@ fn initialize_rpc(
                 let mut symbols = Vec::<SymbolInformation>::new();
 
                 for module in modules.values() {
+                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+
                     symbols.extend(completion::all_symbols(&module.expr)
                         .into_iter()
                         .filter(|symbol| match symbol.value {
@@ -1267,7 +1350,7 @@ fn initialize_rpc(
                         })
                         .map(|symbol| {
                             completion_symbol_to_symbol_information(
-                                &module.lines,
+                                &source,
                                 symbol,
                                 module.uri.clone(),
                             )

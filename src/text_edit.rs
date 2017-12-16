@@ -72,21 +72,23 @@ fn apply_changes(
     content_changes: &[TextDocumentContentChangeEvent],
 ) -> Result<(), ServerError<()>> {
     for change in content_changes {
-        let lines = source::Lines::new(source.as_bytes().iter().cloned());
-        apply_change(source, &lines, change)?;
+        let lines = source::Lines::new(source.bytes());
+        apply_change(source, lines, change)?;
     }
     Ok(())
 }
 
 fn apply_change(
     source: &mut String,
-    lines: &source::Lines,
+    lines: source::Lines,
     change: &TextDocumentContentChangeEvent,
 ) -> Result<(), ServerError<()>> {
     info!("Applying change: {:?}", change);
     let span = match (change.range, change.range_length) {
         (None, None) => Span::new(0.into(), source.len().into()),
-        (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(lines, &range)?,
+        (Some(range), None) | (Some(range), Some(_)) => {
+            range_to_byte_span(&source::Source::with_lines(source, lines), &range)?
+        }
         (None, Some(_)) => panic!("Invalid change"),
     };
     if let Some(range_length) = change.range_length {

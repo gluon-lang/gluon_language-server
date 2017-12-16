@@ -257,7 +257,7 @@ r.
             TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri },
                 position: Position {
-                    line: 3,
+                    line: 2,
                     character: 2,
                 },
             },
@@ -409,6 +409,43 @@ test2
                     label: "test1".into(),
                     kind: Some(CompletionItemKind::Variable),
                     detail: Some("String".into()),
+                    ..CompletionItem::default()
+                },
+            ]
+        );
+    });
+}
+
+#[test]
+fn completion_unicode_characters() {
+    support::send_rpc(|stdin, stdout| {
+        let text = r#"
+let test = 1
+"åäö" t
+"#;
+        support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        completion(
+            stdin,
+            1,
+            "test",
+            Position {
+                line: 2,
+                character: 7,
+            },
+        );
+
+        let completions: Vec<CompletionItem> = expect_response(stdout);
+        let completions = remove_completion_data(completions);
+        assert_eq!(
+            completions,
+            vec![
+                CompletionItem {
+                    label: "test".into(),
+                    kind: Some(CompletionItemKind::Variable),
+                    detail: Some("Int".into()),
                     ..CompletionItem::default()
                 },
             ]
