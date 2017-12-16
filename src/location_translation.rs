@@ -6,27 +6,19 @@ use languageserver_types::{Position, Range};
 use rpc::ServerError;
 
 pub fn location_to_position(line: &str, loc: &pos::Location) -> Result<Position, ServerError<()>> {
-    let mut next_character = 0;
-    let found = line.char_indices()
-        .enumerate()
-        .inspect(|&(character, _)| next_character = character + 1)
-        .find(|&(_, (i, _))| i == loc.column.to_usize())
-        .map(|(i, _)| i as u64);
-
-    let character = found
-        .or_else(|| {
-            if line.len() == loc.column.to_usize() {
-                Some(next_character as u64)
-            } else {
-                None
-            }
+    let column = loc.column.to_usize();
+    if column <= line.len() && line.is_char_boundary(column) {
+        let character = line[..column].encode_utf16().count() as u64;
+        Ok(Position {
+            line: loc.line.to_usize() as u64,
+            character,
         })
-        .ok_or_else(|| ServerError::from(format!("{} is not a valid location", loc)))?;
-
-    Ok(Position {
-        line: loc.line.to_usize() as u64,
-        character,
-    })
+    } else {
+        Err(ServerError::from(format!(
+            "{} is not a valid location",
+            loc
+        )))
+    }
 }
 pub fn span_to_range(
     source: &source::Source,
@@ -79,17 +71,22 @@ pub fn byte_span_to_range(
 }
 
 pub fn character_to_line_offset(line: &str, character: u64) -> Option<BytePos> {
-    let mut next_character = 0;
-    let found = line.char_indices()
-        .enumerate()
-        .inspect(|&(i, _)| next_character = i + 1)
-        .find(|&(i, (_, _))| i as u64 == character)
-        .map(|(_, (byte_offset, _))| byte_offset);
+    let mut character_offset = 0;
+    let mut found = None;
+
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if character_offset == character {
+            found = Some(line.len() - chars.as_str().len() - c.len_utf8());
+            break;
+        }
+        character_offset += c.len_utf16() as u64;
+    }
 
     found
         .or_else(|| {
             // Handle positions after the last character on the line
-            if next_character as u64 == character {
+            if character_offset == character {
                 Some(line.len())
             } else {
                 None
@@ -151,6 +148,15 @@ mod tests {
             },
         );
         assert_eq!(result, Ok(BytePos::from(5)));
+
+        let result = position_to_byte_pos(
+            &source,
+            &Position {
+                line: 0,
+                character: 6,
+            },
+        );
+        assert_eq!(result, Ok(BytePos::from(10)));
     }
 
     #[test]
@@ -163,6 +169,15 @@ mod tests {
             Ok(Position {
                 line: 0,
                 character: 3,
+            },)
+        );
+
+        let result = byte_pos_to_position(&source, BytePos::from(10));
+        assert_eq!(
+            result,
+            Ok(Position {
+                line: 0,
+                character: 6,
             },)
         );
     }
