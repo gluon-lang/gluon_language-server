@@ -13,7 +13,6 @@ struct VersionedChange {
     content_changes: Vec<TextDocumentContentChangeEvent>,
 }
 
-
 /// Type which applies text changes in the order that the client sends them.
 /// Out of order changes are stored until all earlier changes have been received after which they
 /// are applied all at once.
@@ -91,9 +90,6 @@ fn apply_change(
         }
         (None, Some(_)) => panic!("Invalid change"),
     };
-    if let Some(range_length) = change.range_length {
-        assert!(range_length as usize == (span.end - span.start).to_usize());
-    }
     source.drain(span.start.to_usize()..span.end.to_usize());
     source.insert_str(span.start.to_usize(), &change.text);
     Ok(())
@@ -104,7 +100,6 @@ mod tests {
     use super::*;
 
     use languageserver_types::{Position, Range};
-
 
     #[test]
     fn apply_changes_test() {
