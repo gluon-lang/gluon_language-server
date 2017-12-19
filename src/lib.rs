@@ -81,7 +81,6 @@ use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 use gluon::either;
 
-
 use completion::CompletionSymbol;
 
 use std::collections::{hash_map, BTreeMap};
@@ -207,7 +206,6 @@ fn completion_symbol_to_symbol_information(
         container_name: None,
     })
 }
-
 
 struct Module {
     lines: source::Lines,
@@ -354,7 +352,7 @@ where
     R: Send + 'static,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
-    let module = format!("@{}", filename_to_module(&filename));
+    let module = filename_to_module(&filename);
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -381,21 +379,19 @@ where
     F: FnOnce(&Module) -> Result<R, ServerError<()>>,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
-    let module = format!("@{}", filename_to_module(&filename));
+    let module = filename_to_module(&filename);
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
     let importer = import.importer.0.lock().unwrap();
-    let source_module = importer.get(&module).ok_or_else(|| {
-        ServerError {
-            message: format!(
-                "Module `{}` is not defined\n{:?}",
-                module,
-                importer.keys().collect::<Vec<_>>()
-            ),
-            data: None,
-        }
+    let source_module = importer.get(&module).ok_or_else(|| ServerError {
+        message: format!(
+            "Module `{}` is not defined\n{:?}",
+            module,
+            importer.keys().collect::<Vec<_>>()
+        ),
+        data: None,
     })?;
     f(source_module)
 }
@@ -642,7 +638,7 @@ fn typecheck(
     fileinput: &str,
 ) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
-    let name = format!("@{}", filename_to_module(&filename));
+    let name = filename_to_module(&filename);
     debug!("Loading: `{}`", name);
     let mut errors = Errors::new();
     let mut compiler = Compiler::new();
@@ -725,7 +721,6 @@ fn typecheck(
         Err(errors.into())
     }
 }
-
 
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
@@ -1305,7 +1300,7 @@ fn initialize_rpc(
         let paths = import.paths.read().unwrap();
         let module_name = strip_file_prefix(&paths, &change.text_document.uri)
             .unwrap_or_else(|err| panic!("{}", err));
-        let module_name = format!("@{}", filename_to_module(&module_name));
+        let module_name = filename_to_module(&module_name);
         let module = modules
             .entry(module_name)
             .or_insert_with(|| self::Module::empty(change.text_document.uri.clone()));
