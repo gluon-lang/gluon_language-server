@@ -639,41 +639,9 @@ fn typecheck(
 ) -> GluonResult<()> {
     let filename = strip_file_prefix_with_thread(thread, uri_filename);
     let name = filename_to_module(&filename);
-    debug!("Loading: `{}`", name);
-    let mut errors = Errors::new();
-    let mut compiler = Compiler::new();
-    // The parser may find parse errors but still produce an expression
-    // For that case still typecheck the expression but return the parse error afterwards
-    let mut expr = match compiler.parse_partial_expr(&TypeCache::new(), &name, fileinput) {
-        Ok(expr) => expr,
-        Err((None, err)) => return Err(err.into()),
-        Err((Some(expr), err)) => {
-            errors.push(err.into());
-            expr
-        }
-    };
-    if let Err((_, err)) = (&mut expr).expand_macro(&mut compiler, thread, &name) {
-        errors.push(err);
-    }
 
-    let check_result = (MacroValue { expr: &mut expr })
-        .typecheck(&mut compiler, thread, &name, fileinput)
-        .map(|value| value.typ);
-    let typ = match check_result {
-        Ok(typ) => typ,
-        Err(err) => {
-            errors.push(err);
-            expr.try_type_of(&*thread.global_env().get_env())
-                .unwrap_or_else(|_| Type::hole())
-        }
-    };
-    let metadata = Metadata::default();
-    thread.global_env().set_global(
-        Symbol::from(format!("@{}", name)),
-        typ,
-        metadata,
-        GluonValue::Int(0),
-    )?;
+    let (expr_opt, errors) = typecheck_(thread, &name, fileinput);
+
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -684,7 +652,9 @@ fn typecheck(
         hash_map::Entry::Occupied(mut entry) => {
             let module = entry.get_mut();
 
-            module.expr = expr;
+            if let Some(expr) = expr_opt {
+                module.expr = expr;
+            }
             module.uri = uri_filename.clone();
 
             if version.is_some() {
@@ -704,7 +674,8 @@ fn typecheck(
             let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
             entry.insert(self::Module {
                 lines: lines,
-                expr: expr,
+                expr: expr_opt
+                    .unwrap_or_else(|| pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
                 source: Arc::new(fileinput.into()),
                 uri: uri_filename.clone(),
                 dirty: false,
@@ -714,12 +685,61 @@ fn typecheck(
             });
         }
     }
-
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors.into())
     }
+}
+
+fn typecheck_(
+    thread: &Thread,
+    name: &str,
+    fileinput: &str,
+) -> (Option<SpannedExpr<Symbol>>, Errors<GluonError>) {
+    debug!("Loading: `{}`", name);
+    let mut errors = Errors::new();
+    let mut compiler = Compiler::new();
+    // The parser may find parse errors but still produce an expression
+    // For that case still typecheck the expression but return the parse error afterwards
+    let mut expr = match compiler.parse_partial_expr(&TypeCache::new(), &name, fileinput) {
+        Ok(expr) => expr,
+        Err((None, err)) => {
+            errors.push(err.into());
+            return (None, errors);
+        }
+        Err((Some(expr), err)) => {
+            errors.push(err.into());
+            expr
+        }
+    };
+
+    if let Err((_, err)) = (&mut expr).expand_macro(&mut compiler, thread, &name) {
+        errors.push(err);
+    }
+
+    let check_result = (MacroValue { expr: &mut expr })
+        .typecheck(&mut compiler, thread, &name, fileinput)
+        .map(|value| value.typ);
+    let typ = match check_result {
+        Ok(typ) => typ,
+        Err(err) => {
+            errors.push(err);
+            expr.try_type_of(&*thread.global_env().get_env())
+                .unwrap_or_else(|_| Type::hole())
+        }
+    };
+    let metadata = Metadata::default();
+    if let Err(err) = thread.global_env().set_global(
+        Symbol::from(format!("@{}", name)),
+        typ,
+        metadata,
+        GluonValue::Int(0),
+    ) {
+        errors.push(err.into());
+    }
+
+    (Some(expr), errors)
 }
 
 fn create_diagnostics(
