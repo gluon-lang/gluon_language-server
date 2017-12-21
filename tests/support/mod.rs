@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -17,7 +19,7 @@ use serde_json::{from_str, from_value, to_value, Value};
 
 use url::Url;
 
-use languageserver_types::{DidOpenTextDocumentParams, TextDocumentItem};
+use languageserver_types::*;
 
 use gluon_language_server::rpc::read_message;
 
@@ -102,6 +104,46 @@ where
     did_open_uri(stdin, test_url(uri), text)
 }
 
+pub fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
+where
+    W: Write,
+{
+    did_change_event(
+        stdin,
+        uri,
+        version,
+        vec![
+            TextDocumentContentChangeEvent {
+                range: Some(range),
+                range_length: None,
+                text: text.to_string(),
+            },
+        ],
+    )
+}
+
+pub fn did_change_event<W: ?Sized>(
+    stdin: &mut W,
+    uri: &str,
+    version: u64,
+    content_changes: Vec<TextDocumentContentChangeEvent>,
+) where
+    W: Write,
+{
+    let hover = notification(
+        "textDocument/didChange",
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: test_url(uri),
+                version,
+            },
+            content_changes,
+        },
+    );
+
+    write_message(stdin, hover).unwrap();
+}
+
 pub fn expect_response<R, T>(mut output: R) -> T
 where
     T: DeserializeOwned,
@@ -114,12 +156,28 @@ where
         }
 
         if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
-            return from_value(response.result).unwrap();
+            return from_value(response.result).unwrap_or_else(|err| panic!("{}\n{}", err, json));
         } else {
             panic!("Expected response, got `{}`", json)
         }
     }
     panic!("Expected a response")
+}
+
+pub fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
+where
+    W: Write,
+{
+    let hover = method_call(
+        "textDocument/hover",
+        id,
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: test_url(uri) },
+            position: position,
+        },
+    );
+
+    write_message(stdin, hover).unwrap();
 }
 
 pub fn expect_notification<R, T>(mut output: R) -> T
@@ -173,7 +231,6 @@ where
         drop(stdin_write);
     }
 }
-
 
 pub struct ReadPipe {
     recv: Receiver<Vec<u8>>,
@@ -239,7 +296,6 @@ impl io::Write for WritePipe {
         Ok(())
     }
 }
-
 
 fn pipe() -> (ReadPipe, WritePipe) {
     let (sender, receiver) = sync_channel(10);

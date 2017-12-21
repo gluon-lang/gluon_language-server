@@ -376,7 +376,7 @@ where
 
 fn retrieve_expr<F, R>(thread: &Thread, text_document_uri: &Url, f: F) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&Module) -> Result<R, ServerError<()>>,
+    F: FnOnce(&mut Module) -> Result<R, ServerError<()>>,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
     let module = filename_to_module(&filename);
@@ -384,16 +384,19 @@ where
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    let importer = import.importer.0.lock().unwrap();
-    let source_module = importer.get(&module).ok_or_else(|| ServerError {
+    let mut importer = import.importer.0.lock().unwrap();
+    match importer.get_mut(&module) {
+        Some(source_module) => return f(source_module),
+        None => (),
+    }
+    Err(ServerError {
         message: format!(
             "Module `{}` is not defined\n{:?}",
             module,
             importer.keys().collect::<Vec<_>>()
         ),
         data: None,
-    })?;
-    f(source_module)
+    })
 }
 
 fn retrieve_expr_with_pos<F, R>(
@@ -1139,14 +1142,14 @@ fn initialize_rpc(
         let format = move |params: DocumentFormattingParams| -> BoxFuture<Option<Vec<_>>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let source = &module.source;
-                    let formatted = gluon_format::format_expr(source)?;
+                    let formatted = gluon_format::format_expr(&module.source)?;
+                    let range = byte_span_to_range(
+                        &source::Source::with_lines(&module.source, module.lines.clone()),
+                        Span::new(0.into(), module.source.len().into()),
+                    )?;
                     Ok(Some(vec![
                         TextEdit {
-                            range: byte_span_to_range(
-                                &source::Source::with_lines(source, module.lines.clone()),
-                                Span::new(0.into(), source.len().into()),
-                            )?,
+                            range,
                             new_text: formatted,
                         },
                     ]))

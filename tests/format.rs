@@ -11,12 +11,11 @@ extern crate url;
 #[allow(unused)]
 mod support;
 
-
 use std::io::Write;
 
 use languageserver_types::*;
 
-use support::{expect_notification, expect_response};
+use support::{did_change_event, expect_notification, expect_response, hover};
 
 fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
 where
@@ -77,6 +76,50 @@ x + 2
                     new_text: expected.to_string(),
                 },
             ]
+        );
+    });
+}
+
+#[test]
+fn empty_content_changes_do_not_lockup_server() {
+    let text = r#"
+let x = 1
+x + "abc"
+"#;
+    support::send_rpc(|stdin, stdout| {
+        support::did_open(stdin, "test", text);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        did_change_event(stdin, "test", 2, vec![]);
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+
+        hover(
+            stdin,
+            4,
+            "test",
+            Position {
+                line: 2,
+                character: 7,
+            },
+        );
+        let hover: Hover = expect_response(&mut *stdout);
+
+        assert_eq!(
+            hover,
+            Hover {
+                contents: HoverContents::Scalar(MarkedString::String("String".into())),
+                range: Some(Range {
+                    start: Position {
+                        line: 2,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 9,
+                    },
+                }),
+            }
         );
     });
 }

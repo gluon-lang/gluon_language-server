@@ -52,14 +52,11 @@ impl TextChanges {
                     || change.version > version,
                 "BUG: Attempt to apply old change on newer contents"
             );
-            if change.content_changes.is_empty() {
-                continue;
-            }
-            if version + 1 != change.version {
+            if change.version > version + 1 {
                 self.changes.push_front(change);
                 break;
             }
-            version += 1;
+            version = change.version;
             apply_changes(source, &change.content_changes)?
         }
         Ok(version)

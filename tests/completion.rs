@@ -16,15 +16,11 @@ use std::io::Write;
 
 use url::Url;
 
-use languageserver_types::{CompletionItem, CompletionItemKind, DidChangeTextDocumentParams,
-                           Documentation, Position, PublishDiagnosticsParams, Range,
-                           TextDocumentContentChangeEvent, TextDocumentIdentifier,
-                           TextDocumentPositionParams, VersionedTextDocumentIdentifier};
+use languageserver_types::*;
 
 use gluon_language_server::CompletionData;
 
-use support::{expect_notification, expect_response};
-
+use support::{did_change, expect_notification, expect_response};
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where
@@ -43,31 +39,6 @@ where
 
     support::write_message(stdin, hover).unwrap();
 }
-
-fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
-where
-    W: Write,
-{
-    let hover = support::notification(
-        "textDocument/didChange",
-        DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier {
-                uri: support::test_url(uri),
-                version,
-            },
-            content_changes: vec![
-                TextDocumentContentChangeEvent {
-                    range: Some(range),
-                    range_length: None,
-                    text: text.to_string(),
-                },
-            ],
-        },
-    );
-
-    support::write_message(stdin, hover).unwrap();
-}
-
 
 fn resolve<W: ?Sized>(stdin: &mut W, id: u64, item: &CompletionItem)
 where

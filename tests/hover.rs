@@ -8,30 +8,9 @@ extern crate url;
 
 mod support;
 
-use std::io::Write;
+use languageserver_types::*;
 
-use languageserver_types::{Hover, HoverContents, MarkedString, Position, PublishDiagnosticsParams,
-                           Range, TextDocumentIdentifier, TextDocumentPositionParams};
-
-use support::{expect_notification, expect_response};
-
-fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-where
-    W: Write,
-{
-    let hover = support::method_call(
-        "textDocument/hover",
-        id,
-        TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: support::test_url(uri),
-            },
-            position: position,
-        },
-    );
-
-    support::write_message(stdin, hover).unwrap();
-}
+use support::{expect_notification, expect_response, hover};
 
 const STREAM_SOURCE: &'static str = r#"
 let prelude = import! "std/prelude.glu"
