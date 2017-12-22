@@ -95,7 +95,6 @@ pub fn character_to_line_offset(line: &str, character: u64) -> Option<BytePos> {
         .map(BytePos::from)
 }
 
-
 pub fn position_to_byte_pos(
     source: &source::Source,
     position: &Position,
@@ -106,15 +105,12 @@ pub fn position_to_byte_pos(
             character_to_line_offset(line_str, position.character)
                 .map(|byte_offset| line_pos + byte_offset)
         })
-        .ok_or_else(|| {
-            ServerError {
-                message: format!(
-                    "Position ({}, {}) is out of range",
-                    position.line,
-                    position.character
-                ),
-                data: None,
-            }
+        .ok_or_else(|| ServerError {
+            message: format!(
+                "Position ({}, {}) is out of range",
+                position.line, position.character
+            ),
+            data: None,
         })
 }
 

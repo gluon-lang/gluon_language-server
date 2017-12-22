@@ -8,7 +8,8 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
-use futures::{self, Async, AsyncSink, Future, IntoFuture, Poll, Sink, StartSend};
+use futures::{self, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+use futures::sync::mpsc;
 
 use serde;
 use serde_json::{from_value, to_string, to_value};
@@ -151,7 +152,6 @@ where
     }
 }
 
-
 pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
 where
     R: BufRead + Read,
@@ -203,7 +203,6 @@ where
     try!(output.flush());
     Ok(())
 }
-
 
 extern crate bytes;
 
@@ -325,9 +324,10 @@ impl Encoder for LanguageServerEncoder {
     }
 }
 
-pub struct Entry<K, V> {
+pub struct Entry<K, V, W> {
     pub key: K,
     pub value: V,
+    pub version: W,
 }
 
 #[derive(Debug)]
@@ -366,60 +366,93 @@ where
 }
 
 /// Queue which only keeps the latest work item for each key
-pub struct UniqueQueue<S, K, V> {
-    sink: S,
-    queue: VecDeque<Entry<K, V>>,
+pub struct UniqueSink<K, V, W> {
+    sender: mpsc::UnboundedSender<Entry<K, V, W>>,
 }
 
-impl<S, K, V> UniqueQueue<S, K, V> {
-    pub fn new(sink: S) -> Self {
-        UniqueQueue {
-            sink,
-            queue: VecDeque::new(),
+impl<K, V, W> Clone for UniqueSink<K, V, W> {
+    fn clone(&self) -> Self {
+        UniqueSink {
+            sender: self.sender.clone(),
         }
     }
 }
 
-impl<S, K, V> Sink for UniqueQueue<S, K, V>
-where
-    S: Sink<SinkItem = Entry<K, V>>,
-    K: PartialEq,
-{
-    type SinkItem = Entry<K, V>;
-    type SinkError = S::SinkError;
+pub struct UniqueStream<K, V, W> {
+    queue: VecDeque<Entry<K, V, W>>,
+    receiver: mpsc::UnboundedReceiver<Entry<K, V, W>>,
+    exhausted: bool,
+}
 
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        match self.sink.start_send(item)? {
-            AsyncSink::Ready => Ok(AsyncSink::Ready),
-            AsyncSink::NotReady(item) => {
-                if let Some(entry) = self.queue.iter_mut().find(|entry| entry.key == item.key) {
-                    entry.value = item.value;
+pub fn unique_queue<K, V, W>() -> (UniqueSink<K, V, W>, UniqueStream<K, V, W>)
+where
+    K: PartialEq,
+    W: Ord,
+{
+    let (sender, receiver) = mpsc::unbounded();
+    (
+        UniqueSink { sender },
+        UniqueStream {
+            queue: VecDeque::new(),
+            receiver,
+            exhausted: false,
+        },
+    )
+}
+
+impl<K, V, W> Stream for UniqueStream<K, V, W>
+where
+    K: PartialEq,
+    W: Ord,
+{
+    type Item = Entry<K, V, W>;
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        while !self.exhausted {
+            match self.receiver.poll()? {
+                Async::Ready(Some(item)) => {
+                    if let Some(entry) = self.queue.iter_mut().find(|entry| entry.key == item.key) {
+                        if entry.version < item.version {
+                            *entry = item;
+                        }
+                        continue;
+                    }
+                    self.queue.push_back(item);
                 }
-                Ok(AsyncSink::Ready)
+                Async::Ready(None) => {
+                    self.exhausted = true;
+                }
+                Async::NotReady => break,
             }
         }
+        match self.queue.pop_front() {
+            Some(item) => Ok(Async::Ready(Some(item))),
+            None => {
+                if self.exhausted {
+                    Ok(Async::Ready(None))
+                } else {
+                    Ok(Async::NotReady)
+                }
+            }
+        }
+    }
+}
+
+impl<K, V, W> Sink for UniqueSink<K, V, W> {
+    type SinkItem = Entry<K, V, W>;
+    type SinkError = mpsc::SendError<Entry<K, V, W>>;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        self.sender.start_send(item)
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        while let Some(item) = self.queue.pop_front() {
-            match self.sink.start_send(item)? {
-                AsyncSink::Ready => (),
-                AsyncSink::NotReady(item) => {
-                    self.queue.push_front(item);
-                    break;
-                }
-            }
-        }
-        if self.queue.is_empty() {
-            self.sink.poll_complete()
-        } else {
-            Ok(Async::NotReady)
-        }
+        self.sender.poll_complete()
     }
 
     fn close(&mut self) -> Poll<(), Self::SinkError> {
-        try_ready!(self.poll_complete());
-        self.sink.close()
+        self.sender.close()
     }
 }
 

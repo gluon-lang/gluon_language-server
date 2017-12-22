@@ -8,7 +8,6 @@ extern crate serde;
 extern crate serde_derive;
 extern crate serde_json;
 
-#[macro_use]
 extern crate futures;
 extern crate futures_cpupool;
 extern crate jsonrpc_core;
@@ -96,7 +95,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use languageserver_types::*;
 
-use futures::{future, AsyncSink, Future, IntoFuture, Sink, Stream};
+use futures::{future, Future, IntoFuture, Sink, Stream};
 use futures::future::Either;
 use futures::stream;
 use futures::sync::oneshot;
@@ -813,28 +812,6 @@ fn create_diagnostics(
     Ok(())
 }
 
-fn schedule_diagnostics(
-    handle: &reactor::Handle,
-    remote: reactor::Remote,
-    message_log: mpsc::Sender<String>,
-    cpu_pool: &CpuPool,
-    thread: RootedThread,
-    filename: Url,
-    version: Option<u64>,
-    fileinput: Arc<String>,
-) {
-    handle.spawn(cpu_pool.spawn_fn(move || {
-        run_diagnostics(
-            &thread,
-            &remote,
-            message_log,
-            &filename,
-            version,
-            &fileinput,
-        )
-    }))
-}
-
 fn run_diagnostics(
     thread: &Thread,
     remote: &reactor::Remote,
@@ -1059,29 +1036,22 @@ fn initialize_rpc(
         let cpu_pool = cpu_pool.clone();
         let message_log = message_log.clone();
 
-        SharedSink::new(rpc::UniqueQueue::new(rpc::sink_fn::<_, _, ()>(
-            move |entry: Entry<Url, Arc<String>>| {
-                let thread = thread.clone();
-                let cpu_pool = cpu_pool.clone();
-                let message_log = message_log.clone();
-                let core_remote2 = core_remote.clone();
+        let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
 
-                core_remote.spawn(move |core_handle| {
-                    schedule_diagnostics(
-                        core_handle,
-                        core_remote2,
-                        message_log,
-                        &cpu_pool,
-                        thread,
-                        entry.key,
-                        None,
-                        entry.value,
-                    );
-                    Ok(())
-                });
-                Ok(AsyncSink::Ready)
-            },
-        )))
+        core_remote.clone().spawn(move |_| {
+            diagnostic_stream.for_each(move |entry: Entry<Url, Arc<String>, _>| {
+                cpu_pool.spawn(run_diagnostics(
+                    &thread,
+                    &core_remote,
+                    message_log.clone(),
+                    &entry.key,
+                    Some(entry.version),
+                    &entry.value,
+                ))
+            })
+        });
+
+        diagnostic_sink
     };
 
     let mut io = IoHandler::new();
@@ -1272,34 +1242,23 @@ fn initialize_rpc(
         }
     });
     {
-        let thread = thread.clone();
-        let message_log = message_log.clone();
         let core_remote = core_remote.clone();
-        let cpu_pool = cpu_pool.clone();
+        let work_queue = work_queue.clone();
 
         let f = move |change: DidOpenTextDocumentParams| {
-            let message_log = message_log.clone();
-            let thread = thread.clone();
-            let cpu_pool = cpu_pool.clone();
-            let core_remote2 = core_remote.clone();
-
-            core_remote.spawn(move |core_handle| {
-                schedule_diagnostics(
-                    core_handle,
-                    core_remote2,
-                    message_log,
-                    &cpu_pool,
-                    thread,
-                    change.text_document.uri,
-                    Some(
-                        change
+            let work_queue = work_queue.clone();
+            core_remote.spawn(move |_| {
+                work_queue
+                    .send(Entry {
+                        key: change.text_document.uri,
+                        value: Arc::new(change.text_document.text),
+                        version: change
                             .text_document
                             .version
                             .expect("Text document version must exist"),
-                    ),
-                    Arc::new(change.text_document.text),
-                );
-                Ok(())
+                    })
+                    .map(|_| ())
+                    .map_err(|_| ())
             });
         };
         io.add_notification(notification!("textDocument/didOpen"), f);
@@ -1312,7 +1271,7 @@ fn initialize_rpc(
         change: DidChangeTextDocumentParams,
     ) -> BoxFuture<(), ()>
     where
-        S: Sink<SinkItem = Entry<Url, Arc<String>>, SinkError = ()> + Send + 'static,
+        S: Sink<SinkItem = Entry<Url, Arc<String>, u64>, SinkError = ()> + Send + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -1364,6 +1323,7 @@ fn initialize_rpc(
                         .send(Entry {
                             key: uri,
                             value: arc_source,
+                            version: new_version,
                         })
                         .map(|_| ()),
                 )
@@ -1386,7 +1346,7 @@ fn initialize_rpc(
                 ::std::panic::AssertUnwindSafe(did_change(
                     &thread,
                     message_log.clone(),
-                    work_queue.clone(),
+                    work_queue.clone().sink_map_err(|_| ()),
                     change,
                 )).catch_unwind()
                     .map_err(|err| {
