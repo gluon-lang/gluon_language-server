@@ -87,9 +87,9 @@ where
         DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri: uri,
-                language_id: Some("gluon".into()),
+                language_id: "gluon".into(),
                 text: text.into(),
-                version: Some(1),
+                version: 1,
             },
         },
     );

@@ -1252,10 +1252,7 @@ fn initialize_rpc(
                     .send(Entry {
                         key: change.text_document.uri,
                         value: Arc::new(change.text_document.text),
-                        version: change
-                            .text_document
-                            .version
-                            .expect("Text document version must exist"),
+                        version: change.text_document.version,
                     })
                     .map(|_| ())
                     .map_err(|_| ())
