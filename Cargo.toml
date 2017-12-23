@@ -44,7 +44,7 @@ serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
 languageserver-types = "0.19.0"
-debugserver-types = "0.3.0"
+debugserver-types = "0.4.0"
 
 gluon = "0.7.0"
 gluon_completion = "0.7.0"
