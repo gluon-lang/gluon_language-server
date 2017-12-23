@@ -325,6 +325,9 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                         resolve_provider: Some(true),
                         trigger_characters: vec![".".into()],
                     }),
+                    signature_help_provider: Some(SignatureHelpOptions {
+                        trigger_characters: Some(vec![" ".to_string()]),
+                    }),
                     hover_provider: Some(true),
                     document_formatting_provider: Some(true),
                     document_highlight_provider: Some(true),
@@ -1354,6 +1357,80 @@ fn initialize_rpc(
         };
 
         io.add_notification(notification!("textDocument/didChange"), f);
+    }
+    {
+        let thread = thread.clone();
+
+        io.add_async_method(
+            request!("textDocument/signatureHelp"),
+            move |params: TextDocumentPositionParams| -> BoxFuture<_, _> {
+                let result = retrieve_expr(&thread, &params.text_document.uri, |module| {
+                    let expr = &module.expr;
+
+                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let byte_pos = position_to_byte_pos(&source, &params.position)?;
+
+                    let env = thread.get_env();
+
+                    Ok(
+                        completion::signature_help(&*env, expr, byte_pos).map(|help| {
+                            let (_, metadata_map) = gluon::check::metadata::metadata(&*env, expr);
+                            let comment = if help.name.is_empty() {
+                                None
+                            } else {
+                                completion::suggest_metadata(
+                                    &metadata_map,
+                                    &*env,
+                                    expr,
+                                    byte_pos,
+                                    &help.name,
+                                ).and_then(|metadata| metadata.comment.clone())
+                            };
+
+                            SignatureHelp {
+                                signatures: vec![
+                                    SignatureInformation {
+                                        label: help.name,
+                                        documentation: Some(Documentation::MarkupContent(
+                                            MarkupContent {
+                                                kind: MarkupKind::Markdown,
+                                                value: format!(
+                                                    "```gluon\n{}\n```\n{}",
+                                                    help.typ.to_string(),
+                                                    comment.unwrap_or("".to_string())
+                                                ),
+                                            },
+                                        )),
+                                        parameters: Some(
+                                            ::gluon::base::types::arg_iter(&help.typ)
+                                                .map(|typ| ParameterInformation {
+                                                    label: "".to_string(),
+                                                    documentation: Some(
+                                                        Documentation::MarkupContent(
+                                                            MarkupContent {
+                                                                kind: MarkupKind::Markdown,
+                                                                value: format!(
+                                                                    "```gluon\n{}\n```",
+                                                                    typ
+                                                                ),
+                                                            },
+                                                        ),
+                                                    ),
+                                                })
+                                                .collect(),
+                                        ),
+                                    },
+                                ],
+                                active_signature: None,
+                                active_parameter: help.index.map(u64::from),
+                            }
+                        }),
+                    )
+                });
+
+                Box::new(result.into_future())
+            },
+        );
     }
     (
         io,

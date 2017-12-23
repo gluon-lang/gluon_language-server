@@ -43,14 +43,15 @@ serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-languageserver-types = "0.19.0"
+languageserver-types = "0.20.0"
 debugserver-types = "0.4.0"
 
-gluon = "0.7.0"
-gluon_completion = "0.7.0"
-gluon_format = "0.7.0"
+gluon = "0.7.1"
+gluon_completion = "0.7.1"
+gluon_format = "0.7.1"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
 partial-io = { version = "0.2.5", features = ["tokio", "quickcheck"] }
 quickcheck = "0.4.1"
+
