@@ -8,28 +8,9 @@ extern crate url;
 
 mod support;
 
-use std::io::Write;
+use languageserver_types::*;
 
-use languageserver_types::{Hover, MarkedString, Position, Range, TextDocumentIdentifier,
-                           TextDocumentPositionParams};
-
-fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
-where
-    W: Write,
-{
-    let hover = support::method_call(
-        "textDocument/hover",
-        id,
-        TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier {
-                uri: support::test_url(uri),
-            },
-            position: position,
-        },
-    );
-
-    support::write_message(stdin, hover).unwrap();
-}
+use support::{expect_notification, expect_response, hover};
 
 const STREAM_SOURCE: &'static str = r#"
 let prelude = import! "std/prelude.glu"
@@ -55,9 +36,11 @@ let from f : (Int -> Option a) -> Stream a =
 
 #[test]
 fn simple_hover() {
-    let hover: Hover = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let uri = "file:///c%3A/test/test.glu";
         support::did_open(stdin, uri, "123");
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         hover(
             stdin,
@@ -68,34 +51,37 @@ fn simple_hover() {
                 character: 2,
             },
         );
-    });
+        let hover: Hover = expect_response(stdout);
 
-    assert_eq!(
-        hover,
-        Hover {
-            contents: vec![MarkedString::String("Int".into())],
-            range: Some(Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
-                },
-                end: Position {
-                    line: 0,
-                    character: 3,
-                },
-            }),
-        }
-    );
+        assert_eq!(
+            hover,
+            Hover {
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                }),
+            }
+        );
+    });
 }
 
 #[test]
 fn identifier() {
-    let hover: Hover = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         let src = r#"
 let test = 1
 test
 "#;
         support::did_open(stdin, "test", src);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         hover(
             stdin,
@@ -106,30 +92,34 @@ test
                 character: 2,
             },
         );
-    });
 
-    assert_eq!(
-        hover,
-        Hover {
-            contents: vec![MarkedString::String("Int".into())],
-            range: Some(Range {
-                start: Position {
-                    line: 2,
-                    character: 0,
-                },
-                end: Position {
-                    line: 2,
-                    character: 4,
-                },
-            }),
-        }
-    );
+        let hover: Hover = expect_response(stdout);
+
+        assert_eq!(
+            hover,
+            Hover {
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                range: Some(Range {
+                    start: Position {
+                        line: 2,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 2,
+                        character: 4,
+                    },
+                }),
+            }
+        );
+    });
 }
 
 #[test]
 fn stream() {
-    let hover: Hover = support::send_rpc(|stdin| {
+    support::send_rpc(|stdin, stdout| {
         support::did_open(stdin, "stream", STREAM_SOURCE);
+
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
         hover(
             stdin,
@@ -140,22 +130,24 @@ fn stream() {
                 character: 29,
             },
         );
-    });
 
-    assert_eq!(
-        hover,
-        Hover {
-            contents: vec![MarkedString::String("Int".into())],
-            range: Some(Range {
-                start: Position {
-                    line: 13,
-                    character: 28,
-                },
-                end: Position {
-                    line: 13,
-                    character: 29,
-                },
-            }),
-        }
-    );
+        let hover: Hover = expect_response(stdout);
+
+        assert_eq!(
+            hover,
+            Hover {
+                contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                range: Some(Range {
+                    start: Position {
+                        line: 13,
+                        character: 28,
+                    },
+                    end: Position {
+                        line: 13,
+                        character: 29,
+                    },
+                }),
+            }
+        );
+    });
 }

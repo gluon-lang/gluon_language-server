@@ -3,11 +3,11 @@
   "description": "Language server for the gluon programming language",
   "author": "Markus Westerlind",
   "license": "MIT",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "Marwes",
   "repository": "https://github.com/gluon-lang/gluon_language-server",
   "engines": {
-    "vscode": "^1.8.1"
+    "vscode": "^1.15.0"
   },
   "categories": [
     "Other"
@@ -110,13 +110,12 @@
     "postinstall": "node ./node_modules/vscode/bin/install"
   },
   "devDependencies": {
-    "@types/node": "^6.0.40",
-    "typescript": "^2.4.1",
-    "vscode": "^1.0.0"
+    "@types/node": "^6.0.94",
+    "typescript": "^2.6.2",
+    "vscode": "^1.1.10"
   },
   "dependencies": {
-    "vscode-debugadapter": "^1.13.1",
-    "vscode-languageclient": "^3.0.3",
-    "vscode": "^1.0.0"
+    "vscode-debugadapter": "^1.25.0",
+    "vscode-languageclient": "^3.5.0"
   }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "gluon_language-server"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Markus Westerlind <marwes91@gmail.com>"]
 description = "Language server providing completion for gluon"
 license = "MIT"
@@ -31,7 +31,7 @@ url_serde = "0.2.0"
 
 combine = "3.0.0-alpha.4"
 
-jsonrpc-core = "7.0.0"
+jsonrpc-core = "8.0.1"
 futures = "0.1.0"
 futures-cpupool = "0.1.0"
 tokio-core = "0.1.9"
@@ -43,12 +43,14 @@ serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-languageserver-types = "0.11.0"
-debugserver-types = "0.3.0"
+languageserver-types = "0.19.0"
+debugserver-types = "0.4.0"
 
-gluon = "0.6.1"
-gluon_completion = "0.6.1"
-gluon_format = "0.6.1"
+gluon = "0.7.0"
+gluon_completion = "0.7.0"
+gluon_format = "0.7.0"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
+partial-io = { version = "0.2.5", features = ["tokio", "quickcheck"] }
+quickcheck = "0.4.1"

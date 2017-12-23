@@ -35,12 +35,13 @@ use serde_json::Value;
 
 use debugserver_types::*;
 
+use gluon::base::filename_to_module;
 use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{arg_iter, ArcType, Type};
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
-use gluon::vm::thread::{RootedThread, Thread as GluonThread, ThreadInternal, LINE_FLAG};
-use gluon::{filename_to_module, Compiler, Error as GluonError};
+use gluon::vm::thread::{HookFlags, RootedThread, Thread as GluonThread, ThreadInternal};
+use gluon::{Compiler, Error as GluonError};
 use gluon::import::Import;
 
 use gluon_language_server::rpc::{read_message, write_message, write_message_str,
@@ -99,14 +100,16 @@ impl LanguageServerCommand<Value> for LaunchHandler {
 
 impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
-        let program = args.get("program").and_then(|s| s.as_str()).ok_or_else(|| {
-            ServerError {
-                message: "No program argument found".into(),
-                data: None,
-            }
-        })?;
+        let program = args.get("program")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                ServerError {
+                    message: "No program argument found".into(),
+                    data: None,
+                }
+            })?;
         let program = strip_file_prefix(&self.debugger.thread, program);
-        let module = filename_to_module(&program);
+        let module = format!("@{}", filename_to_module(&program));
         let expr = {
             let mut file = File::open(&*program).map_err(|_| {
                 ServerError {
@@ -126,6 +129,17 @@ impl LaunchHandler {
             .context()
             .set_hook(Some(Box::new(move |_, debug_info| {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
+                let stack_info = debug_info.stack_info(0).unwrap();
+                debug!(
+                    "Debugger at `{}:{}` {}. Reason {}",
+                    stack_info.source_name(),
+                    stack_info.function_name().unwrap(),
+                    stack_info
+                        .line()
+                        .as_ref()
+                        .map_or(&"unknown" as &::std::fmt::Display, |s| s),
+                    pause
+                );
                 let reason = match pause {
                     PAUSE => "pause",
                     STEP_IN => "step",
@@ -157,8 +171,10 @@ impl LaunchHandler {
                     }
                     _ => {
                         let stack_info = debug_info.stack_info(0).unwrap();
-                        match stack_info.line() {
+                        let line = stack_info.line();
+                        match line {
                             Some(line) if debugger.should_break(stack_info.source_name(), line) => {
+                                debug!("Breaking on {}", line);
                                 "breakpoint"
                             }
                             _ => return Ok(Async::Ready(())),
@@ -197,8 +213,11 @@ impl LaunchHandler {
             )).and_then(|compile_value| {
                 // Since we cannot yield while importing modules we don't enable pausing or
                 // breakpoints until we start executing the main module
-                debugger.thread.context().set_hook_mask(LINE_FLAG);
-                compile_value.run_expr(&mut compiler, &debugger.thread, &module, &expr, ())
+                debugger
+                    .thread
+                    .context()
+                    .set_hook_mask(HookFlags::LINE_FLAG);
+                compile_value.run_expr(&mut compiler, &*debugger.thread, &module, &expr, ())
             })
                 .map(|_| ());
             let mut result = match run_future {
@@ -648,7 +667,7 @@ where
     });
 
     let mut io = IoHandler::new();
-    io.add_async_method(
+    io.add_method(
         "initialize",
         ServerCommand::method(InitializeHandler {
             debugger: debugger.clone(),
@@ -662,16 +681,16 @@ where
             debugger.continue_barrier.wait();
             Box::new(Ok(()).into_future())
         };
-        io.add_async_method("configurationDone", ServerCommand::method(handler));
+        io.add_method("configurationDone", ServerCommand::method(handler));
     }
 
-    io.add_async_method(
+    io.add_method(
         "launch",
         ServerCommand::method(LaunchHandler {
             debugger: debugger.clone(),
         }),
     );
-    io.add_async_method(
+    io.add_method(
         "disconnect",
         ServerCommand::method(DisconnectHandler {
             exit_token: exit_token.clone(),
@@ -682,13 +701,14 @@ where
         let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
             let breakpoints = args.breakpoints
                 .iter()
-                .flat_map(|bs| {
-                    bs.iter().map(|breakpoint| debugger.line(breakpoint.line))
-                })
+                .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
                 .collect();
 
             let opt = args.source.path.as_ref().map(|path| {
-                filename_to_module(&strip_file_prefix(&debugger.thread, path))
+                format!(
+                    "@{}",
+                    filename_to_module(&strip_file_prefix(&debugger.thread, path))
+                )
             });
             if let Some(path) = opt {
                 let mut sources = debugger.sources.lock().unwrap();
@@ -723,7 +743,7 @@ where
             )
         };
 
-        io.add_async_method("setBreakpoints", ServerCommand::method(set_break));
+        io.add_method("setBreakpoints", ServerCommand::method(set_break));
     }
 
     let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
@@ -739,7 +759,7 @@ where
         )
     };
 
-    io.add_async_method("threads", ServerCommand::method(threads));
+    io.add_method("threads", ServerCommand::method(threads));
 
     {
         let debugger = debugger.clone();
@@ -802,7 +822,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("stackTrace", ServerCommand::method(stack_trace));
+        io.add_method("stackTrace", ServerCommand::method(stack_trace));
     }
 
     {
@@ -846,7 +866,7 @@ where
             }
             Box::new(Ok(ScopesResponseBody { scopes: scopes }).into_future())
         };
-        io.add_async_method("scopes", ServerCommand::method(scopes));
+        io.add_method("scopes", ServerCommand::method(scopes));
     }
 
     {
@@ -859,7 +879,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("continue", ServerCommand::method(cont));
+        io.add_method("continue", ServerCommand::method(cont));
     }
 
     {
@@ -880,7 +900,7 @@ where
             };
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("next", ServerCommand::method(cont));
+        io.add_method("next", ServerCommand::method(cont));
     }
 
     {
@@ -890,7 +910,7 @@ where
             debugger.pause.store(STEP_IN, Ordering::Release);
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("stepIn", ServerCommand::method(cont));
+        io.add_method("stepIn", ServerCommand::method(cont));
     }
 
     {
@@ -911,7 +931,7 @@ where
             };
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("stepOut", ServerCommand::method(cont));
+        io.add_method("stepOut", ServerCommand::method(cont));
     }
 
     {
@@ -920,7 +940,7 @@ where
             debugger.pause.store(PAUSE, Ordering::Release);
             Box::new(Ok(None).into_future())
         };
-        io.add_async_method("pause", ServerCommand::method(cont));
+        io.add_method("pause", ServerCommand::method(cont));
     }
 
     {
@@ -933,7 +953,7 @@ where
                 }).into_future(),
             )
         };
-        io.add_async_method("variables", ServerCommand::method(cont));
+        io.add_method("variables", ServerCommand::method(cont));
     }
 
     // The response needs the command so we need extract it from the request and inject it
