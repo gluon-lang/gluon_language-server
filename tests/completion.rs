@@ -203,7 +203,7 @@ te
         assert_eq!(
             actual,
             CompletionItem {
-                documentation: Some(Documentation::String("doc".to_string())),
+                documentation: Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: "doc".to_string() })),
                 ..completion
             }
         );

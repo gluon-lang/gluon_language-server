@@ -326,7 +326,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                         trigger_characters: vec![".".into()],
                     }),
                     signature_help_provider: Some(SignatureHelpOptions {
-                        trigger_characters: Some(vec![" ".to_string()]),
+                        trigger_characters: None,
                     }),
                     hover_provider: Some(true),
                     document_formatting_provider: Some(true),
