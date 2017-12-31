@@ -425,6 +425,23 @@ where
     })
 }
 
+fn make_documentation<T>(typ: Option<T>, comment: &str) -> Documentation
+where
+    T: fmt::Display,
+{
+    use std::fmt::Write;
+    let mut value = String::new();
+    if let Some(typ) = typ {
+        write!(value, "```gluon\n{}\n```\n", typ).unwrap();
+    }
+    value.push_str(comment);
+
+    Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct CompletionData {
     #[serde(with = "url_serde")] pub text_document_uri: Url,
@@ -1098,7 +1115,10 @@ fn initialize_rpc(
                     .and_then(move |comment| {
                         log_message!(message_log2, "{:?}", comment)
                             .map(move |()| {
-                                item.documentation = comment.map(Documentation::String);
+                                item.documentation = Some(make_documentation(
+                                    None::<&str>,
+                                    comment.as_ref().map_or("", |comment| comment),
+                                ));
                                 item
                             })
                             .map_err(|_| panic!("Unable to send log message"))
@@ -1391,31 +1411,18 @@ fn initialize_rpc(
                                 signatures: vec![
                                     SignatureInformation {
                                         label: help.name,
-                                        documentation: Some(Documentation::MarkupContent(
-                                            MarkupContent {
-                                                kind: MarkupKind::Markdown,
-                                                value: format!(
-                                                    "```gluon\n{}\n```\n{}",
-                                                    help.typ.to_string(),
-                                                    comment.unwrap_or("".to_string())
-                                                ),
-                                            },
+                                        documentation: Some(make_documentation(
+                                            Some(&help.typ),
+                                            &comment.unwrap_or("".to_string()),
                                         )),
                                         parameters: Some(
                                             ::gluon::base::types::arg_iter(&help.typ)
                                                 .map(|typ| ParameterInformation {
                                                     label: "".to_string(),
-                                                    documentation: Some(
-                                                        Documentation::MarkupContent(
-                                                            MarkupContent {
-                                                                kind: MarkupKind::Markdown,
-                                                                value: format!(
-                                                                    "```gluon\n{}\n```",
-                                                                    typ
-                                                                ),
-                                                            },
-                                                        ),
-                                                    ),
+                                                    documentation: Some(make_documentation(
+                                                        Some(typ),
+                                                        "",
+                                                    )),
                                                 })
                                                 .collect(),
                                         ),
