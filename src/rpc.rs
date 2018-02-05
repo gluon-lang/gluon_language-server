@@ -238,7 +238,7 @@ use self::combine::byte::digit;
 fn combine_decode<'a, P, R>(
     mut parser: P,
     src: &'a [u8],
-) -> Result<Option<(R, usize)>, Errors<usize, u8, String>>
+) -> Result<Option<(R, usize)>, Errors<u8, String, usize>>
 where
     P: Parser<Input = easy::Stream<&'a [u8]>, Output = R>,
 {
