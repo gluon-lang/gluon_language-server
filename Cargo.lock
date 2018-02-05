@@ -129,11 +129,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "combine"
-version = "3.0.0-alpha.4"
+version = "3.0.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "ascii 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "byteorder 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "either 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "memchr 2.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "unreachable 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -336,7 +339,7 @@ version = "0.7.0"
 dependencies = [
  "bytes 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.29.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "combine 3.0.0-alpha.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "combine 3.0.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "debugserver-types 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "env_logger 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "fibers 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1154,7 +1157,7 @@ dependencies = [
 "checksum cfg-if 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "d4c819a1287eb618df47cc647173c5c4c66ba19d888a6e50d605672aed3140de"
 "checksum clap 2.29.0 (registry+https://github.com/rust-lang/crates.io-index)" = "110d43e343eb29f4f51c1db31beb879d546db27998577e5715270a54bcf41d3f"
 "checksum collect-mac 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "f168712e49987bd2f51cb855c4585999e12b1a0abdff60fea4b81b41f2010264"
-"checksum combine 3.0.0-alpha.4 (registry+https://github.com/rust-lang/crates.io-index)" = "18f3b49bdfe3d60a92c4c1750c3b2efe4c2ab00117e1cbfeec49c049b3191bae"
+"checksum combine 3.0.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)" = "8113ef991b7262e2b95d3c5051434a529431f2ac3fba6e1a55786733e62136c8"
 "checksum debugserver-types 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)" = "75a09c474eda6afb5706b8cda65bd5394a22349b883241df8177589fe7506077"
 "checksum diff 0.1.11 (registry+https://github.com/rust-lang/crates.io-index)" = "3c2b69f912779fbb121ceb775d74d51e915af17aaebc38d28a592843a2dd0a3a"
 "checksum difference 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "b3304d19798a8e067e48d8e69b2c37f0b5e9b4e462504ad9e27e9f3fce02bba8"
