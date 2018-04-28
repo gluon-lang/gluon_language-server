@@ -108,9 +108,10 @@ where
             Ok(value) => {
                 return Box::new(self.0.execute(value).then(|result| {
                     match result {
-                        Ok(value) => Ok(to_value(&value)
-                            .expect("result data could not be serialized"))
-                            .into_future(),
+                        Ok(value) => {
+                            Ok(to_value(&value).expect("result data could not be serialized"))
+                                .into_future()
+                        }
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
                             message: error.message,

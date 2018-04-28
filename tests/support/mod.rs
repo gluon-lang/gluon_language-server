@@ -135,7 +135,7 @@ pub fn did_change_event<W: ?Sized>(
         DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
                 uri: test_url(uri),
-                version,
+                version: Some(version),
             },
             content_changes,
         },
@@ -281,7 +281,7 @@ pub struct WritePipe {
     sender: SyncSender<Vec<u8>>,
 }
 
-impl io::Write for WritePipe {
+impl<'a> io::Write for &'a WritePipe {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         if data.is_empty() {
             return Ok(0);
@@ -297,7 +297,17 @@ impl io::Write for WritePipe {
     }
 }
 
-fn pipe() -> (ReadPipe, WritePipe) {
+impl io::Write for WritePipe {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        (&*self).write(data)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self).flush()
+    }
+}
+
+pub fn pipe() -> (ReadPipe, WritePipe) {
     let (sender, receiver) = sync_channel(10);
     (
         ReadPipe {

@@ -15,9 +15,7 @@ extern crate tokio_core;
 extern crate tokio_io;
 
 extern crate env_logger;
-extern crate gluon;
-extern crate gluon_completion as completion;
-extern crate gluon_format;
+
 #[macro_use]
 extern crate log;
 extern crate url;
@@ -31,12 +29,19 @@ extern crate partial_io;
 #[macro_use]
 extern crate quickcheck;
 
+extern crate codespan;
+extern crate codespan_reporting;
+
 #[macro_use]
 extern crate languageserver_types;
 
+extern crate gluon;
+extern crate gluon_completion as completion;
+extern crate gluon_format;
+
 macro_rules! log_message {
     ($sender: expr, $($ts: tt)+) => {
-        if log_enabled!(::log::LogLevel::Debug) {
+        if log_enabled!(::log::Level::Debug) {
             ::log_message($sender, format!( $($ts)+ ))
         } else {
             Box::new(Ok(()).into_future())
@@ -45,40 +50,40 @@ macro_rules! log_message {
 }
 
 macro_rules! try_future {
-    ($e: expr) => {
+    ($e:expr) => {
+
         match $e {
             Ok(x) => x,
-            Err(err) => return Box::new(Err(err.into()).into_future())
+            Err(err) => return Box::new(Err(err.into()).into_future()),
         }
     }
 }
 
-pub mod rpc;
-mod text_edit;
+pub mod debugger;
 mod async_io;
 mod location_translation;
+pub mod rpc;
+mod text_edit;
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use url::Url;
 
-use gluon::base::filename_to_module;
 use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
+use gluon::base::filename_to_module;
 use gluon::base::fnv::FnvMap;
 use gluon::base::kind::ArcKind;
 use gluon::base::metadata::Metadata;
-use gluon::base::pos::{self, BytePos, Span, Spanned};
-use gluon::base::source;
+use gluon::base::pos::{self, BytePos, Spanned};
 use gluon::base::symbol::Symbol;
 use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
-use gluon::import::{Import, Importer};
-use gluon::vm::internal::Value as GluonValue;
-use gluon::vm::thread::{Thread, ThreadInternal};
-use gluon::vm::macros::Error as MacroError;
 use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
-use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 use gluon::either;
+use gluon::import::{Import, Importer};
+use gluon::vm::macros::Error as MacroError;
+use gluon::vm::thread::{Thread, ThreadInternal};
+use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 
 use completion::CompletionSymbol;
 
@@ -87,19 +92,19 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::mem;
 use std::io::{self, BufReader};
-use std::path::PathBuf;
+use std::mem;
+use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::{Arc, Mutex, RwLock};
 
 use languageserver_types::*;
 
-use futures::{future, Future, IntoFuture, Sink, Stream};
 use futures::future::Either;
 use futures::stream;
-use futures::sync::oneshot;
 use futures::sync::mpsc;
+use futures::sync::oneshot;
+use futures::{future, Future, IntoFuture, Sink, Stream};
 
 use futures_cpupool::CpuPool;
 
@@ -111,10 +116,9 @@ use bytes::BytesMut;
 
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
+use location_translation::{byte_span_to_range, position_to_byte_pos};
 use rpc::*;
 use text_edit::TextChanges;
-use location_translation::{byte_pos_to_location, byte_span_to_range, position_to_byte_pos,
-                           span_to_range};
 
 fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), ()> {
     debug!("{}", message);
@@ -179,7 +183,7 @@ fn ident_to_completion_item_kind(
 }
 
 fn completion_symbol_to_symbol_information(
-    source: &source::Source,
+    source: &codespan::FileMap,
     symbol: Spanned<CompletionSymbol, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
@@ -198,7 +202,6 @@ fn completion_symbol_to_symbol_information(
         kind,
         location: Location {
             uri,
-
             range: byte_span_to_range(source, symbol.span)?,
         },
         name: name.declared_name().to_string(),
@@ -207,9 +210,8 @@ fn completion_symbol_to_symbol_information(
 }
 
 struct Module {
-    lines: source::Lines,
+    source: Arc<codespan::FileMap>,
     expr: SpannedExpr<Symbol>,
-    source: Arc<String>,
     uri: Url,
     dirty: bool,
     waiters: Vec<oneshot::Sender<()>>,
@@ -220,9 +222,8 @@ struct Module {
 impl Module {
     fn empty(uri: Url) -> Module {
         Module {
-            lines: source::Lines::new("".bytes()),
+            source: Arc::new(codespan::FileMap::new("".into(), "".into())),
             expr: pos::spanned2(0.into(), 0.into(), Expr::Error(None)),
-            source: Arc::new("".to_string()),
             uri,
             dirty: false,
             waiters: Vec::new(),
@@ -261,15 +262,13 @@ impl Importer for CheckImporter {
             |typ| typ.clone(),
         );
 
-        let lines = source::Lines::new(input.as_bytes().iter().cloned());
         let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
 
         let previous = self.0.lock().unwrap().insert(
             module_name.into(),
             self::Module {
-                lines: lines,
                 expr: expr,
-                source: Arc::new(input.into()),
+                source: compiler.get_filemap(&module_name).unwrap().clone(),
                 uri: module_name_to_file_(module_name).map_err(|err| (None, err.into()))?,
                 dirty: false,
                 waiters: Vec::new(),
@@ -290,12 +289,7 @@ impl Importer for CheckImporter {
         }
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
-            .set_global(
-                Symbol::from(format!("@{}", module_name)),
-                typ.clone(),
-                metadata,
-                GluonValue::Int(0),
-            )
+            .set_dummy_global(module_name, typ.clone(), metadata)
             .map_err(|err| (None, err.into()))?;
 
         result.map(|_| ()).map_err(|err| (Some(typ), err.into()))
@@ -320,10 +314,12 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         Box::new(
             Ok(InitializeResult {
                 capabilities: ServerCapabilities {
-                    text_document_sync: Some(TextDocumentSyncKind::Incremental),
+                    text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                        TextDocumentSyncKind::Incremental,
+                    )),
                     completion_provider: Some(CompletionOptions {
                         resolve_provider: Some(true),
-                        trigger_characters: vec![".".into()],
+                        trigger_characters: Some(vec![".".into()]),
                     }),
                     signature_help_provider: Some(SignatureHelpOptions {
                         trigger_characters: None,
@@ -408,20 +404,12 @@ fn retrieve_expr_with_pos<F, R>(
     f: F,
 ) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&SpannedExpr<Symbol>, BytePos) -> Result<R, ServerError<()>>,
+    F: FnOnce(&Module, BytePos) -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, |module| {
-        let Module {
-            ref expr,
-            ref lines,
-            ..
-        } = *module;
+        let byte_pos = position_to_byte_pos(&module.source, position)?;
 
-        let source = source::Source::with_lines(&module.source, lines.clone());
-
-        let byte_pos = position_to_byte_pos(&source, position)?;
-
-        f(expr, byte_pos)
+        f(module, byte_pos)
     })
 }
 
@@ -444,23 +432,24 @@ where
 
 #[derive(Serialize, Deserialize)]
 pub struct CompletionData {
-    #[serde(with = "url_serde")] pub text_document_uri: Url,
+    #[serde(with = "url_serde")]
+    pub text_document_uri: Url,
     pub position: Position,
 }
 
 #[derive(Clone)]
 struct Completion(RootedThread);
 impl LanguageServerCommand<CompletionParams> for Completion {
-    type Output = CompletionResponse;
+    type Output = Option<CompletionResponse>;
     type Error = ();
-    fn execute(&self, change: CompletionParams) -> BoxFuture<CompletionResponse, ServerError<()>> {
+    fn execute(&self, change: CompletionParams) -> BoxFuture<Self::Output, ServerError<()>> {
         let thread = &self.0;
         let self_ = self.clone();
         let text_document_uri = change.text_document.uri.clone();
         let result = retrieve_expr_future(&thread, &text_document_uri, |module| {
             let Module {
                 ref expr,
-                ref lines,
+                ref source,
                 dirty,
                 ref mut waiters,
                 ..
@@ -480,15 +469,15 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                 );
             }
 
-            let source = source::Source::with_lines(&module.source, lines.clone());
             let byte_pos = try_future!(position_to_byte_pos(&source, &change.position));
 
             let query = completion::SuggestionQuery {
                 modules: with_import(thread, |import| import.modules()),
                 ..completion::SuggestionQuery::default()
             };
+
             let suggestions = query
-                .suggest(&*thread.get_env(), expr, byte_pos)
+                .suggest(&*thread.get_env(), source.span(), expr, byte_pos)
                 .into_iter()
                 .filter(|suggestion| !suggestion.name.starts_with("__"))
                 .collect::<Vec<_>>();
@@ -527,7 +516,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
 
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
-            Box::new(Ok(CompletionResponse::Array(items)).into_future())
+            Box::new(Ok(Some(CompletionResponse::Array(items))).into_future())
         });
         Box::new(result.into_future())
     }
@@ -551,25 +540,28 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                 retrieve_expr(thread, &change.text_document.uri, |module| {
                     let expr = &module.expr;
 
-                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let source = &module.source;
                     let byte_pos = position_to_byte_pos(&source, &change.position)?;
 
                     let env = thread.get_env();
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
-                    let opt_metadata = completion::get_metadata(&metadata_map, expr, byte_pos);
+                    let opt_metadata =
+                        completion::get_metadata(&metadata_map, source.span(), expr, byte_pos);
                     let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
-                    Ok(completion::completion(extract, expr, byte_pos)
-                        .map(|(typ, span)| {
-                            let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                                Some(comment) => format!("{}\n\n{}", typ, comment),
-                                None => format!("{}", typ),
-                            };
-                            Some(Hover {
-                                contents: HoverContents::Scalar(MarkedString::String(contents)),
-                                range: byte_span_to_range(&source, span).ok(),
+                    Ok(
+                        completion::completion(extract, source.span(), expr, byte_pos)
+                            .map(|(typ, span)| {
+                                let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                                    Some(comment) => format!("{}\n\n{}", typ, comment),
+                                    None => format!("{}", typ),
+                                };
+                                Some(Hover {
+                                    contents: HoverContents::Scalar(MarkedString::String(contents)),
+                                    range: byte_span_to_range(&source, span).ok(),
+                                })
                             })
-                        })
-                        .unwrap_or_else(|()| None))
+                            .unwrap_or_else(|()| None),
+                    )
                 })
             })()
                 .into_future(),
@@ -581,26 +573,50 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     }
 }
 
+fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, Box<StdError + Send + Sync>> {
+    match *name {
+        codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
+        codespan::FileName::Real(ref p) => filename_to_url(p),
+    }
+}
+
+fn codspan_name_to_module(name: &codespan::FileName) -> String {
+    match *name {
+        codespan::FileName::Virtual(ref s) => s.to_string(),
+        codespan::FileName::Real(ref p) => filename_to_module(&p.display().to_string()),
+    }
+}
+
 fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
     let mut result = s.replace(".", "/");
     result.push_str(".glu");
-    let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
-        Ok(path) => Ok(path.join(result)),
-        Err(_) => Err(err),
-    })?;
-    Ok(url::Url::from_file_path(path)
+    Ok(filename_to_url(Path::new(&result))
         .or_else(|_| url::Url::from_file_path(s))
         .map_err(|_| format!("Unable to convert module name to a url: `{}`", s))?)
 }
 
-fn module_name_to_file(importer: &CheckImporter, s: &str) -> Url {
+fn filename_to_url(result: &Path) -> Result<Url, Box<StdError + Send + Sync>> {
+    let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
+        Ok(path) => Ok(path.join(result)),
+        Err(_) => Err(err),
+    })?;
+    Ok(url::Url::from_file_path(path).map_err(|_| {
+        format!(
+            "Unable to convert module name to a url: `{}`",
+            result.display()
+        )
+    })?)
+}
+
+fn module_name_to_file(importer: &CheckImporter, name: &codespan::FileName) -> Url {
+    let s = codspan_name_to_module(name);
     importer
         .0
         .lock()
         .unwrap()
-        .get(s)
+        .get(&s)
         .map(|source| source.uri.clone())
-        .unwrap_or_else(|| module_name_to_file_(s).unwrap())
+        .unwrap_or_else(|| module_name_to_file_(&s).unwrap())
 }
 
 fn with_import<F, R>(thread: &Thread, f: F) -> R
@@ -652,173 +668,131 @@ pub fn strip_file_prefix(
     ))
 }
 
-fn typecheck(
-    thread: &Thread,
-    remote: &reactor::Remote,
-    uri_filename: &Url,
-    version: Option<u64>,
-    fileinput: &str,
-) -> GluonResult<()> {
-    let filename = strip_file_prefix_with_thread(thread, uri_filename);
-    let name = filename_to_module(&filename);
-
-    let (expr_opt, errors) = typecheck_(thread, &name, fileinput);
-
-    let import = thread.get_macros().get("import").expect("Import macro");
-    let import = import
-        .downcast_ref::<Import<CheckImporter>>()
-        .expect("Check importer");
-    let mut importer = import.importer.0.lock().unwrap();
-
-    match importer.entry(name.into()) {
-        hash_map::Entry::Occupied(mut entry) => {
-            let module = entry.get_mut();
-
-            if let Some(expr) = expr_opt {
-                module.expr = expr;
-            }
-            module.uri = uri_filename.clone();
-
-            if version.is_some() {
-                module.version = version;
-            }
-
-            module.dirty = false;
-
-            let waiters = mem::replace(&mut module.waiters, Vec::new());
-            remote.spawn(move |_| {
-                future::join_all(waiters.into_iter().map(|sender| sender.send(())))
-                    .map(|_| ())
-                    .map_err(|_| ())
-            });
-        }
-        hash_map::Entry::Vacant(entry) => {
-            let lines = source::Lines::new(fileinput.as_bytes().iter().cloned());
-            entry.insert(self::Module {
-                lines: lines,
-                expr: expr_opt
-                    .unwrap_or_else(|| pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
-                source: Arc::new(fileinput.into()),
-                uri: uri_filename.clone(),
-                dirty: false,
-                waiters: Vec::new(),
-                version: version,
-                text_changes: TextChanges::new(),
-            });
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.into())
-    }
-}
-
-fn typecheck_(
-    thread: &Thread,
-    name: &str,
-    fileinput: &str,
-) -> (Option<SpannedExpr<Symbol>>, Errors<GluonError>) {
-    debug!("Loading: `{}`", name);
-    let mut errors = Errors::new();
-    let mut compiler = Compiler::new();
-    // The parser may find parse errors but still produce an expression
-    // For that case still typecheck the expression but return the parse error afterwards
-    let mut expr = match compiler.parse_partial_expr(&TypeCache::new(), &name, fileinput) {
-        Ok(expr) => expr,
-        Err((None, err)) => {
-            errors.push(err.into());
-            return (None, errors);
-        }
-        Err((Some(expr), err)) => {
-            errors.push(err.into());
-            expr
-        }
+fn to_lsp_diagnostic(
+    code_map: &codespan::CodeMap,
+    diagnostic: codespan_reporting::Diagnostic,
+) -> Result<Diagnostic, ServerError<()>> {
+    let unknown = Position {
+        character: 0,
+        line: 0,
+    };
+    let unknown_range = Range {
+        start: unknown,
+        end: unknown,
     };
 
-    if let Err((_, err)) = (&mut expr).expand_macro(&mut compiler, thread, &name) {
-        errors.push(err);
-    }
-
-    let check_result = (MacroValue { expr: &mut expr })
-        .typecheck(&mut compiler, thread, &name, fileinput)
-        .map(|value| value.typ);
-    let typ = match check_result {
-        Ok(typ) => typ,
-        Err(err) => {
-            errors.push(err);
-            expr.try_type_of(&*thread.global_env().get_env())
-                .unwrap_or_else(|_| Type::hole())
+    let mut primary_file_map = None;
+    let range = match diagnostic
+        .labels
+        .iter()
+        .find(|label| label.style == codespan_reporting::LabelStyle::Primary)
+    {
+        Some(label) => {
+            let file_map = code_map
+                .find_file(label.span.start())
+                .ok_or_else(|| ServerError::from(format!("Span does not exist in codemap")))?;
+            primary_file_map = Some(file_map);
+            byte_span_to_range(&file_map, label.span)?
         }
+        None => unknown_range,
     };
-    let metadata = Metadata::default();
-    if let Err(err) = thread.global_env().set_global(
-        Symbol::from(format!("@{}", name)),
-        typ,
-        metadata,
-        GluonValue::Int(0),
-    ) {
-        errors.push(err.into());
-    }
 
-    (Some(expr), errors)
+    let related_information = diagnostic
+        .labels
+        .into_iter()
+        .map(|label| {
+            let location = match primary_file_map {
+                Some(file_map) if label.span.start() == BytePos::none() => Location {
+                    uri: codespan_name_to_file(file_map.name())?,
+                    range: unknown_range,
+                },
+                _ => {
+                    let file_map = code_map.find_file(label.span.start()).ok_or_else(|| {
+                        ServerError::from(format!("Span {} does not exist in codemap", label.span))
+                    })?;
+                    Location {
+                        uri: codespan_name_to_file(file_map.name())?,
+                        range: byte_span_to_range(file_map, label.span)?,
+                    }
+                }
+            };
+            Ok(DiagnosticRelatedInformation {
+                location,
+                message: label.message.unwrap_or(String::new()),
+            })
+        })
+        .collect::<Result<Vec<_>, ServerError<()>>>()?;
+    Ok(Diagnostic {
+        message: diagnostic.message,
+        range,
+        severity: Some(match diagnostic.severity {
+            codespan_reporting::Severity::Error | codespan_reporting::Severity::Bug => {
+                DiagnosticSeverity::Error
+            }
+            codespan_reporting::Severity::Warning => DiagnosticSeverity::Warning,
+            codespan_reporting::Severity::Note => DiagnosticSeverity::Information,
+            codespan_reporting::Severity::Help => DiagnosticSeverity::Hint,
+        }),
+        related_information: if related_information.is_empty() {
+            None
+        } else {
+            Some(related_information)
+        },
+        ..Diagnostic::default()
+    })
 }
 
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
+    code_map: &codespan::CodeMap,
     importer: &CheckImporter,
     filename: &Url,
-    source: &source::Source,
     err: GluonError,
 ) -> Result<(), ServerError<()>> {
+    use gluon::base::error::AsDiagnostic;
     fn into_diagnostic<T>(
-        source: &source::Source,
-        err: pos::Spanned<T, pos::Location>,
+        code_map: &codespan::CodeMap,
+        err: pos::Spanned<T, pos::BytePos>,
     ) -> Result<Diagnostic, ServerError<()>>
     where
-        T: fmt::Display,
+        T: fmt::Display + AsDiagnostic,
     {
         Ok(Diagnostic {
-            message: format!("{}", err.value),
-            severity: Some(DiagnosticSeverity::Error),
-            range: span_to_range(source, &err.span)?,
             source: Some("gluon".to_string()),
-            ..Diagnostic::default()
+            ..to_lsp_diagnostic(code_map, err.as_diagnostic())?
         })
     }
 
-    match err {
-        GluonError::Typecheck(err) => diagnostics
-            .entry(module_name_to_file(importer, &err.source_name))
+    fn insert_in_file_error<T>(
+        diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
+        code_map: &codespan::CodeMap,
+        importer: &CheckImporter,
+        in_file_error: gluon::base::error::InFile<T>,
+    ) -> Result<(), ServerError<()>>
+    where
+        T: fmt::Display + AsDiagnostic,
+    {
+        diagnostics
+            .entry(module_name_to_file(importer, &in_file_error.source_name()))
             .or_insert(Vec::new())
-            .extend(err.errors()
+            .extend(in_file_error
+                .errors()
                 .into_iter()
-                .map(|err| into_diagnostic(source, err))
-                .collect::<Result<Vec<_>, _>>()?),
+                .map(|err| into_diagnostic(code_map, err))
+                .collect::<Result<Vec<_>, _>>()?);
+        Ok(())
+    }
 
-        GluonError::Parse(err) => diagnostics
-            .entry(module_name_to_file(importer, &err.source_name))
-            .or_insert(Vec::new())
-            .extend(err.errors()
-                .into_iter()
-                .map(|err| into_diagnostic(source, err))
-                .collect::<Result<Vec<_>, _>>()?),
+    match err {
+        GluonError::Typecheck(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
+
+        GluonError::Parse(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
+
+        GluonError::Macro(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
 
         GluonError::Multiple(errors) => for err in errors {
-            create_diagnostics(diagnostics, importer, filename, source, err)?;
+            create_diagnostics(diagnostics, code_map, importer, filename, err)?;
         },
-
-        GluonError::Macro(error) => diagnostics
-            .entry(filename.clone())
-            .or_insert(Vec::new())
-            .push(into_diagnostic(
-                source,
-                pos::spanned2(
-                    byte_pos_to_location(source, error.span.start)?,
-                    byte_pos_to_location(source, error.span.end)?,
-                    error.value,
-                ),
-            )?),
 
         err => diagnostics
             .entry(filename.clone())
@@ -826,69 +800,202 @@ fn create_diagnostics(
             .push(Diagnostic {
                 message: format!("{}", err),
                 severity: Some(DiagnosticSeverity::Error),
+                source: Some("gluon".to_string()),
                 ..Diagnostic::default()
             }),
     }
     Ok(())
 }
 
-fn run_diagnostics(
-    thread: &Thread,
-    remote: &reactor::Remote,
+struct DiagnosticsWorker {
+    thread: RootedThread,
     message_log: mpsc::Sender<String>,
-    filename: &Url,
-    version: Option<u64>,
-    fileinput: &str,
-) -> BoxFuture<(), ()> {
-    info!("Running diagnostics on {}", filename);
+    compiler: Compiler,
+}
 
-    let diagnostics = match typecheck(thread, remote, filename, version, fileinput) {
-        Ok(_) => Some((filename.clone(), vec![])).into_iter().collect(),
-        Err(err) => {
-            debug!("Diagnostics result on `{}`: {}", filename, err);
-            let mut diagnostics = BTreeMap::new();
-            let source = source::Source::new(fileinput);
+impl DiagnosticsWorker {
+    fn run_diagnostics(
+        &mut self,
+        remote: &reactor::Remote,
+        uri_filename: &Url,
+        version: Option<u64>,
+        fileinput: &str,
+    ) -> BoxFuture<(), ()> {
+        info!("Running diagnostics on {}", uri_filename);
 
-            let import = thread.get_macros().get("import").expect("Import macro");
-            let import = import
-                .downcast_ref::<Import<CheckImporter>>()
-                .expect("Check importer");
+        let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
+        let name = filename_to_module(&filename);
 
-            let result =
-                create_diagnostics(&mut diagnostics, &import.importer, filename, &source, err);
-            if let Err(err) = result {
-                error!("Unable to create diagnostics: {}", err.message);
-                return Box::new(Err(()).into_future());
+        self.compiler.update_filemap(&name, fileinput);
+
+        let diagnostics = match self.typecheck(remote, uri_filename, &name, version, fileinput) {
+            Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
+            Err(err) => {
+                debug!("Diagnostics result on `{}`: {}", uri_filename, err);
+                let mut diagnostics = BTreeMap::new();
+
+                let import = self.thread
+                    .get_macros()
+                    .get("import")
+                    .expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+
+                let result = create_diagnostics(
+                    &mut diagnostics,
+                    self.compiler.code_map(),
+                    &import.importer,
+                    uri_filename,
+                    err,
+                );
+                if let Err(err) = result {
+                    error!("Unable to create diagnostics: {}", err.message);
+                    return Box::new(Err(()).into_future());
+                }
+                diagnostics
             }
-            diagnostics
-        }
-    };
+        };
 
-    let diagnostics_stream =
-        stream::futures_ordered(diagnostics.into_iter().map(|(source_name, diagnostic)| {
-            Ok(format!(
-                r#"{{
+        let diagnostics_stream =
+            stream::futures_ordered(diagnostics.into_iter().map(|(source_name, diagnostic)| {
+                Ok(format!(
+                    r#"{{
                             "jsonrpc": "2.0",
                             "method": "textDocument/publishDiagnostics",
                             "params": {}
                         }}"#,
-                serde_json::to_value(&PublishDiagnosticsParams {
-                    uri: source_name,
-                    diagnostics: diagnostic,
-                }).unwrap()
-            ))
-        }));
+                    serde_json::to_value(&PublishDiagnosticsParams {
+                        uri: source_name,
+                        diagnostics: diagnostic,
+                    }).unwrap()
+                ))
+            }));
 
-    Box::new(
-        message_log
-            .send_all(diagnostics_stream)
-            .map(|_| ())
-            .map_err(|_| ()),
-    )
+        Box::new(
+            self.message_log
+                .clone()
+                .send_all(diagnostics_stream)
+                .map(|_| ())
+                .map_err(|_| ()),
+        )
+    }
+
+    fn typecheck(
+        &mut self,
+        remote: &reactor::Remote,
+        uri_filename: &Url,
+        name: &str,
+        version: Option<u64>,
+        fileinput: &str,
+    ) -> GluonResult<()> {
+        let (expr_opt, errors) = self.typecheck_(&name, fileinput);
+
+        let import = self.thread
+            .get_macros()
+            .get("import")
+            .expect("Import macro");
+        let import = import
+            .downcast_ref::<Import<CheckImporter>>()
+            .expect("Check importer");
+        let mut importer = import.importer.0.lock().unwrap();
+
+        match importer.entry(name.into()) {
+            hash_map::Entry::Occupied(mut entry) => {
+                let module = entry.get_mut();
+
+                if let Some(expr) = expr_opt {
+                    module.expr = expr;
+                }
+                module.uri = uri_filename.clone();
+
+                if version.is_some() {
+                    module.version = version;
+                }
+
+                module.dirty = false;
+
+                let waiters = mem::replace(&mut module.waiters, Vec::new());
+                remote.spawn(move |_| {
+                    future::join_all(waiters.into_iter().map(|sender| sender.send(())))
+                        .map(|_| ())
+                        .map_err(|_| ())
+                });
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(self::Module {
+                    expr: expr_opt
+                        .unwrap_or_else(|| pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
+                    source: self.compiler.get_filemap(&name).unwrap().clone(),
+                    uri: uri_filename.clone(),
+                    dirty: false,
+                    waiters: Vec::new(),
+                    version: version,
+                    text_changes: TextChanges::new(),
+                });
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.into())
+        }
+    }
+
+    fn typecheck_(
+        &mut self,
+        name: &str,
+        fileinput: &str,
+    ) -> (Option<SpannedExpr<Symbol>>, Errors<GluonError>) {
+        debug!("Loading: `{}`", name);
+        let mut errors = Errors::new();
+        // The parser may find parse errors but still produce an expression
+        // For that case still typecheck the expression but return the parse error afterwards
+        let mut expr = match self.compiler
+            .parse_partial_expr(&TypeCache::new(), &name, fileinput)
+        {
+            Ok(expr) => expr,
+            Err((None, err)) => {
+                errors.push(err.into());
+                return (None, errors);
+            }
+            Err((Some(expr), err)) => {
+                errors.push(err.into());
+                expr
+            }
+        };
+
+        if let Err((_, err)) =
+            (&mut expr).expand_macro(&mut self.compiler, &self.thread, &name, fileinput)
+        {
+            errors.push(err);
+        }
+
+        let check_result = (MacroValue { expr: &mut expr })
+            .typecheck(&mut self.compiler, &self.thread, &name, fileinput)
+            .map(|value| value.typ);
+        let typ = match check_result {
+            Ok(typ) => typ,
+            Err(err) => {
+                errors.push(err);
+                expr.try_type_of(&*self.thread.global_env().get_env())
+                    .unwrap_or_else(|_| Type::hole())
+            }
+        };
+        let metadata = Metadata::default();
+        if let Err(err) = self.thread
+            .global_env()
+            .set_dummy_global(name, typ, metadata)
+        {
+            errors.push(err.into());
+        }
+
+        (Some(expr), errors)
+    }
 }
 
 pub fn run() {
-    ::env_logger::init().unwrap();
+    ::env_logger::init();
 
     let _matches = clap::App::new("debugger")
         .version(env!("CARGO_PKG_VERSION"))
@@ -908,7 +1015,7 @@ where
     R: io::Read + Send + 'static,
     W: io::Write + Send,
 {
-    let _ = ::env_logger::init();
+    let _ = ::env_logger::try_init();
 
     let mut core = reactor::Core::new().unwrap();
     {
@@ -1027,10 +1134,16 @@ impl Handler for IoHandler {
 }
 
 macro_rules! request {
-    ($t: tt) => { ::std::option::Option::None::<lsp_request!($t)> };
+    ($t:tt) => {
+
+        ::std::option::Option::None::<lsp_request!($t)>
+    }
 }
 macro_rules! notification {
-    ($t: tt) => { ::std::option::Option::None::<lsp_notification!($t)> };
+    ($t:tt) => {
+
+        ::std::option::Option::None::<lsp_notification!($t)>
+    }
 }
 
 fn initialize_rpc(
@@ -1051,23 +1164,27 @@ fn initialize_rpc(
     let (message_log, message_log_receiver) = mpsc::channel(1);
 
     let work_queue = {
-        let thread = thread.clone();
         let core_remote = core_remote.clone();
         let cpu_pool = cpu_pool.clone();
-        let message_log = message_log.clone();
 
         let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
 
+        let mut diagnostics_runner = DiagnosticsWorker {
+            thread: thread.clone(),
+            compiler: Compiler::new(),
+            message_log: message_log.clone(),
+        };
+
         core_remote.clone().spawn(move |_| {
-            diagnostic_stream.for_each(move |entry: Entry<Url, Arc<String>, _>| {
-                cpu_pool.spawn(run_diagnostics(
-                    &thread,
-                    &core_remote,
-                    message_log.clone(),
-                    &entry.key,
-                    Some(entry.version),
-                    &entry.value,
-                ))
+            cpu_pool.spawn_fn(move || {
+                diagnostic_stream.for_each(move |entry: Entry<Url, Arc<codespan::FileMap>, _>| {
+                    diagnostics_runner.run_diagnostics(
+                        &core_remote,
+                        &entry.key,
+                        Some(entry.version),
+                        &entry.value.src(),
+                    )
+                })
             })
         });
 
@@ -1098,14 +1215,15 @@ fn initialize_rpc(
                             &thread,
                             &data.text_document_uri,
                             &data.position,
-                            |expr, byte_pos| {
+                            |module, byte_pos| {
                                 let type_env = thread.global_env().get_env();
                                 let (_, metadata_map) =
-                                    gluon::check::metadata::metadata(&*type_env, expr);
+                                    gluon::check::metadata::metadata(&*type_env, &module.expr);
                                 Ok(completion::suggest_metadata(
                                     &metadata_map,
                                     &*type_env,
-                                    expr,
+                                    module.source.span(),
+                                    &module.expr,
                                     byte_pos,
                                     &label,
                                 ).and_then(|metadata| metadata.comment.clone()))
@@ -1135,11 +1253,13 @@ fn initialize_rpc(
         let format = move |params: DocumentFormattingParams| -> BoxFuture<Option<Vec<_>>, _> {
             Box::new(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let formatted = gluon_format::format_expr(&module.source)?;
-                    let range = byte_span_to_range(
-                        &source::Source::with_lines(&module.source, module.lines.clone()),
-                        Span::new(0.into(), module.source.len().into()),
+                    let formatted = gluon_format::format_expr(
+                        &mut Compiler::new(),
+                        &thread,
+                        &module.source.name().to_string(),
+                        module.source.src(),
                     )?;
+                    let range = byte_span_to_range(&module.source, module.source.span())?;
                     Ok(Some(vec![
                         TextEdit {
                             range,
@@ -1159,11 +1279,11 @@ fn initialize_rpc(
                 retrieve_expr(&thread, &params.text_document.uri, |module| {
                     let expr = &module.expr;
 
-                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let source = &module.source;
 
                     let byte_pos = position_to_byte_pos(&source, &params.position)?;
 
-                    let symbol_spans = completion::find_all_symbols(expr, byte_pos)
+                    let symbol_spans = completion::find_all_symbols(source.span(), expr, byte_pos)
                         .map(|t| t.1)
                         .unwrap_or(Vec::new());
 
@@ -1192,7 +1312,7 @@ fn initialize_rpc(
 
                     let symbols = completion::all_symbols(expr);
 
-                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let source = &module.source;
 
                     symbols
                         .into_iter()
@@ -1226,7 +1346,7 @@ fn initialize_rpc(
                 let mut symbols = Vec::<SymbolInformation>::new();
 
                 for module in modules.values() {
-                    let source = source::Source::with_lines(&module.source, module.lines.clone());
+                    let source = &module.source;
 
                     symbols.extend(completion::all_symbols(&module.expr)
                         .into_iter()
@@ -1267,14 +1387,21 @@ fn initialize_rpc(
     {
         let core_remote = core_remote.clone();
         let work_queue = work_queue.clone();
+        let thread = thread.clone();
 
         let f = move |change: DidOpenTextDocumentParams| {
             let work_queue = work_queue.clone();
+            let thread = thread.clone();
             core_remote.spawn(move |_| {
+                let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
+                let module = filename_to_module(&filename);
                 work_queue
                     .send(Entry {
                         key: change.text_document.uri,
-                        value: Arc::new(change.text_document.text),
+                        value: Arc::new(codespan::FileMap::new(
+                            module.into(),
+                            change.text_document.text,
+                        )),
                         version: change.text_document.version,
                     })
                     .map(|_| ())
@@ -1291,7 +1418,9 @@ fn initialize_rpc(
         change: DidChangeTextDocumentParams,
     ) -> BoxFuture<(), ()>
     where
-        S: Sink<SinkItem = Entry<Url, Arc<String>, u64>, SinkError = ()> + Send + 'static,
+        S: Sink<SinkItem = Entry<Url, Arc<codespan::FileMap>, u64>, SinkError = ()>
+            + Send
+            + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -1307,9 +1436,10 @@ fn initialize_rpc(
             .entry(module_name)
             .or_insert_with(|| self::Module::empty(change.text_document.uri.clone()));
 
-        module
-            .text_changes
-            .add(change.text_document.version, change.content_changes);
+        module.text_changes.add(
+            change.text_document.version.expect("version"),
+            change.content_changes,
+        );
 
         module.dirty = true;
 
@@ -1322,11 +1452,21 @@ fn initialize_rpc(
             module.uri.clone_from(&uri);
         }
         let result = {
-            let source = Arc::make_mut(&mut module.source);
+            let mut source = module.source.src().to_string();
             debug!("Change source {}:\n{}", uri, source);
 
             match module.version {
-                Some(current_version) => module.text_changes.apply_changes(source, current_version),
+                Some(current_version) => match module
+                    .text_changes
+                    .apply_changes(&mut source, current_version)
+                {
+                    Ok(version) => {
+                        module.source =
+                            Arc::new(codespan::FileMap::new(module.source.name().clone(), source));
+                        Ok(version)
+                    }
+                    Err(err) => Err(err),
+                },
                 None => return Box::new(Ok(()).into_future()),
             }
         };
@@ -1336,7 +1476,6 @@ fn initialize_rpc(
                     return Box::new(Ok(()).into_future());
                 }
                 module.version = Some(new_version);
-                module.lines = source::Lines::new(module.source.bytes());
                 let arc_source = module.source.clone();
                 Box::new(
                     work_queue
