@@ -108,9 +108,10 @@ where
             Ok(value) => {
                 return Box::new(self.0.execute(value).then(|result| {
                     match result {
-                        Ok(value) => Ok(to_value(&value)
-                            .expect("result data could not be serialized"))
-                            .into_future(),
+                        Ok(value) => {
+                            Ok(to_value(&value).expect("result data could not be serialized"))
+                                .into_future()
+                        }
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
                             message: error.message,
@@ -238,7 +239,7 @@ use self::combine::byte::digit;
 fn combine_decode<'a, P, R>(
     mut parser: P,
     src: &'a [u8],
-) -> Result<Option<(R, usize)>, Errors<usize, u8, String>>
+) -> Result<Option<(R, usize)>, Errors<u8, String, usize>>
 where
     P: Parser<Input = easy::Stream<&'a [u8]>, Output = R>,
 {

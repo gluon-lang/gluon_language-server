@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
+use codespan::{self, RawIndex};
+
 use languageserver_types::TextDocumentContentChangeEvent;
 
-use gluon::base::source;
 use gluon::base::pos::Span;
 
 use rpc::ServerError;
@@ -68,27 +69,25 @@ fn apply_changes(
     content_changes: &[TextDocumentContentChangeEvent],
 ) -> Result<(), ServerError<()>> {
     for change in content_changes {
-        let lines = source::Lines::new(source.bytes());
-        apply_change(source, lines, change)?;
+        apply_change(source, change)?;
     }
     Ok(())
 }
 
 fn apply_change(
     source: &mut String,
-    lines: source::Lines,
     change: &TextDocumentContentChangeEvent,
 ) -> Result<(), ServerError<()>> {
     info!("Applying change: {:?}", change);
     let span = match (change.range, change.range_length) {
-        (None, None) => Span::new(0.into(), source.len().into()),
+        (None, None) => Span::new(1.into(), (source.len() as RawIndex + 1).into()),
         (Some(range), None) | (Some(range), Some(_)) => {
-            range_to_byte_span(&source::Source::with_lines(source, lines), &range)?
+            range_to_byte_span(&codespan::FileMap::new("".into(), &**source), &range)?
         }
         (None, Some(_)) => panic!("Invalid change"),
     };
-    source.drain(span.start.to_usize()..span.end.to_usize());
-    source.insert_str(span.start.to_usize(), &change.text);
+    source.drain((span.start().to_usize() - 1)..(span.end().to_usize() - 1));
+    source.insert_str(span.start().to_usize() - 1, &change.text);
     Ok(())
 }
 

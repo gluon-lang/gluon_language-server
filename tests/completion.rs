@@ -57,7 +57,7 @@ fn remove_completion_data(mut completions: Vec<CompletionItem>) -> Vec<Completio
 }
 
 #[test]
-fn local_completion() {
+fn local_completion_simple() {
     support::send_rpc(|stdin, stdout| {
         let text = r#"
 let test = 2

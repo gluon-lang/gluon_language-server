@@ -1,52 +1,41 @@
-extern crate clap;
 extern crate debugserver_types;
-extern crate env_logger;
-extern crate futures;
-extern crate jsonrpc_core;
-extern crate languageserver_types;
-#[macro_use]
-extern crate log;
-extern crate serde;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
-
-extern crate gluon;
-extern crate gluon_language_server;
 
 use std::cell::RefCell;
 use std::cmp;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fs::File;
-use std::collections::hash_map::Entry;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Barrier, Mutex};
+use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread::spawn;
-use std::collections::{HashMap, HashSet};
 
-use clap::{App, Arg};
+use codespan;
+
 use futures::{Async, Future, IntoFuture};
 
 use jsonrpc_core::IoHandler;
 
-use serde_json::Value;
+use serde;
+use serde_json::{self, Value};
 
-use debugserver_types::*;
+use self::debugserver_types::*;
 
 use gluon::base::filename_to_module;
 use gluon::base::pos::Line;
 use gluon::base::resolve::remove_aliases_cow;
 use gluon::base::types::{arg_iter, ArcType, Type};
+use gluon::import::Import;
+use gluon::vm::api::ValueRef;
 use gluon::vm::internal::{Value as VmValue, ValuePrinter};
 use gluon::vm::thread::{HookFlags, RootedThread, Thread as GluonThread, ThreadInternal};
-use gluon::{Compiler, Error as GluonError};
-use gluon::import::Import;
+use gluon::vm::Variants;
+use gluon::{self, Compiler, Error as GluonError};
 
-use gluon_language_server::rpc::{read_message, write_message, write_message_str,
-                                 LanguageServerCommand, ServerCommand, ServerError};
-use gluon_language_server::BoxFuture;
+use rpc::{read_message, write_message, write_message_str, LanguageServerCommand, ServerCommand,
+          ServerError};
+use BoxFuture;
 
 pub struct InitializeHandler {
     debugger: Arc<Debugger>,
@@ -87,7 +76,7 @@ fn strip_file_prefix(thread: &GluonThread, program: &str) -> String {
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import.downcast_ref::<Import>().expect("Importer");
     let paths = import.paths.read().unwrap();
-    gluon_language_server::strip_file_prefix(&paths, &program.parse().unwrap()).unwrap()
+    ::strip_file_prefix(&paths, &program.parse().unwrap()).unwrap()
 }
 
 impl LanguageServerCommand<Value> for LaunchHandler {
@@ -102,20 +91,16 @@ impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
         let program = args.get("program")
             .and_then(|s| s.as_str())
-            .ok_or_else(|| {
-                ServerError {
-                    message: "No program argument found".into(),
-                    data: None,
-                }
+            .ok_or_else(|| ServerError {
+                message: "No program argument found".into(),
+                data: None,
             })?;
         let program = strip_file_prefix(&self.debugger.thread, program);
         let module = format!("@{}", filename_to_module(&program));
         let expr = {
-            let mut file = File::open(&*program).map_err(|_| {
-                ServerError {
-                    message: format!("Program does not exist: `{}`", program),
-                    data: None,
-                }
+            let mut file = File::open(&*program).map_err(|_| ServerError {
+                message: format!("Program does not exist: `{}`", program),
+                data: None,
             })?;
             let mut expr = String::new();
             file.read_to_string(&mut expr)
@@ -131,11 +116,12 @@ impl LaunchHandler {
                 let pause = debugger.pause.swap(NONE, Ordering::Acquire);
                 let stack_info = debug_info.stack_info(0).unwrap();
                 debug!(
-                    "Debugger at `{}:{}` {}. Reason {}",
+                    "Debugger at {}:{}:{}. Reason {}",
                     stack_info.source_name(),
                     stack_info.function_name().unwrap(),
                     stack_info
                         .line()
+                        .map(|l| l.number())
                         .as_ref()
                         .map_or(&"unknown" as &::std::fmt::Display, |s| s),
                     pause
@@ -174,7 +160,7 @@ impl LaunchHandler {
                         let line = stack_info.line();
                         match line {
                             Some(line) if debugger.should_break(stack_info.source_name(), line) => {
-                                debug!("Breaking on {}", line);
+                                debug!("Breaking on {}", line.number());
                                 "breakpoint"
                             }
                             _ => return Ok(Async::Ready(())),
@@ -281,15 +267,15 @@ fn translate_request(
     message: String,
     current_command: &RefCell<String>,
 ) -> Result<String, Box<StdError>> {
-    use serde_json::Value;
     use languageserver_types::NumberOrString;
-
+    use serde_json::Value;
 
     #[derive(Debug, Deserialize)]
     struct In {
         command: String,
         seq: NumberOrString,
-        #[serde(default)] arguments: Value,
+        #[serde(default)]
+        arguments: Value,
     }
 
     #[derive(Serialize)]
@@ -320,8 +306,8 @@ fn translate_response(
     message: String,
     current_command: &str,
 ) -> Result<String, Box<StdError>> {
-    use serde_json::Value;
     use languageserver_types::NumberOrString;
+    use serde_json::Value;
 
     #[derive(Debug, Deserialize)]
     struct Error {
@@ -351,7 +337,8 @@ fn translate_response(
         success: bool,
         request_seq: NumberOrString,
         seq: i64,
-        #[serde(rename = "type")] typ: &'a str,
+        #[serde(rename = "type")]
+        typ: &'a str,
         body: Option<Value>,
         message: Option<Value>,
     }
@@ -390,8 +377,8 @@ impl Variables {
     }
 
     fn insert(&mut self, value: VmValue, typ: &ArcType) -> i64 {
-        match value {
-            VmValue::Array(_) | VmValue::Data(_) | VmValue::Closure(_) => {
+        match value.get_variants().as_ref() {
+            ValueRef::Array(_) | ValueRef::Data(_) | ValueRef::Closure(_) => {
                 self.reference -= 1;
                 self.map.insert(self.reference, (value, typ.clone()));
                 self.reference
@@ -401,17 +388,17 @@ impl Variables {
     }
 }
 
-fn indexed_variables(value: VmValue) -> Option<i64> {
-    match value {
-        VmValue::Array(ref array) => Some(array.len() as i64),
+fn indexed_variables(value: Variants) -> Option<i64> {
+    match value.as_ref() {
+        ValueRef::Array(ref array) => Some(array.len() as i64),
         _ => None,
     }
 }
 
-fn named_variables(value: VmValue) -> Option<i64> {
-    match value {
-        VmValue::Data(ref data) => Some(data.fields.len() as i64),
-        VmValue::Closure(ref closure) => Some(closure.upvars.len() as i64),
+fn named_variables(value: Variants) -> Option<i64> {
+    match value.as_ref() {
+        ValueRef::Data(ref data) => Some(data.len() as i64),
+        ValueRef::Closure(ref closure) => Some(closure.upvars().count() as i64),
         _ => None,
     }
 }
@@ -428,20 +415,25 @@ struct StepData {
     function_name: String,
 }
 
-trait SharedWrite: Send + Sync {
+pub trait SharedWrite: Send + Sync {
     fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize>;
 }
 
-impl SharedWrite for TcpStream {
+impl<T> SharedWrite for T
+where
+    for<'a> &'a T: Write,
+    T: Send + Sync,
+{
     fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize> {
         let mut this = self;
         f(&mut this)
     }
 }
 
-impl SharedWrite for io::Stdout {
+pub struct Stdout(pub io::Stdout);
+impl SharedWrite for Stdout {
     fn with_write(&self, f: &mut FnMut(&mut Write) -> io::Result<usize>) -> io::Result<usize> {
-        f(&mut self.lock())
+        f(&mut self.0.lock())
     }
 }
 
@@ -495,9 +487,9 @@ impl Debugger {
     }
 
     fn line(&self, line: i64) -> Line {
-        Line::from(
-            (line as usize).saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize),
-        )
+        Line::from((line as usize)
+            .saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize)
+            as codespan::RawIndex)
     }
 
     fn send_event<T>(&self, value: T)
@@ -516,22 +508,20 @@ impl Debugger {
         let mut variables = self.variables.lock().unwrap();
         let variable = variables.map.get(&reference).cloned();
 
-        let mut mk_variable = |name: &str, typ: &ArcType, value| {
-            Variable {
-                evaluate_name: None,
-                indexed_variables: indexed_variables(value),
-                kind: None,
-                name: String::from(name),
-                named_variables: named_variables(value),
-                type_: Some(typ.to_string()),
-                value: format!(
-                    "{}",
-                    ValuePrinter::new(&*self.thread.get_env(), typ, value)
-                        .max_level(2)
-                        .width(10000000)
-                ),
-                variables_reference: variables.insert(value, typ),
-            }
+        let mut mk_variable = |name: &str, typ: &ArcType, value: Variants| Variable {
+            evaluate_name: None,
+            indexed_variables: indexed_variables(value),
+            kind: None,
+            name: String::from(name),
+            named_variables: named_variables(value),
+            type_: Some(typ.to_string()),
+            value: format!(
+                "{}",
+                ValuePrinter::new(&*self.thread.get_env(), typ, value)
+                    .max_level(2)
+                    .width(10000000)
+            ),
+            variables_reference: variables.insert(value.get_value(), typ),
         };
         match stack_info {
             Some(stack_info) => {
@@ -545,7 +535,11 @@ impl Debugger {
                             .locals()
                             .zip(values)
                             .map(|(local, value)| {
-                                mk_variable(local.name.declared_name(), &local.typ, *value)
+                                mk_variable(
+                                    local.name.declared_name(),
+                                    &local.typ,
+                                    value.get_variants(),
+                                )
                             })
                             .collect()
                     }
@@ -553,7 +547,9 @@ impl Debugger {
                         .upvars()
                         .iter()
                         .zip(frame.upvars())
-                        .map(|(info, value)| mk_variable(&info.name, &info.typ, *value))
+                        .map(|(info, value)| {
+                            mk_variable(&info.name, &info.typ, value.get_variants())
+                        })
                         .collect(),
                 }
             }
@@ -561,16 +557,15 @@ impl Debugger {
                 match variable {
                     Some((value, typ)) => {
                         let typ = remove_aliases_cow(&*self.thread.get_env(), &typ);
-                        match value {
-                            VmValue::Data(ref data) => match **typ {
-                                Type::Record(ref row) => data.fields
-                                    .iter()
+                        match value.get_variants().as_ref() {
+                            ValueRef::Data(ref data) => match **typ {
+                                Type::Record(ref row) => data.iter()
                                     .zip(row.row_iter())
                                     .map(|(field, type_field)| {
                                         mk_variable(
                                             type_field.name.declared_name(),
                                             &type_field.typ,
-                                            *field,
+                                            field,
                                         )
                                     })
                                     .collect(),
@@ -578,23 +573,21 @@ impl Debugger {
                                     let type_field = row.row_iter()
                                         .nth(data.tag() as usize)
                                         .expect("Variant tag is out of bounds");
-                                    data.fields
-                                        .into_iter()
+                                    data.iter()
                                         .zip(arg_iter(&type_field.typ))
-                                        .map(|(field, typ)| mk_variable("", typ, *field))
+                                        .map(|(field, typ)| mk_variable("", typ, field))
                                         .collect()
                                 }
                                 _ => vec![],
                             },
-                            VmValue::Closure(ref closure) => closure
-                                .upvars
-                                .iter()
-                                .zip(&closure.function.debug_info.upvars)
+                            ValueRef::Closure(ref closure) => closure
+                                .upvars()
+                                .zip(&closure.debug_info().upvars)
                                 .map(|(value, ref upvar_info)| {
-                                    mk_variable(&upvar_info.name, &upvar_info.typ, *value)
+                                    mk_variable(&upvar_info.name, &upvar_info.typ, value)
                                 })
                                 .collect(),
-                            VmValue::Array(ref array) => {
+                            ValueRef::Array(ref array) => {
                                 let element_type = match **typ {
                                     // Unpack the array type
                                     Type::App(_, ref args) => args[0].clone(),
@@ -643,7 +636,7 @@ fn translate_reference(reference: i64) -> VariableReference {
     }
 }
 
-fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
+pub fn spawn_server<R>(mut input: R, output: Arc<SharedWrite>)
 where
     R: BufRead,
 {
@@ -726,17 +719,15 @@ where
                     breakpoints: args.breakpoints
                         .into_iter()
                         .flat_map(|bs| bs)
-                        .map(|breakpoint| {
-                            Breakpoint {
-                                column: None,
-                                end_column: None,
-                                end_line: None,
-                                id: None,
-                                line: Some(breakpoint.line),
-                                message: None,
-                                source: None,
-                                verified: true,
-                            }
+                        .map(|breakpoint| Breakpoint {
+                            column: None,
+                            end_column: None,
+                            end_line: None,
+                            id: None,
+                            line: Some(breakpoint.line),
+                            message: None,
+                            source: None,
+                            verified: true,
                         })
                         .collect(),
                 }).into_future(),
@@ -982,32 +973,4 @@ where
         Ok(())
     })()
         .unwrap();
-}
-
-pub fn main() {
-    env_logger::init().unwrap();
-
-    let matches = App::new("debugger")
-        .version(env!("CARGO_PKG_VERSION"))
-        .arg(Arg::with_name("port").value_name("PORT").takes_value(true))
-        .get_matches();
-
-    match matches.value_of("port") {
-        Some(port) => {
-            let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)[..]).unwrap();
-
-            write!(io::stderr(), "Listening on port {}", port).unwrap();
-
-            if let Some(stream) = listener.incoming().next() {
-                let stream = Arc::new(stream.unwrap());
-                let stream2 = stream.clone();
-                let input = BufReader::new(&*stream);
-                spawn_server(input, stream2)
-            }
-        }
-        None => {
-            let stdin = io::stdin();
-            spawn_server(stdin.lock(), Arc::new(io::stdout()));
-        }
-    }
 }
