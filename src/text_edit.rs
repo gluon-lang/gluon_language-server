@@ -74,6 +74,19 @@ fn apply_changes(
     Ok(())
 }
 
+// Copied from ::std::string::String::replace_range
+fn replace_range(self_: &mut String, range: ::std::ops::Range<usize>, replace_with: &str) {
+    // Memory safety
+    //
+    // Replace_range does not have the memory safety issues of a vector Splice.
+    // of the vector version. The data is just plain bytes.
+
+    assert!(self_.is_char_boundary(range.start));
+    assert!(self_.is_char_boundary(range.end));
+
+    unsafe { self_.as_mut_vec() }.splice(range, replace_with.bytes());
+}
+
 fn apply_change(
     source: &mut String,
     change: &TextDocumentContentChangeEvent,
@@ -86,8 +99,11 @@ fn apply_change(
         }
         (None, Some(_)) => panic!("Invalid change"),
     };
-    source.drain((span.start().to_usize() - 1)..(span.end().to_usize() - 1));
-    source.insert_str(span.start().to_usize() - 1, &change.text);
+    replace_range(
+        source,
+        (span.start().to_usize() - 1)..(span.end().to_usize() - 1),
+        &change.text,
+    );
     Ok(())
 }
 
