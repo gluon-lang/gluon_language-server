@@ -7,7 +7,7 @@ use languageserver_types::TextDocumentContentChangeEvent;
 use gluon::base::pos::Span;
 
 use rpc::ServerError;
-use location_translation::range_to_byte_span;
+use codespan_lsp::range_to_byte_span;
 
 struct VersionedChange {
     version: u64,

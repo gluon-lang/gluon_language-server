@@ -30,6 +30,7 @@ extern crate partial_io;
 extern crate quickcheck;
 
 extern crate codespan;
+extern crate codespan_lsp;
 extern crate codespan_reporting;
 
 #[macro_use]
@@ -61,7 +62,6 @@ macro_rules! try_future {
 
 pub mod debugger;
 mod async_io;
-mod location_translation;
 pub mod rpc;
 mod text_edit;
 
@@ -116,7 +116,7 @@ use bytes::BytesMut;
 
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
-use location_translation::{byte_span_to_range, position_to_byte_pos};
+use codespan_lsp::{byte_span_to_range, position_to_byte_index};
 use rpc::*;
 use text_edit::TextChanges;
 
@@ -404,9 +404,9 @@ where
     F: FnOnce(&Module, BytePos) -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, |module| {
-        let byte_pos = position_to_byte_pos(&module.source, position)?;
+        let byte_index = position_to_byte_index(&module.source, position)?;
 
-        f(module, byte_pos)
+        f(module, byte_index)
     })
 }
 
@@ -449,7 +449,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                 );
             }
 
-            let byte_pos = try_future!(position_to_byte_pos(&source, &change.position));
+            let byte_index = try_future!(position_to_byte_index(&source, &change.position));
 
             let query = completion::SuggestionQuery {
                 modules: with_import(thread, |import| import.modules()),
@@ -457,7 +457,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             };
 
             let suggestions = query
-                .suggest(&*thread.get_env(), source.span(), expr, byte_pos)
+                .suggest(&*thread.get_env(), source.span(), expr, byte_index)
                 .into_iter()
                 .filter(|suggestion| !suggestion.name.starts_with("__"))
                 .collect::<Vec<_>>();
@@ -521,15 +521,15 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                     let expr = &module.expr;
 
                     let source = &module.source;
-                    let byte_pos = position_to_byte_pos(&source, &change.position)?;
+                    let byte_index = position_to_byte_index(&source, &change.position)?;
 
                     let env = thread.get_env();
                     let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
                     let opt_metadata =
-                        completion::get_metadata(&metadata_map, source.span(), expr, byte_pos);
+                        completion::get_metadata(&metadata_map, source.span(), expr, byte_index);
                     let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
                     Ok(
-                        completion::completion(extract, source.span(), expr, byte_pos)
+                        completion::completion(extract, source.span(), expr, byte_index)
                             .map(|(typ, span)| {
                                 let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
                                     Some(comment) => format!("{}\n\n{}", typ, comment),
@@ -648,80 +648,6 @@ pub fn strip_file_prefix(
     ))
 }
 
-fn to_lsp_diagnostic(
-    code_map: &codespan::CodeMap,
-    diagnostic: codespan_reporting::Diagnostic,
-) -> Result<Diagnostic, ServerError<()>> {
-    let unknown = Position {
-        character: 0,
-        line: 0,
-    };
-    let unknown_range = Range {
-        start: unknown,
-        end: unknown,
-    };
-
-    let mut primary_file_map = None;
-    let range = match diagnostic
-        .labels
-        .iter()
-        .find(|label| label.style == codespan_reporting::LabelStyle::Primary)
-    {
-        Some(label) => {
-            let file_map = code_map
-                .find_file(label.span.start())
-                .ok_or_else(|| ServerError::from(format!("Span does not exist in codemap")))?;
-            primary_file_map = Some(file_map);
-            byte_span_to_range(&file_map, label.span)?
-        }
-        None => unknown_range,
-    };
-
-    let related_information = diagnostic
-        .labels
-        .into_iter()
-        .map(|label| {
-            let location = match primary_file_map {
-                Some(file_map) if label.span.start() == BytePos::none() => Location {
-                    uri: codespan_name_to_file(file_map.name())?,
-                    range: unknown_range,
-                },
-                _ => {
-                    let file_map = code_map.find_file(label.span.start()).ok_or_else(|| {
-                        ServerError::from(format!("Span {} does not exist in codemap", label.span))
-                    })?;
-                    Location {
-                        uri: codespan_name_to_file(file_map.name())?,
-                        range: byte_span_to_range(file_map, label.span)?,
-                    }
-                }
-            };
-            Ok(DiagnosticRelatedInformation {
-                location,
-                message: label.message.unwrap_or(String::new()),
-            })
-        })
-        .collect::<Result<Vec<_>, ServerError<()>>>()?;
-    Ok(Diagnostic {
-        message: diagnostic.message,
-        range,
-        severity: Some(match diagnostic.severity {
-            codespan_reporting::Severity::Error | codespan_reporting::Severity::Bug => {
-                DiagnosticSeverity::Error
-            }
-            codespan_reporting::Severity::Warning => DiagnosticSeverity::Warning,
-            codespan_reporting::Severity::Note => DiagnosticSeverity::Information,
-            codespan_reporting::Severity::Help => DiagnosticSeverity::Hint,
-        }),
-        related_information: if related_information.is_empty() {
-            None
-        } else {
-            Some(related_information)
-        },
-        ..Diagnostic::default()
-    })
-}
-
 fn create_diagnostics(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
     code_map: &codespan::CodeMap,
@@ -739,7 +665,15 @@ fn create_diagnostics(
     {
         Ok(Diagnostic {
             source: Some("gluon".to_string()),
-            ..to_lsp_diagnostic(code_map, err.as_diagnostic())?
+            ..codespan_lsp::make_lsp_diagnostic(
+                |filename| {
+                    codespan_name_to_file(filename).map_err(|err| {
+                        error!("{}", err);
+                    })
+                },
+                code_map,
+                err.as_diagnostic(),
+            )?
         })
     }
 
@@ -1195,7 +1129,7 @@ fn initialize_rpc(
                             &thread,
                             &data.text_document_uri,
                             &data.position,
-                            |module, byte_pos| {
+                            |module, byte_index| {
                                 let type_env = thread.global_env().get_env();
                                 let (_, metadata_map) =
                                     gluon::check::metadata::metadata(&*type_env, &module.expr);
@@ -1204,7 +1138,7 @@ fn initialize_rpc(
                                     &*type_env,
                                     module.source.span(),
                                     &module.expr,
-                                    byte_pos,
+                                    byte_index,
                                     &label,
                                 ).and_then(|metadata| metadata.comment.clone()))
                             },
@@ -1258,11 +1192,12 @@ fn initialize_rpc(
 
                     let source = &module.source;
 
-                    let byte_pos = position_to_byte_pos(&source, &params.position)?;
+                    let byte_index = position_to_byte_index(&source, &params.position)?;
 
-                    let symbol_spans = completion::find_all_symbols(source.span(), expr, byte_pos)
-                        .map(|t| t.1)
-                        .unwrap_or(Vec::new());
+                    let symbol_spans =
+                        completion::find_all_symbols(source.span(), expr, byte_index)
+                            .map(|t| t.1)
+                            .unwrap_or(Vec::new());
 
                     symbol_spans
                         .into_iter()
