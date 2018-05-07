@@ -1,7 +1,8 @@
 use std::io::{Error, ErrorKind, Read, Result};
 
+use tokio;
+
 use futures::{Async, AsyncSink, Future, Sink, Stream};
-use tokio_core::reactor::Handle;
 use futures::sync::mpsc::{channel, Receiver, Sender};
 
 pub struct AsyncRead {
@@ -11,7 +12,7 @@ pub struct AsyncRead {
     debt: Vec<u8>,
 }
 
-pub fn async_read<R>(handle: &Handle, mut read: R) -> AsyncRead
+pub fn async_read<R>(mut read: R) -> AsyncRead
 where
     R: Read + Send + 'static,
 {
@@ -41,7 +42,7 @@ where
         .pool_size(1)
         .name_prefix("input-reader-")
         .create();
-    handle.spawn(pool.spawn(future));
+    tokio::spawn(pool.spawn(future));
     AsyncRead {
         _pool: pool,
         size_sender,
@@ -109,34 +110,35 @@ impl ::tokio_io::AsyncRead for AsyncRead {}
 mod tests {
     use super::*;
 
+    use futures::future;
+
     use partial_io::{GenInterrupted, PartialAsyncRead, PartialOp, PartialWithErrors};
     use tokio_io::io::read_to_end;
 
     quickcheck! {
-        fn partial_io(seq: PartialWithErrors<GenInterrupted>, input: Vec<u8>) -> bool {
-            let mut core = ::tokio_core::reactor::Core::new().unwrap();
+        fn partial_io(seq: PartialWithErrors<GenInterrupted>, input: Vec<u8>) -> () {
+            tokio::run(future::lazy(move || {
+                let reader = async_read(::std::io::Cursor::new(input.clone()));
+                let partial_reader = PartialAsyncRead::new(reader, seq);
 
-            let reader = async_read(&core.handle(), ::std::io::Cursor::new(input.clone()));
-            let partial_reader = PartialAsyncRead::new(reader, seq);
-
-            core.run(read_to_end(partial_reader, vec![])).ok().map(|t| t.1) == Some(input)
+                read_to_end(partial_reader, vec![])
+                   .map(move |t| assert_eq!(t.1, input))
+                   .map_err(|err| panic!("{}", err))
+            }));
         }
     }
 
     #[test]
     fn partial_2_1() {
-        let mut core = ::tokio_core::reactor::Core::new().unwrap();
+        tokio::run(future::lazy(move || {
+            let input = vec![0, 0];
+            let reader = async_read(::std::io::Cursor::new(input.clone()));
+            let seq = vec![PartialOp::Limited(2), PartialOp::Limited(1)];
+            let partial_reader = PartialAsyncRead::new(reader, seq);
 
-        let input = vec![0, 0];
-        let reader = async_read(&core.handle(), ::std::io::Cursor::new(input.clone()));
-        let seq = vec![PartialOp::Limited(2), PartialOp::Limited(1)];
-        let partial_reader = PartialAsyncRead::new(reader, seq);
-
-        assert_eq!(
-            core.run(read_to_end(partial_reader, vec![]))
-                .ok()
-                .map(|t| t.1),
-            Some(input)
-        );
+            read_to_end(partial_reader, vec![])
+                .map(move |t| assert_eq!(t.1, input))
+                .map_err(|err| panic!("{}", err))
+        }));
     }
 }

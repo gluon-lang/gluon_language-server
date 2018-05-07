@@ -11,7 +11,7 @@ extern crate serde_json;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate jsonrpc_core;
-extern crate tokio_core;
+extern crate tokio;
 extern crate tokio_io;
 
 extern crate env_logger;
@@ -107,8 +107,6 @@ use futures::sync::oneshot;
 use futures::{future, Future, IntoFuture, Sink, Stream};
 
 use futures_cpupool::CpuPool;
-
-use tokio_core::reactor;
 
 use tokio_io::codec::{Framed, FramedParts};
 
@@ -234,10 +232,10 @@ impl Module {
 }
 
 #[derive(Clone)]
-struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>, reactor::Remote);
+struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
 impl CheckImporter {
-    fn new(remote: reactor::Remote) -> CheckImporter {
-        CheckImporter(Arc::new(Mutex::new(FnvMap::default())), remote)
+    fn new() -> CheckImporter {
+        CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
     }
 }
 impl Importer for CheckImporter {
@@ -277,7 +275,7 @@ impl Importer for CheckImporter {
             },
         );
         if let Some(previous_module) = previous {
-            self.1.spawn(move |_| {
+            tokio::spawn({
                 future::join_all(
                     previous_module
                         .waiters
@@ -746,7 +744,6 @@ struct DiagnosticsWorker {
 impl DiagnosticsWorker {
     fn run_diagnostics(
         &mut self,
-        remote: &reactor::Remote,
         uri_filename: &Url,
         version: Option<u64>,
         fileinput: &str,
@@ -758,7 +755,7 @@ impl DiagnosticsWorker {
 
         self.compiler.update_filemap(&name, fileinput);
 
-        let diagnostics = match self.typecheck(remote, uri_filename, &name, version, fileinput) {
+        let diagnostics = match self.typecheck(uri_filename, &name, version, fileinput) {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
             Err(err) => {
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
@@ -813,7 +810,6 @@ impl DiagnosticsWorker {
 
     fn typecheck(
         &mut self,
-        remote: &reactor::Remote,
         uri_filename: &Url,
         name: &str,
         version: Option<u64>,
@@ -846,7 +842,7 @@ impl DiagnosticsWorker {
                 module.dirty = false;
 
                 let waiters = mem::replace(&mut module.waiters, Vec::new());
-                remote.spawn(move |_| {
+                tokio::spawn({
                     future::join_all(waiters.into_iter().map(|sender| sender.send(())))
                         .map(|_| ())
                         .map_err(|_| ())
@@ -943,14 +939,13 @@ pub fn start_server<R, W>(
 ) -> Result<(), Box<StdError + Send + Sync>>
 where
     R: io::Read + Send + 'static,
-    W: io::Write + Send,
+    W: io::Write + Send + 'static,
 {
     let _ = ::env_logger::try_init();
 
-    let mut core = reactor::Core::new().unwrap();
     {
         let macros = thread.get_macros();
-        let mut check_import = Import::new(CheckImporter::new(core.remote()));
+        let mut check_import = Import::new(CheckImporter::new());
         {
             let import = macros.get("import").expect("Import macro");
             let import = import.downcast_ref::<Import>().expect("Importer");
@@ -968,10 +963,9 @@ where
         macros.insert("import".into(), check_import);
     }
 
-    let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) =
-        initialize_rpc(&thread, core.remote());
+    let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) = initialize_rpc(&thread);
 
-    let input = BufReader::new(async_io::async_read(&core.handle(), input));
+    let input = BufReader::new(async_io::async_read(input));
 
     let parts = FramedParts {
         inner: input,
@@ -1006,12 +1000,12 @@ where
                 let x: Box<StdError + Send + Sync> = "Unable to log message".into();
                 x
             })
-            .for_each(|message| -> Result<(), Box<StdError + Send + Sync>> {
+            .for_each(move |message| -> Result<(), Box<StdError + Send + Sync>> {
                 Ok(write_message_str(&mut output, &message)?)
             }),
     );
 
-    core.run(
+    tokio::run(
         future::select_all(vec![
             future,
             Box::new(
@@ -1023,8 +1017,8 @@ where
             ),
             log_messages,
         ]).map(|t| t.0)
-            .map_err(|t| t.0),
-    )?;
+            .map_err(|t| panic!("{}", t.0)),
+    );
 
     Ok(())
 }
@@ -1078,7 +1072,6 @@ macro_rules! notification {
 
 fn initialize_rpc(
     thread: &RootedThread,
-    core_remote: reactor::Remote,
 ) -> (
     IoHandler,
     oneshot::Receiver<()>,
@@ -1094,7 +1087,6 @@ fn initialize_rpc(
     let (message_log, message_log_receiver) = mpsc::channel(1);
 
     let work_queue = {
-        let core_remote = core_remote.clone();
         let cpu_pool = cpu_pool.clone();
 
         let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
@@ -1105,11 +1097,10 @@ fn initialize_rpc(
             message_log: message_log.clone(),
         };
 
-        core_remote.clone().spawn(move |_| {
+        tokio::spawn({
             cpu_pool.spawn_fn(move || {
                 diagnostic_stream.for_each(move |entry: Entry<Url, Arc<codespan::FileMap>, _>| {
                     diagnostics_runner.run_diagnostics(
-                        &core_remote,
                         &entry.key,
                         Some(entry.version),
                         &entry.value.src(),
@@ -1316,14 +1307,13 @@ fn initialize_rpc(
         }
     });
     {
-        let core_remote = core_remote.clone();
         let work_queue = work_queue.clone();
         let thread = thread.clone();
 
         let f = move |change: DidOpenTextDocumentParams| {
             let work_queue = work_queue.clone();
             let thread = thread.clone();
-            core_remote.spawn(move |_| {
+            tokio::spawn({
                 let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
                 let module = filename_to_module(&filename);
                 work_queue
@@ -1431,7 +1421,7 @@ fn initialize_rpc(
             let work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
-            core_remote.spawn(move |_| {
+            tokio::spawn({
                 let work_queue = work_queue.clone();
                 ::std::panic::AssertUnwindSafe(did_change(
                     &thread,
