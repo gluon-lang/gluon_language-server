@@ -685,15 +685,11 @@ fn create_diagnostics(
     {
         Ok(Diagnostic {
             source: Some("gluon".to_string()),
-            ..codespan_lsp::make_lsp_diagnostic(
-                |filename| {
-                    codespan_name_to_file(filename).map_err(|err| {
-                        error!("{}", err);
-                    })
-                },
-                code_map,
-                err.as_diagnostic(),
-            )?
+            ..codespan_lsp::make_lsp_diagnostic(code_map, err.as_diagnostic(), |filename| {
+                codespan_name_to_file(filename).map_err(|err| {
+                    error!("{}", err);
+                })
+            })?
         })
     }
 
