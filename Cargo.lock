@@ -192,7 +192,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "combine"
-version = "3.0.0-beta.1"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "ascii 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -480,7 +480,7 @@ dependencies = [
  "codespan 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "codespan-lsp 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "codespan-reporting 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "combine 3.0.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "combine 3.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "debugserver-types 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "env_logger 0.5.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1562,7 +1562,7 @@ dependencies = [
 "checksum codespan-lsp 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ee1eabc6b02bfebe40f5108cd98f46faa0ec31b0024fb0e57fd455149516d997"
 "checksum codespan-reporting 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)" = "6a5c1ae63259648f1cd349d0913570828d7e098de98cc685837dacad1367f428"
 "checksum collect-mac 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "f168712e49987bd2f51cb855c4585999e12b1a0abdff60fea4b81b41f2010264"
-"checksum combine 3.0.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)" = "8113ef991b7262e2b95d3c5051434a529431f2ac3fba6e1a55786733e62136c8"
+"checksum combine 3.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "2ac7d0655c6f8f0678ae9f820076ada8be0e0955ed0b74a6d3abb3432c030ee0"
 "checksum crossbeam-deque 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "c1bdc73742c36f7f35ebcda81dbb33a7e0d33757d03a06d9ddca762712ec5ea2"
 "checksum crossbeam-epoch 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)" = "9b4e2817eb773f770dcb294127c011e22771899c21d18fce7dd739c0b9832e81"
 "checksum crossbeam-utils 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "2760899e32a1d58d5abb31129f8fae5de75220bc2176e77ff7c627ae45c918d9"
