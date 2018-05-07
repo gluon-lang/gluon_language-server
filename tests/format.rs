@@ -50,7 +50,7 @@ x   +
 let x = 1
 x + 2
 "#;
-    support::send_rpc(|stdin, stdout| {
+    support::send_rpc(move |stdin, stdout| {
         support::did_open(stdin, "test", text);
 
         let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
@@ -86,7 +86,7 @@ fn empty_content_changes_do_not_lockup_server() {
 let x = 1
 x + "abc"
 "#;
-    support::send_rpc(|stdin, stdout| {
+    support::send_rpc(move |stdin, stdout| {
         support::did_open(stdin, "test", text);
 
         let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);

@@ -3,9 +3,11 @@ extern crate env_logger;
 extern crate gluon_language_server;
 extern crate languageserver_types;
 
+extern crate futures;
 extern crate jsonrpc_core;
 extern crate serde;
 extern crate serde_json;
+extern crate tokio;
 extern crate url;
 
 #[allow(dead_code)]
@@ -20,6 +22,8 @@ use serde_json::{from_str, Value};
 use debugserver_types::*;
 
 use gluon_language_server::rpc::read_message;
+
+use self::futures::future;
 
 macro_rules! request {
     ($stream:expr, $id:ident, $command:expr, $seq:expr, $expr:expr) => {
@@ -61,59 +65,65 @@ macro_rules! expect_event {
 
 fn run_debugger<F>(f: F)
 where
-    F: FnOnce(&mut i64, &mut io::Write, &mut io::BufRead),
+    F: FnOnce(&mut i64, &mut io::Write, &mut io::BufRead)
+        + Send
+        + ::std::panic::UnwindSafe
+        + 'static,
 {
-    let _ = env_logger::try_init();
-    let (stdin_read, stdin_write) = support::pipe();
-    let (stdout_read, stdout_write) = support::pipe();
+    support::run_no_panic_catch(future::lazy(move || {
+        let _ = env_logger::try_init();
+        let (stdin_read, stdin_write) = support::pipe();
+        let (stdout_read, stdout_write) = support::pipe();
 
-    let server = ::std::thread::spawn(move || {
-        gluon_language_server::debugger::spawn_server(
-            BufReader::new(stdin_read),
-            Arc::new(stdout_write),
-        );
-    });
+        tokio::spawn(future::lazy(move || {
+            gluon_language_server::debugger::spawn_server(
+                BufReader::new(support::SyncReadPipe(stdin_read)),
+                Arc::new(stdout_write),
+            );
+            Ok(())
+        }));
 
-    {
-        let mut stream = stdin_write;
+        {
+            let mut stream = stdin_write;
 
-        let mut seq = 0;
-        let mut read = BufReader::new(stdout_read);
+            let mut seq = 0;
+            let mut read = BufReader::new(support::SyncReadPipe(stdout_read));
 
-        request! {
-            &mut stream,
-            InitializeRequest,
-            "initialize",
-            seq,
-            InitializeRequestArguments {
-                adapter_id: "".into(),
-                columns_start_at_1: None,
-                lines_start_at_1: None,
-                path_format: None,
-                supports_run_in_terminal_request: None,
-                supports_variable_paging: None,
-                supports_variable_type: None,
-            }
-        };
+            request! {
+                &mut stream,
+                InitializeRequest,
+                "initialize",
+                seq,
+                InitializeRequestArguments {
+                    adapter_id: "".into(),
+                    columns_start_at_1: None,
+                    lines_start_at_1: None,
+                    path_format: None,
+                    supports_run_in_terminal_request: None,
+                    supports_variable_paging: None,
+                    supports_variable_type: None,
+                }
+            };
 
-        expect_event!(&mut read, InitializedEvent, "initialized");
+            expect_event!(&mut read, InitializedEvent, "initialized");
 
-        let initialize_response = expect_response!(&mut read, InitializeResponse, "initialize");
-        assert!(initialize_response.success);
+            let initialize_response = expect_response!(&mut read, InitializeResponse, "initialize");
+            assert!(initialize_response.success);
 
-        f(&mut seq, &mut stream, &mut read);
+            f(&mut seq, &mut stream, &mut read);
 
-        request! {
-            &mut stream,
-            DisconnectRequest,
-            "disconnect",
-            seq,
-            None
-        };
-        expect_response!(read, DisconnectResponse, "disconnect");
-    }
+            request! {
+                &mut stream,
+                DisconnectRequest,
+                "disconnect",
+                seq,
+                None
+            };
+            expect_response!(read, DisconnectResponse, "disconnect");
+        }
 
-    server.join().unwrap();
+        Ok(())
+    }));
 }
 
 fn launch_relative<W>(stream: &mut W, seq: &mut i64, program: &str)

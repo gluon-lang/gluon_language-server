@@ -1,10 +1,14 @@
 #![allow(unused)]
 
+extern crate futures;
+extern crate tokio;
+
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::str;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
+use std::sync::Arc;
 
 use jsonrpc_core::request::{Call, MethodCall, Notification};
 use jsonrpc_core::version::Version;
@@ -16,6 +20,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::ser::Serializer;
 use serde_json::{from_str, from_value, to_value, Value};
+
+use self::tokio::prelude::task;
+
+use self::futures::{future, Future, Poll};
 
 use url::Url;
 
@@ -205,34 +213,61 @@ where
     panic!("Expected a notification")
 }
 
-pub fn send_rpc<F>(f: F)
+pub fn run_no_panic_catch<F>(fut: F)
 where
-    F: FnOnce(&mut Write, &mut BufRead),
+    F: Future<Item = (), Error = ()> + Send + ::std::panic::UnwindSafe + 'static,
 {
-    let (stdin_read, mut stdin_write) = pipe();
-    let (stdout_read, stdout_write) = pipe();
-    let mut stdout_read = BufReader::new(stdout_read);
+    use std::sync::{Arc, Mutex};
 
-    ::std::thread::spawn(move || {
-        let thread = new_vm();
-
-        ::gluon_language_server::start_server(thread, stdin_read, stdout_write).unwrap();
-    });
-
+    let error_result = Arc::new(Mutex::new(None));
     {
-        f(&mut stdin_write, &mut stdout_read);
+        let error_result = error_result.clone();
+        tokio::run(
+            fut.catch_unwind()
+                .map_err(move |err| {
+                    *error_result.lock().unwrap() = Some(err);
+                })
+                .and_then(|result| result),
+        );
+    }
 
-        let exit = Call::Notification(Notification {
-            jsonrpc: Some(Version::V2),
-            method: "exit".into(),
-            params: None,
-        });
-        write_message(&mut stdin_write, exit).unwrap();
-        drop(stdin_write);
+    if let Some(err) = Arc::try_unwrap(error_result).unwrap().into_inner().unwrap() {
+        panic!(err)
     }
 }
 
+pub fn send_rpc<F>(f: F)
+where
+    F: FnOnce(&mut Write, &mut BufRead) + Send + ::std::panic::UnwindSafe + 'static,
+{
+    run_no_panic_catch(future::lazy(move || {
+        let (stdin_read, mut stdin_write) = pipe();
+        let (stdout_read, stdout_write) = pipe();
+        let mut stdout_read = BufReader::new(SyncReadPipe(stdout_read));
+
+        let thread = new_vm();
+        tokio::spawn(
+            ::gluon_language_server::start_server(thread, stdin_read, stdout_write)
+                .map_err(|err| panic!("{}", err)),
+        );
+
+        {
+            f(&mut stdin_write, &mut stdout_read);
+
+            let exit = Call::Notification(Notification {
+                jsonrpc: Some(Version::V2),
+                method: "exit".into(),
+                params: None,
+            });
+            write_message(&mut stdin_write, exit).unwrap();
+            drop(stdin_write);
+        }
+        Ok(())
+    }))
+}
+
 pub struct ReadPipe {
+    task: Arc<task::AtomicTask>,
     recv: Receiver<Vec<u8>>,
     buffer: VecDeque<u8>,
 }
@@ -243,6 +278,7 @@ impl io::Read for ReadPipe {
         for (to, from) in buffer.iter_mut().zip(self.buffer.drain(..l)) {
             *to = from;
         }
+        self.task.register();
         match self.recv.try_recv() {
             Ok(buf) => {
                 self.buffer.extend(buf);
@@ -251,15 +287,7 @@ impl io::Read for ReadPipe {
             }
             Err(TryRecvError::Disconnected) => Ok(0),
             Err(TryRecvError::Empty) => if l == 0 {
-                match self.recv.recv() {
-                    Ok(buf) => {
-                        let l = buffer.len().min(buf.len());
-                        buffer[..l].copy_from_slice(&buf[..l]);
-                        self.buffer.extend(buf[l..].iter().cloned());
-                        Ok(l)
-                    }
-                    Err(_) => Ok(0),
-                }
+                Err(io::ErrorKind::WouldBlock.into())
             } else {
                 Ok(l)
             },
@@ -276,8 +304,31 @@ impl io::Read for ReadPipe {
     }
 }
 
+impl tokio::io::AsyncRead for ReadPipe {}
+
+pub struct SyncReadPipe(pub ReadPipe);
+
+impl io::Read for SyncReadPipe {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self.0.read(buffer) {
+            Ok(x) => Ok(x),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => match self.0.recv.recv() {
+                Ok(buf) => {
+                    let l = buffer.len().min(buf.len());
+                    buffer[..l].copy_from_slice(&buf[..l]);
+                    self.0.buffer.extend(buf[l..].iter().cloned());
+                    Ok(l)
+                }
+                Err(_) => Ok(0),
+            },
+            Err(err) => Err(err),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct WritePipe {
+    task: Arc<task::AtomicTask>,
     sender: SyncSender<Vec<u8>>,
 }
 
@@ -289,6 +340,7 @@ impl<'a> io::Write for &'a WritePipe {
         self.sender
             .send(data.to_owned())
             .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
+        self.task.notify();
         Ok(data.len())
     }
 
@@ -307,13 +359,21 @@ impl io::Write for WritePipe {
     }
 }
 
+impl tokio::io::AsyncWrite for WritePipe {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        Ok(().into())
+    }
+}
+
 pub fn pipe() -> (ReadPipe, WritePipe) {
+    let task = Arc::new(task::AtomicTask::new());
     let (sender, receiver) = sync_channel(10);
     (
         ReadPipe {
+            task: task.clone(),
             recv: receiver,
             buffer: VecDeque::new(),
         },
-        WritePipe { sender },
+        WritePipe { task, sender },
     )
 }
