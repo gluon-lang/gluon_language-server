@@ -9,7 +9,6 @@ extern crate serde_derive;
 extern crate serde_json;
 
 extern crate futures;
-extern crate futures_cpupool;
 extern crate jsonrpc_core;
 extern crate tokio;
 extern crate tokio_io;
@@ -22,12 +21,6 @@ extern crate url;
 extern crate url_serde;
 
 extern crate bytes;
-
-#[cfg(test)]
-extern crate partial_io;
-#[cfg(test)]
-#[macro_use]
-extern crate quickcheck;
 
 extern crate codespan;
 extern crate codespan_lsp;
@@ -61,7 +54,6 @@ macro_rules! try_future {
 }
 
 pub mod debugger;
-mod async_io;
 pub mod rpc;
 mod text_edit;
 
@@ -92,7 +84,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufReader};
+use std::io::BufReader;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -105,8 +97,6 @@ use futures::stream;
 use futures::sync::mpsc;
 use futures::sync::oneshot;
 use futures::{future, Future, IntoFuture, Sink, Stream};
-
-use futures_cpupool::CpuPool;
 
 use tokio_io::codec::{Framed, FramedParts};
 
@@ -909,17 +899,20 @@ pub fn run() {
 
     let thread = new_vm();
 
-    start_server(thread, io::stdin(), io::stdout()).unwrap();
+    tokio::run(
+        start_server(thread, tokio::io::stdin(), tokio::io::stdout())
+            .map_err(|err| panic!("{}", err)),
+    )
 }
 
 pub fn start_server<R, W>(
     thread: RootedThread,
     input: R,
     mut output: W,
-) -> Result<(), Box<StdError + Send + Sync>>
+) -> BoxFuture<(), Box<StdError + Send + Sync>>
 where
-    R: io::Read + Send + 'static,
-    W: io::Write + Send + 'static,
+    R: tokio::io::AsyncRead + Send + 'static,
+    W: tokio::io::AsyncWrite + Send + 'static,
 {
     let _ = ::env_logger::try_init();
 
@@ -943,9 +936,9 @@ where
         macros.insert("import".into(), check_import);
     }
 
-    let (io, exit_receiver, _cpu_pool, message_log_receiver, message_log) = initialize_rpc(&thread);
+    let (io, exit_receiver, message_log_receiver, message_log) = initialize_rpc(&thread);
 
-    let input = BufReader::new(async_io::async_read(input));
+    let input = BufReader::new(input);
 
     let parts = FramedParts {
         inner: input,
@@ -985,7 +978,7 @@ where
             }),
     );
 
-    tokio::run(
+    Box::new(
         future::select_all(vec![
             future,
             Box::new(
@@ -998,9 +991,7 @@ where
             log_messages,
         ]).map(|t| t.0)
             .map_err(|t| panic!("{}", t.0)),
-    );
-
-    Ok(())
+    )
 }
 
 trait Handler {
@@ -1054,21 +1045,16 @@ fn initialize_rpc(
     thread: &RootedThread,
 ) -> (
     IoHandler,
-    oneshot::Receiver<()>,
-    CpuPool,
+    future::Shared<oneshot::Receiver<()>>,
     mpsc::Receiver<String>,
     mpsc::Sender<String>,
 ) {
-    let cpu_pool = futures_cpupool::Builder::new()
-        .pool_size(2)
-        .name_prefix("gluon_worker_")
-        .create();
-
     let (message_log, message_log_receiver) = mpsc::channel(1);
 
-    let work_queue = {
-        let cpu_pool = cpu_pool.clone();
+    let (exit_sender, exit_receiver) = oneshot::channel();
+    let exit_receiver = exit_receiver.shared();
 
+    let work_queue = {
         let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
 
         let mut diagnostics_runner = DiagnosticsWorker {
@@ -1077,8 +1063,8 @@ fn initialize_rpc(
             message_log: message_log.clone(),
         };
 
-        tokio::spawn({
-            cpu_pool.spawn_fn(move || {
+        tokio::spawn(
+            future::lazy(move || {
                 diagnostic_stream.for_each(move |entry: Entry<Url, Arc<codespan::FileMap>, _>| {
                     diagnostics_runner.run_diagnostics(
                         &entry.key,
@@ -1086,8 +1072,9 @@ fn initialize_rpc(
                         &entry.value.src(),
                     )
                 })
-            })
-        });
+            }).select(exit_receiver.clone().then(|_| future::ok(())))
+                .then(|_| future::ok(())),
+        );
 
         diagnostic_sink
     };
@@ -1231,11 +1218,10 @@ fn initialize_rpc(
     }
 
     {
-        let cpu_pool = cpu_pool.clone();
         let thread = thread.clone();
         let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Option<Vec<_>>, ServerError<()>> {
             let thread = thread.clone();
-            Box::new(cpu_pool.spawn_fn(move || {
+            Box::new(future::lazy(move || {
                 let import = thread.get_macros().get("import").expect("Import macro");
                 let import = import
                     .downcast_ref::<Import<CheckImporter>>()
@@ -1276,7 +1262,6 @@ fn initialize_rpc(
         |_| -> BoxFuture<(), ServerError<()>> { Box::new(futures::finished(())) },
     );
 
-    let (exit_sender, exit_receiver) = oneshot::channel();
     let exit_sender = Mutex::new(Some(exit_sender));
     io.add_notification(notification!("exit"), move |_| {
         if let Some(exit_sender) = exit_sender.lock().unwrap().take() {
@@ -1415,13 +1400,7 @@ fn initialize_rpc(
 
         io.add_notification(notification!("textDocument/didChange"), f);
     }
-    (
-        io,
-        exit_receiver,
-        cpu_pool,
-        message_log_receiver,
-        message_log,
-    )
+    (io, exit_receiver, message_log_receiver, message_log)
 }
 
 #[cfg(test)]
