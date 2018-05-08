@@ -919,10 +919,10 @@ pub fn run() {
 
     let thread = new_vm();
 
-    tokio::run(
+    tokio::run(future::lazy(move || {
         start_server(thread, tokio::io::stdin(), tokio::io::stdout())
-            .map_err(|err| panic!("{}", err)),
-    )
+            .map_err(|err| panic!("{}", err))
+    }))
 }
 
 pub fn start_server<R, W>(
