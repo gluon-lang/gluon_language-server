@@ -2,7 +2,13 @@ language: Rust
 cache: cargo
 sudo: false
 rust:
+- stable
+- beta
 - nightly
+script:
+- cargo test 
+# Verify that reading from stdin and writing from stdout actually works
+- GLUON_TEST_REMOTE_SERVER=1 cargo test
 notifications:
   webhooks:
     urls:
