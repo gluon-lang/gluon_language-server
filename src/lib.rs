@@ -45,12 +45,11 @@ macro_rules! log_message {
 
 macro_rules! try_future {
     ($e:expr) => {
-
         match $e {
             Ok(x) => x,
             Err(err) => return Box::new(Err(err.into()).into_future()),
         }
-    }
+    };
 }
 
 pub mod debugger;
@@ -905,6 +904,18 @@ pub fn run() {
     }))
 }
 
+fn cancelable<F, G>(f: F, g: G) -> impl Future<Item = (), Error = G::Error>
+where
+    F: IntoFuture,
+    G: IntoFuture<Item = ()>,
+{
+    f.into_future()
+        .then(|_| Ok(()))
+        .select(g)
+        .map(|_| ())
+        .map_err(|err| err.0)
+}
+
 pub fn start_server<R, W>(
     thread: RootedThread,
     input: R,
@@ -945,6 +956,7 @@ where
         readbuf: BytesMut::default(),
         writebuf: BytesMut::default(),
     };
+
     let future: BoxFuture<(), Box<StdError + Send + Sync>> = Box::new(
         Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
             .map_err(|err| panic!("{}", err))
@@ -953,6 +965,7 @@ where
                 let message_log = message_log.clone();
                 io.handle_request(&json).then(move |result| {
                     if let Ok(Some(response)) = result {
+                        debug!("Response: {}", response);
                         Either::A(
                             message_log
                                 .clone()
@@ -967,7 +980,8 @@ where
             }),
     );
 
-    let log_messages = Box::new(
+    tokio::spawn(cancelable(
+        exit_receiver.clone(),
         message_log_receiver
             .map_err(|_| {
                 let x: Box<StdError + Send + Sync> = "Unable to log message".into();
@@ -975,22 +989,17 @@ where
             })
             .for_each(move |message| -> Result<(), Box<StdError + Send + Sync>> {
                 Ok(write_message_str(&mut output, &message)?)
+            })
+            .map_err(|err| {
+                error!("{}", err);
             }),
-    );
+    ));
 
     Box::new(
-        future::select_all(vec![
-            future,
-            Box::new(
-                exit_receiver
-                    .map(|_| {
-                        info!("Exiting");
-                    })
-                    .map_err(|_| "Exit was canceled".into()),
-            ),
-            log_messages,
-        ]).map(|t| t.0)
-            .map_err(|t| panic!("{}", t.0)),
+        cancelable(exit_receiver, future.map_err(|t| panic!("{}", t))).map(|t| {
+            info!("Server shutdown");
+            t
+        }),
     )
 }
 
@@ -1030,15 +1039,13 @@ impl Handler for IoHandler {
 
 macro_rules! request {
     ($t:tt) => {
-
         ::std::option::Option::None::<lsp_request!($t)>
-    }
+    };
 }
 macro_rules! notification {
     ($t:tt) => {
-
         ::std::option::Option::None::<lsp_notification!($t)>
-    }
+    };
 }
 
 fn initialize_rpc(

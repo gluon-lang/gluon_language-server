@@ -236,20 +236,43 @@ where
     }
 }
 
+fn start_local() -> (Box<Write>, Box<BufRead>) {
+    let (stdin_read, mut stdin_write) = pipe();
+    let (stdout_read, stdout_write) = pipe();
+    let stdout_read = BufReader::new(SyncReadPipe(stdout_read));
+
+    let thread = new_vm();
+    tokio::spawn(
+        ::gluon_language_server::start_server(thread, stdin_read, stdout_write)
+            .map_err(|err| panic!("{}", err)),
+    );
+    (Box::new(stdin_write), Box::new(stdout_read))
+}
+
+fn start_remote() -> (Box<Write>, Box<BufRead>) {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("target/debug/gluon_language-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (
+        Box::new(child.stdin.expect("stdin")),
+        Box::new(BufReader::new(child.stdout.expect("stdout"))),
+    )
+}
+
 pub fn send_rpc<F>(f: F)
 where
     F: FnOnce(&mut Write, &mut BufRead) + Send + ::std::panic::UnwindSafe + 'static,
 {
     run_no_panic_catch(future::lazy(move || {
-        let (stdin_read, mut stdin_write) = pipe();
-        let (stdout_read, stdout_write) = pipe();
-        let mut stdout_read = BufReader::new(SyncReadPipe(stdout_read));
-
-        let thread = new_vm();
-        tokio::spawn(
-            ::gluon_language_server::start_server(thread, stdin_read, stdout_write)
-                .map_err(|err| panic!("{}", err)),
-        );
+        let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_REMOTE_SERVER").is_ok() {
+            start_remote()
+        } else {
+            start_local()
+        };
 
         {
             f(&mut stdin_write, &mut stdout_read);
