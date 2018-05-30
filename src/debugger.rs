@@ -33,8 +33,10 @@ use gluon::vm::thread::{HookFlags, RootedThread, Thread as GluonThread, ThreadIn
 use gluon::vm::Variants;
 use gluon::{self, Compiler, Error as GluonError};
 
-use rpc::{read_message, write_message, write_message_str, LanguageServerCommand, ServerCommand,
-          ServerError};
+use rpc::{
+    read_message, write_message, write_message_str, LanguageServerCommand, ServerCommand,
+    ServerError,
+};
 use BoxFuture;
 
 pub struct InitializeHandler {
@@ -42,6 +44,7 @@ pub struct InitializeHandler {
 }
 
 impl LanguageServerCommand<InitializeRequestArguments> for InitializeHandler {
+    type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
     type Output = Option<Capabilities>;
     type Error = ();
     fn execute(
@@ -80,6 +83,7 @@ fn strip_file_prefix(thread: &GluonThread, program: &str) -> String {
 }
 
 impl LanguageServerCommand<Value> for LaunchHandler {
+    type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
     type Output = Option<Value>;
     type Error = ();
     fn execute(&self, args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
@@ -89,7 +93,8 @@ impl LanguageServerCommand<Value> for LaunchHandler {
 
 impl LaunchHandler {
     fn execute_launch(&self, args: Value) -> Result<Option<Value>, ServerError<()>> {
-        let program = args.get("program")
+        let program = args
+            .get("program")
             .and_then(|s| s.as_str())
             .ok_or_else(|| ServerError {
                 message: "No program argument found".into(),
@@ -254,6 +259,7 @@ pub struct DisconnectHandler {
 }
 
 impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
+    type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
     type Output = Option<Value>;
     type Error = ();
     fn execute(&self, _args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
@@ -559,7 +565,8 @@ impl Debugger {
                         let typ = remove_aliases_cow(&*self.thread.get_env(), &typ);
                         match value.get_variants().as_ref() {
                             ValueRef::Data(ref data) => match **typ {
-                                Type::Record(ref row) => data.iter()
+                                Type::Record(ref row) => data
+                                    .iter()
                                     .zip(row.row_iter())
                                     .map(|(field, type_field)| {
                                         mk_variable(
@@ -570,7 +577,8 @@ impl Debugger {
                                     })
                                     .collect(),
                                 Type::Variant(ref row) => {
-                                    let type_field = row.row_iter()
+                                    let type_field = row
+                                        .row_iter()
                                         .nth(data.tag() as usize)
                                         .expect("Variant tag is out of bounds");
                                     data.iter()
@@ -692,7 +700,8 @@ where
     {
         let debugger = debugger.clone();
         let set_break = move |args: SetBreakpointsArguments| -> BoxFuture<_, ServerError<()>> {
-            let breakpoints = args.breakpoints
+            let breakpoints = args
+                .breakpoints
                 .iter()
                 .flat_map(|bs| bs.iter().map(|breakpoint| debugger.line(breakpoint.line)))
                 .collect();
@@ -716,7 +725,8 @@ where
 
             Box::new(
                 Ok(SetBreakpointsResponseBody {
-                    breakpoints: args.breakpoints
+                    breakpoints: args
+                        .breakpoints
                         .into_iter()
                         .flat_map(|bs| bs)
                         .map(|breakpoint| Breakpoint {
@@ -740,12 +750,10 @@ where
     let threads = move |_: Value| -> BoxFuture<ThreadsResponseBody, ServerError<()>> {
         Box::new(
             Ok(ThreadsResponseBody {
-                threads: vec![
-                    Thread {
-                        id: 1,
-                        name: "main".to_string(),
-                    },
-                ],
+                threads: vec![Thread {
+                    id: 1,
+                    name: "main".to_string(),
+                }],
             }).into_future(),
         )
     };
@@ -934,14 +942,26 @@ where
         io.add_method("pause", ServerCommand::method(cont));
     }
 
+    macro_rules! into_future {
+        ($e:expr, $item:ty, $error:ty) => {{
+            let e = $e;
+            {
+                let _: &IntoFuture<Item = $item, Error = ServerError<$error>, Future = _> = &e;
+            }
+            e
+        }};
+    }
+
     {
         let debugger = debugger.clone();
-        let cont = move |args: VariablesArguments| -> BoxFuture<_, ServerError<()>> {
+        let cont = move |args: VariablesArguments| -> _ {
             let variables = debugger.variables(args.variables_reference);
-            Box::new(
+            into_future!(
                 Ok(VariablesResponseBody {
                     variables: variables,
-                }).into_future(),
+                }),
+                _,
+                ()
             )
         };
         io.add_method("variables", ServerCommand::method(cont));
@@ -971,6 +991,5 @@ where
             }
         }
         Ok(())
-    })()
-        .unwrap();
+    })().unwrap();
 }

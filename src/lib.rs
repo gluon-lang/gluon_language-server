@@ -36,23 +36,31 @@ extern crate gluon_format;
 macro_rules! log_message {
     ($sender: expr, $($ts: tt)+) => {
         if log_enabled!(::log::Level::Debug) {
-            ::log_message($sender, format!( $($ts)+ ))
+            Either::A(::log_message($sender, format!( $($ts)+ )))
         } else {
-            Box::new(Ok(()).into_future())
+            Either::B(Ok(()).into_future())
         }
     }
+}
+
+macro_rules! box_future {
+    ($e:expr) => {{
+        let fut: BoxFuture<_, _> = Box::new($e.into_future());
+        fut
+    }};
 }
 
 macro_rules! try_future {
     ($e:expr) => {
         match $e {
             Ok(x) => x,
-            Err(err) => return Box::new(Err(err.into()).into_future()),
+            Err(err) => return box_future!(Err(err.into())),
         }
     };
 }
 
 pub mod debugger;
+#[macro_use]
 pub mod rpc;
 mod text_edit;
 
@@ -107,7 +115,10 @@ use codespan_lsp::{byte_span_to_range, position_to_byte_index};
 use rpc::*;
 use text_edit::TextChanges;
 
-fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), ()> {
+fn log_message(
+    sender: mpsc::Sender<String>,
+    message: String,
+) -> impl Future<Item = (), Error = ()> {
     debug!("{}", message);
     let r = format!(
         r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
@@ -116,7 +127,7 @@ fn log_message(sender: mpsc::Sender<String>, message: String) -> BoxFuture<(), (
             message: message,
         }).unwrap()
     );
-    Box::new(sender.send(r).map(|_| ()).map_err(|_| ()))
+    sender.send(r).map(|_| ()).map_err(|_| ())
 }
 
 fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
@@ -285,6 +296,7 @@ impl Importer for CheckImporter {
 
 struct Initialize(RootedThread);
 impl LanguageServerCommand<InitializeParams> for Initialize {
+    type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
     type Output = InitializeResult;
     type Error = InitializeError;
     fn execute(
@@ -324,13 +336,15 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
     }
 }
 
-fn retrieve_expr_future<F, R>(
-    thread: &Thread,
-    text_document_uri: &Url,
+fn retrieve_expr_future<'a, 'b, F, Q, R>(
+    thread: &'a Thread,
+    text_document_uri: &'b Url,
     f: F,
-) -> BoxFuture<R, ServerError<()>>
+) -> impl Future<Item = R, Error = ServerError<()>> + 'static
 where
-    F: FnOnce(&mut Module) -> BoxFuture<R, ServerError<()>>,
+    F: FnOnce(&mut Module) -> Q,
+    Q: IntoFuture<Item = R, Error = ServerError<()>>,
+    Q::Future: Send + 'static,
     R: Send + 'static,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
@@ -341,10 +355,10 @@ where
         .expect("Check importer");
     let mut importer = import.importer.0.lock().unwrap();
     match importer.get_mut(&module) {
-        Some(source_module) => return f(source_module),
+        Some(source_module) => return Either::A(f(source_module).into_future()),
         None => (),
     }
-    Box::new(
+    Either::B(
         Err(ServerError {
             message: format!(
                 "Module `{}` is not defined\n{:?}",
@@ -407,13 +421,14 @@ pub struct CompletionData {
 #[derive(Clone)]
 struct Completion(RootedThread);
 impl LanguageServerCommand<CompletionParams> for Completion {
+    type Future = BoxFuture<Self::Output, ServerError<()>>;
     type Output = Option<CompletionResponse>;
     type Error = ();
     fn execute(&self, change: CompletionParams) -> BoxFuture<Self::Output, ServerError<()>> {
-        let thread = &self.0;
+        let thread = self.0.clone();
         let self_ = self.clone();
         let text_document_uri = change.text_document.uri.clone();
-        let result = retrieve_expr_future(&thread, &text_document_uri, |module| {
+        let result = retrieve_expr_future(&self.0, &text_document_uri, move |module| {
             let Module {
                 ref expr,
                 ref source,
@@ -425,21 +440,21 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             if dirty {
                 let (sender, receiver) = oneshot::channel();
                 waiters.push(sender);
-                return Box::new(
+                return box_future!(
                     receiver
                         .map_err(|_| {
                             let msg = "Completion sender was unexpectedly dropped";
                             error!("{}", msg);
                             ServerError::from(msg.to_string())
                         })
-                        .and_then(move |_| self_.clone().execute(change)),
+                        .and_then(move |_| self_.clone().execute(change))
                 );
             }
 
             let byte_index = try_future!(position_to_byte_index(&source, &change.position));
 
             let query = completion::SuggestionQuery {
-                modules: with_import(thread, |import| import.modules()),
+                modules: with_import(&thread, |import| import.modules()),
                 ..completion::SuggestionQuery::default()
             };
 
@@ -495,6 +510,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
 
 struct HoverCommand(RootedThread);
 impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
+    type Future = BoxFuture<Self::Output, ServerError<()>>;
     type Output = Option<Hover>;
     type Error = ();
     fn execute(
@@ -519,7 +535,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                         completion::completion(extract, source.span(), expr, byte_index)
                             .map(|(typ, span)| {
                                 let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                                    Some(comment) => format!("{}\n\n{}", typ, comment),
+                                    Some(comment) => format!("{}\n\n{}", typ, comment.content),
                                     None => format!("{}", typ),
                                 };
                                 Some(Hover {
@@ -530,8 +546,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                             .unwrap_or_else(|()| None),
                     )
                 })
-            })()
-                .into_future(),
+            })().into_future(),
         )
     }
 
@@ -730,7 +745,8 @@ impl DiagnosticsWorker {
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
                 let mut diagnostics = BTreeMap::new();
 
-                let import = self.thread
+                let import = self
+                    .thread
                     .get_macros()
                     .get("import")
                     .expect("Import macro");
@@ -786,7 +802,8 @@ impl DiagnosticsWorker {
     ) -> GluonResult<()> {
         let (expr_opt, errors) = self.typecheck_(&name, fileinput);
 
-        let import = self.thread
+        let import = self
+            .thread
             .get_macros()
             .get("import")
             .expect("Import macro");
@@ -846,7 +863,8 @@ impl DiagnosticsWorker {
         let mut errors = Errors::new();
         // The parser may find parse errors but still produce an expression
         // For that case still typecheck the expression but return the parse error afterwards
-        let mut expr = match self.compiler
+        let mut expr = match self
+            .compiler
             .parse_partial_expr(&TypeCache::new(), &name, fileinput)
         {
             Ok(expr) => expr,
@@ -878,7 +896,8 @@ impl DiagnosticsWorker {
             }
         };
         let metadata = Metadata::default();
-        if let Err(err) = self.thread
+        if let Err(err) = self
+            .thread
             .global_env()
             .set_dummy_global(name, typ, metadata)
         {
@@ -920,7 +939,7 @@ pub fn start_server<R, W>(
     thread: RootedThread,
     input: R,
     mut output: W,
-) -> BoxFuture<(), Box<StdError + Send + Sync>>
+) -> impl Future<Item = (), Error = Box<StdError + Send + Sync + 'static>>
 where
     R: tokio::io::AsyncRead + Send + 'static,
     W: tokio::io::AsyncWrite + Send + 'static,
@@ -957,28 +976,26 @@ where
         writebuf: BytesMut::default(),
     };
 
-    let future: BoxFuture<(), Box<StdError + Send + Sync>> = Box::new(
-        Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
-            .map_err(|err| panic!("{}", err))
-            .for_each(move |json| {
-                debug!("Handle: {}", json);
-                let message_log = message_log.clone();
-                io.handle_request(&json).then(move |result| {
-                    if let Ok(Some(response)) = result {
-                        debug!("Response: {}", response);
-                        Either::A(
-                            message_log
-                                .clone()
-                                .send(response)
-                                .map(|_| ())
-                                .map_err(|_| "Unable to send".into()),
-                        )
-                    } else {
-                        Either::B(Ok(()).into_future())
-                    }
-                })
-            }),
-    );
+    let request_handler_future = Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
+        .map_err(|err| panic!("{}", err))
+        .for_each(move |json| {
+            debug!("Handle: {}", json);
+            let message_log = message_log.clone();
+            io.handle_request(&json).then(move |result| {
+                if let Ok(Some(response)) = result {
+                    debug!("Response: {}", response);
+                    Either::A(
+                        message_log
+                            .clone()
+                            .send(response)
+                            .map(|_| ())
+                            .map_err(|_| "Unable to send".into()),
+                    )
+                } else {
+                    Either::B(Ok(()).into_future())
+                }
+            })
+        });
 
     tokio::spawn(cancelable(
         exit_receiver.clone(),
@@ -995,12 +1012,13 @@ where
             }),
     ));
 
-    Box::new(
-        cancelable(exit_receiver, future.map_err(|t| panic!("{}", t))).map(|t| {
-            info!("Server shutdown");
-            t
-        }),
-    )
+    cancelable(
+        exit_receiver,
+        request_handler_future.map_err(|t: Box<StdError + Send + Sync>| panic!("{}", t)),
+    ).map(|t| {
+        info!("Server shutdown");
+        t
+    })
 }
 
 trait Handler {
@@ -1008,6 +1026,7 @@ trait Handler {
     where
         T: ::languageserver_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
+        <U::Future as IntoFuture>::Future: Send + 'static,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize;
     fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
@@ -1022,6 +1041,7 @@ impl Handler for IoHandler {
     where
         T: ::languageserver_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
+        <U::Future as IntoFuture>::Future: Send + 'static,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize,
     {
@@ -1096,44 +1116,42 @@ fn initialize_rpc(
     {
         let thread = thread.clone();
         let message_log = message_log.clone();
-        let resolve = move |mut item: CompletionItem| -> BoxFuture<CompletionItem, _> {
+        let resolve = move |mut item: CompletionItem| {
             let data: CompletionData =
                 serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
 
             let message_log2 = message_log.clone();
             let thread = thread.clone();
             let label = item.label.clone();
-            Box::new(
-                log_message!(message_log.clone(), "{:?}", data.text_document_uri)
-                    .then(move |_| {
-                        retrieve_expr_with_pos(
-                            &thread,
-                            &data.text_document_uri,
-                            &data.position,
-                            |module, byte_index| {
-                                let type_env = thread.global_env().get_env();
-                                let (_, metadata_map) =
-                                    gluon::check::metadata::metadata(&*type_env, &module.expr);
-                                Ok(completion::suggest_metadata(
-                                    &metadata_map,
-                                    &*type_env,
-                                    module.source.span(),
-                                    &module.expr,
-                                    byte_index,
-                                    &label,
-                                ).and_then(|metadata| metadata.comment.clone()))
-                            },
-                        )
-                    })
-                    .and_then(move |comment| {
-                        log_message!(message_log2, "{:?}", comment)
-                            .map(move |()| {
-                                item.documentation = comment.map(Documentation::String);
-                                item
-                            })
-                            .map_err(|_| panic!("Unable to send log message"))
-                    }),
-            )
+            log_message!(message_log.clone(), "{:?}", data.text_document_uri)
+                .then(move |_| {
+                    retrieve_expr_with_pos(
+                        &thread,
+                        &data.text_document_uri,
+                        &data.position,
+                        |module, byte_index| {
+                            let type_env = thread.global_env().get_env();
+                            let (_, metadata_map) =
+                                gluon::check::metadata::metadata(&*type_env, &module.expr);
+                            Ok(completion::suggest_metadata(
+                                &metadata_map,
+                                &*type_env,
+                                module.source.span(),
+                                &module.expr,
+                                byte_index,
+                                &label,
+                            ).and_then(|metadata| metadata.comment.clone()))
+                        },
+                    )
+                })
+                .and_then(move |comment| {
+                    log_message!(message_log2, "{:?}", comment)
+                        .map(move |()| {
+                            item.documentation = comment.map(|c| Documentation::String(c.content));
+                            item
+                        })
+                        .map_err(|_| panic!("Unable to send log message"))
+                })
         };
         io.add_async_method(request!("completionItem/resolve"), resolve);
     }
@@ -1142,132 +1160,113 @@ fn initialize_rpc(
 
     {
         let thread = thread.clone();
-        let format = move |params: DocumentFormattingParams| -> BoxFuture<Option<Vec<_>>, _> {
-            Box::new(
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let formatted = gluon_format::format_expr(
-                        &mut Compiler::new(),
-                        &thread,
-                        &module.source.name().to_string(),
-                        module.source.src(),
-                    )?;
-                    let range = byte_span_to_range(&module.source, module.source.span())?;
-                    Ok(Some(vec![
-                        TextEdit {
-                            range,
-                            new_text: formatted,
-                        },
-                    ]))
-                }).into_future(),
-            )
+        let format = move |params: DocumentFormattingParams| {
+            retrieve_expr(&thread, &params.text_document.uri, |module| {
+                let formatted = gluon_format::format_expr(
+                    &mut Compiler::new(),
+                    &thread,
+                    &module.source.name().to_string(),
+                    module.source.src(),
+                )?;
+                let range = byte_span_to_range(&module.source, module.source.span())?;
+                Ok(Some(vec![TextEdit {
+                    range,
+                    new_text: formatted,
+                }]))
+            })
         };
         io.add_async_method(request!("textDocument/formatting"), format);
     }
 
     {
         let thread = thread.clone();
-        let f = move |params: TextDocumentPositionParams| -> BoxFuture<Option<Vec<_>>, _> {
-            Box::new(
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let expr = &module.expr;
+        let f = move |params: TextDocumentPositionParams| {
+            retrieve_expr(&thread, &params.text_document.uri, |module| {
+                let expr = &module.expr;
 
-                    let source = &module.source;
+                let source = &module.source;
 
-                    let byte_index = position_to_byte_index(&source, &params.position)?;
+                let byte_index = position_to_byte_index(&source, &params.position)?;
 
-                    let symbol_spans =
-                        completion::find_all_symbols(source.span(), expr, byte_index)
-                            .map(|t| t.1)
-                            .unwrap_or(Vec::new());
+                let symbol_spans = completion::find_all_symbols(source.span(), expr, byte_index)
+                    .map(|t| t.1)
+                    .unwrap_or(Vec::new());
 
-                    symbol_spans
-                        .into_iter()
-                        .map(|span| {
-                            Ok(DocumentHighlight {
-                                kind: None,
-                                range: byte_span_to_range(&source, span)?,
-                            })
+                symbol_spans
+                    .into_iter()
+                    .map(|span| {
+                        Ok(DocumentHighlight {
+                            kind: None,
+                            range: byte_span_to_range(&source, span)?,
                         })
-                        .collect::<Result<_, _>>()
-                        .map(Some)
-                }).into_future(),
-            )
+                    })
+                    .collect::<Result<_, _>>()
+                    .map(Some)
+            })
         };
         io.add_async_method(request!("textDocument/documentHighlight"), f);
     }
 
     {
         let thread = thread.clone();
-        let f = move |params: DocumentSymbolParams| -> BoxFuture<Option<Vec<_>>, _> {
-            Box::new(
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let expr = &module.expr;
+        let f = move |params: DocumentSymbolParams| {
+            retrieve_expr(&thread, &params.text_document.uri, |module| {
+                let expr = &module.expr;
 
-                    let symbols = completion::all_symbols(expr);
+                let symbols = completion::all_symbols(expr);
 
-                    let source = &module.source;
+                let source = &module.source;
 
-                    symbols
-                        .into_iter()
-                        .map(|symbol| {
-                            completion_symbol_to_symbol_information(
-                                &source,
-                                symbol,
-                                params.text_document.uri.clone(),
-                            )
-                        })
-                        .collect::<Result<_, _>>()
-                        .map(Some)
-                }).into_future(),
-            )
+                symbols
+                    .into_iter()
+                    .map(|symbol| {
+                        completion_symbol_to_symbol_information(
+                            &source,
+                            symbol,
+                            params.text_document.uri.clone(),
+                        )
+                    })
+                    .collect::<Result<_, _>>()
+                    .map(Some)
+            })
         };
         io.add_async_method(request!("textDocument/documentSymbol"), f);
     }
 
     {
         let thread = thread.clone();
-        let f = move |params: WorkspaceSymbolParams| -> BoxFuture<Option<Vec<_>>, ServerError<()>> {
-            let thread = thread.clone();
-            Box::new(future::lazy(move || {
-                let import = thread.get_macros().get("import").expect("Import macro");
-                let import = import
-                    .downcast_ref::<Import<CheckImporter>>()
-                    .expect("Check importer");
-                let modules = import.importer.0.lock().unwrap();
+        let f = move |params: WorkspaceSymbolParams| -> _ {
+            let import = thread.get_macros().get("import").expect("Import macro");
+            let import = import
+                .downcast_ref::<Import<CheckImporter>>()
+                .expect("Check importer");
+            let modules = import.importer.0.lock().unwrap();
 
-                let mut symbols = Vec::<SymbolInformation>::new();
+            let mut symbols = Vec::<SymbolInformation>::new();
 
-                for module in modules.values() {
-                    let source = &module.source;
+            for module in modules.values() {
+                let source = &module.source;
 
-                    symbols.extend(completion::all_symbols(&module.expr)
-                        .into_iter()
-                        .filter(|symbol| match symbol.value {
-                            CompletionSymbol::Value { ref name, .. }
-                            | CompletionSymbol::Type { ref name, .. } => {
-                                name.declared_name().contains(&params.query)
-                            }
-                        })
-                        .map(|symbol| {
-                            completion_symbol_to_symbol_information(
-                                &source,
-                                symbol,
-                                module.uri.clone(),
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?);
-                }
+                symbols.extend(completion::all_symbols(&module.expr)
+                    .into_iter()
+                    .filter(|symbol| match symbol.value {
+                        CompletionSymbol::Value { ref name, .. }
+                        | CompletionSymbol::Type { ref name, .. } => {
+                            name.declared_name().contains(&params.query)
+                        }
+                    })
+                    .map(|symbol| {
+                        completion_symbol_to_symbol_information(&source, symbol, module.uri.clone())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?);
+            }
 
-                Ok(Some(symbols))
-            }))
+            Ok(Some(symbols))
         };
         io.add_async_method(request!("workspace/symbol"), f);
     }
 
-    io.add_async_method(
-        request!("shutdown"),
-        |_| -> BoxFuture<(), ServerError<()>> { Box::new(futures::finished(())) },
-    );
+    io.add_async_method(request!("shutdown"), |_| Ok::<(), ServerError<()>>(()));
 
     let exit_sender = Mutex::new(Some(exit_sender));
     io.add_notification(notification!("exit"), move |_| {
@@ -1306,7 +1305,7 @@ fn initialize_rpc(
         message_log: mpsc::Sender<String>,
         work_queue: S,
         change: DidChangeTextDocumentParams,
-    ) -> BoxFuture<(), ()>
+    ) -> impl Future<Item = (), Error = ()> + Send + 'static
     where
         S: Sink<SinkItem = Entry<Url, Arc<codespan::FileMap>, u64>, SinkError = ()>
             + Send
@@ -1357,17 +1356,17 @@ fn initialize_rpc(
                     }
                     Err(err) => Err(err),
                 },
-                None => return Box::new(Ok(()).into_future()),
+                None => return Either::A(Either::A(Ok(()).into_future())),
             }
         };
         match result {
             Ok(new_version) => {
                 if Some(new_version) == module.version {
-                    return Box::new(Ok(()).into_future());
+                    return Either::A(Either::B(Ok(()).into_future()));
                 }
                 module.version = Some(new_version);
                 let arc_source = module.source.clone();
-                Box::new(
+                Either::B(Either::A(
                     work_queue
                         .send(Entry {
                             key: uri,
@@ -1375,11 +1374,11 @@ fn initialize_rpc(
                             version: new_version,
                         })
                         .map(|_| ()),
-                )
+                ))
             }
-            Err(err) => {
-                Box::new(log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())))
-            }
+            Err(err) => Either::B(Either::B(
+                log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())),
+            )),
         }
     }
     {
