@@ -6,8 +6,8 @@ use languageserver_types::TextDocumentContentChangeEvent;
 
 use gluon::base::pos::Span;
 
-use rpc::ServerError;
 use codespan_lsp::range_to_byte_span;
+use rpc::ServerError;
 
 struct VersionedChange {
     version: u64,
@@ -29,7 +29,8 @@ impl TextChanges {
     }
 
     pub fn add(&mut self, version: u64, content_changes: Vec<TextDocumentContentChangeEvent>) {
-        let i = self.changes
+        let i = self
+            .changes
             .iter()
             .position(|change| change.version > version)
             .unwrap_or(self.changes.len());
@@ -118,66 +119,60 @@ mod tests {
         let mut source = String::new();
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    }),
-                    range_length: None,
-                    text: "test".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                }),
+                range_length: None,
+                text: "test".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "test");
 
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 2,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 3,
-                        },
-                    }),
-                    range_length: Some(1),
-                    text: "".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                }),
+                range_length: Some(1),
+                text: "".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "tet");
 
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 2,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 3,
-                        },
-                    }),
-                    range_length: Some(1),
-                    text: "ab".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                }),
+                range_length: Some(1),
+                text: "ab".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "teab");

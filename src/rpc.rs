@@ -1,3 +1,4 @@
+extern crate bytes;
 extern crate combine;
 
 use std::collections::VecDeque;
@@ -5,11 +6,25 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
+use std::str;
 use std::sync::{Arc, Mutex};
 
-use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
-use futures::{self, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+use self::combine::combinator::{any_send_partial_state, AnySendPartialState};
+use self::combine::error::{ParseError, StreamError};
+use self::combine::parser::byte::digit;
+use self::combine::parser::range::{range, recognize, take};
+use self::combine::stream::easy;
+use self::combine::stream::{PartialStream, RangeStream, StreamErrorFor};
+use self::combine::{skip_many, skip_many1, Parser};
+
+use self::bytes::{BufMut, BytesMut};
+
+use tokio_io::codec::{Decoder, Encoder};
+
 use futures::sync::mpsc;
+use futures::{self, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+
+use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
 use serde;
 use serde_json::{from_value, to_string, to_value};
@@ -34,27 +49,34 @@ where
     }
 }
 
-pub trait LanguageServerCommand<P>: Send + Sync + 'static {
+pub trait LanguageServerCommand<P>: Send + Sync + 'static
+where
+    Self::Future: Send + 'static,
+{
+    type Future: IntoFuture<Item = Self::Output, Error = ServerError<Self::Error>> + Send + 'static;
     type Output: serde::Serialize;
     type Error: serde::Serialize;
-    fn execute(&self, param: P) -> BoxFuture<Self::Output, ServerError<Self::Error>>;
+    fn execute(&self, param: P) -> Self::Future;
 
     fn invalid_params(&self) -> Option<Self::Error> {
         None
     }
 }
 
-impl<'de, F, P, O, E> LanguageServerCommand<P> for F
+impl<'de, F, R, P, O, E> LanguageServerCommand<P> for F
 where
-    F: Fn(P) -> BoxFuture<O, ServerError<E>> + Send + Sync + 'static,
+    F: Fn(P) -> R + Send + Sync + 'static,
+    R: IntoFuture<Item = O, Error = ServerError<E>> + Send + 'static,
+    R::Future: Send + 'static,
     P: serde::Deserialize<'de>,
     O: serde::Serialize,
     E: serde::Serialize,
 {
+    type Future = F::Output;
     type Output = O;
     type Error = E;
 
-    fn execute(&self, param: P) -> BoxFuture<Self::Output, ServerError<Self::Error>> {
+    fn execute(&self, param: P) -> Self::Future {
         self(param)
     }
 }
@@ -78,6 +100,7 @@ impl<T, P> ServerCommand<T, P> {
     pub fn method(command: T) -> ServerCommand<T, P>
     where
         T: LanguageServerCommand<P>,
+        <T::Future as IntoFuture>::Future: Send + 'static,
         P: for<'de> serde::Deserialize<'de> + 'static,
     {
         ServerCommand(command, PhantomData)
@@ -95,6 +118,7 @@ impl<T, P> ServerCommand<T, P> {
 impl<P, T> RpcMethodSimple for ServerCommand<T, P>
 where
     T: LanguageServerCommand<P>,
+    <T::Future as IntoFuture>::Future: Send + 'static,
     P: for<'de> serde::Deserialize<'de> + 'static,
 {
     type Out = BoxFuture<Value, Error>;
@@ -106,12 +130,11 @@ where
         };
         let err = match from_value(value.clone()) {
             Ok(value) => {
-                return Box::new(self.0.execute(value).then(|result| {
+                return Box::new(self.0.execute(value).into_future().then(|result| {
                     match result {
-                        Ok(value) => {
-                            Ok(to_value(&value).expect("result data could not be serialized"))
-                                .into_future()
-                        }
+                        Ok(value) => Ok(
+                            to_value(&value).expect("result data could not be serialized")
+                        ).into_future(),
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
                             message: error.message,
@@ -129,7 +152,8 @@ where
         Box::new(futures::failed(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {}", err),
-            data: data.as_ref()
+            data: data
+                .as_ref()
                 .map(|v| to_value(v).expect("error data could not be serialized")),
         }))
     }
@@ -205,76 +229,49 @@ where
     Ok(())
 }
 
-extern crate bytes;
-
-use std::str;
-
-use tokio_io::codec::{Decoder, Encoder};
-use self::bytes::{BufMut, BytesMut};
-
-#[derive(Debug)]
-enum State {
-    Nothing,
-    ContentLength(usize),
-}
-
-#[derive(Debug)]
 pub struct LanguageServerDecoder {
-    state: State,
+    state: AnySendPartialState,
 }
 
 impl LanguageServerDecoder {
     pub fn new() -> LanguageServerDecoder {
         LanguageServerDecoder {
-            state: State::Nothing,
+            state: Default::default(),
         }
     }
 }
 
-use self::combine::range::{range, take};
-use self::combine::{skip_many, Parser, many1};
-use self::combine::easy::{self, Error as CombineError, Errors};
-use self::combine::byte::digit;
-
-fn combine_decode<'a, P, R>(
-    mut parser: P,
-    src: &'a [u8],
-) -> Result<Option<(R, usize)>, Errors<u8, String, usize>>
+/// Parses blocks of data with length headers
+///
+/// ```ignore
+/// Content-Length: 18
+///
+/// { "some": "data" }
+/// ```
+fn decode_parser<'a, I>(
+) -> impl Parser<Input = I, Output = Vec<u8>, PartialState = AnySendPartialState> + 'a
 where
-    P: Parser<Input = easy::Stream<&'a [u8]>, Output = R>,
+    I: RangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    // Necessary due to rust-lang/rust#24159
+    I::Error: ParseError<I::Item, I::Range, I::Position>,
 {
-    match parser.parse(easy::Stream(&src[..])) {
-        Ok((message, rest)) => Ok(Some((message, src.len() - rest.0.len()))),
-        Err(err) => {
-            return if err.errors
-                .iter()
-                .any(|err| *err == CombineError::end_of_input())
-            {
-                Ok(None)
-            } else {
-                Err(err.map_range(|r| {
-                    str::from_utf8(r)
-                        .ok()
-                        .map_or_else(|| format!("{:?}", r), |s| s.to_string())
-                }).map_position(|p| p.translate_position(&src[..])))
-            }
-        }
-    }
-}
+    let content_length = range(&b"Content-Length: "[..]).with(
+        recognize(skip_many1(digit())).and_then(|digits: &[u8]| {
+            str::from_utf8(digits).unwrap().parse::<usize>()
+                                // Convert the error from `.parse` into an error combine understands
+                                .map_err(StreamErrorFor::<I>::other)
+        }),
+    );
 
-macro_rules! decode {
-    ($parser: expr, $src: expr) => {
-        {
-            let (output, removed_len) = {
-                match combine_decode($parser, &$src[..])? {
-                    None => return Ok(None),
-                    Some(x) => x,
-                }
-            };
-            $src.split_to(removed_len);
-            output
-        }
-    };
+    any_send_partial_state(
+        (
+            skip_many(range(&b"\r\n"[..])),
+            content_length,
+            range(&b"\r\n\r\n"[..]).map(|_| ()),
+        ).then_partial(|&mut (_, message_length, _)| {
+            take(message_length).map(|bytes: &[u8]| bytes.to_owned())
+        }),
+    )
 }
 
 impl Decoder for LanguageServerDecoder {
@@ -282,32 +279,28 @@ impl Decoder for LanguageServerDecoder {
     type Error = Box<::std::error::Error + Send + Sync>;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        loop {
-            match self.state {
-                State::Nothing => {
-                    let value = decode!(
-                        (
-                            skip_many(range(&b"\r\n"[..])),
-                            range(&b"Content-Length: "[..]),
-                            many1(digit()),
-                            range(&b"\r\n\r\n"[..]),
-                        ).map(|t| t.2)
-                            .and_then(|digits: Vec<u8>| unsafe {
-                                String::from_utf8_unchecked(digits).parse::<usize>()
-                            }),
-                        src
-                    );
+        let (opt, removed_len) = combine::stream::decode(
+            decode_parser(),
+            easy::Stream(PartialStream(&src[..])),
+            &mut self.state,
+        ).map_err(|err| {
+            let err =
+                err.map_range(|r| {
+                    str::from_utf8(r)
+                        .ok()
+                        .map_or_else(|| format!("{:?}", r), |s| s.to_string())
+                }).map_position(|p| p.translate_position(&src[..]));
+            format!("{}\nIn input: `{}`", err, str::from_utf8(src).unwrap())
+        })?;
 
-                    self.state = State::ContentLength(value);
-                }
-                State::ContentLength(message_length) => {
-                    let message = decode!(
-                        take(message_length).map(|bytes: &[u8]| bytes.to_owned()),
-                        src
-                    );
-                    self.state = State::Nothing;
-                    return Ok(Some(String::from_utf8(message)?));
-                }
+        src.split_to(removed_len);
+
+        match opt {
+            None => Ok(None),
+
+            Some(output) => {
+                let value = String::from_utf8(output)?;
+                Ok(Some(value))
             }
         }
     }
