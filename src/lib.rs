@@ -3,6 +3,8 @@
 
 extern crate clap;
 
+extern crate failure;
+
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -88,7 +90,6 @@ use completion::CompletionSymbol;
 
 use std::collections::{hash_map, BTreeMap};
 use std::env;
-use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
 use std::io::BufReader;
@@ -267,7 +268,7 @@ impl Importer for CheckImporter {
             self::Module {
                 expr: expr,
                 source: compiler.get_filemap(&module_name).unwrap().clone(),
-                uri: module_name_to_file_(module_name).map_err(|err| (None, err.into()))?,
+                uri: module_name_to_file_(module_name).map_err(|err| (None, err.compat().into()))?,
                 dirty: false,
                 waiters: Vec::new(),
                 version: None,
@@ -555,7 +556,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
     }
 }
 
-fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, Box<StdError + Send + Sync>> {
+fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, failure::Error> {
     match *name {
         codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
         codespan::FileName::Real(ref p) => filename_to_url(p),
@@ -569,24 +570,24 @@ fn codspan_name_to_module(name: &codespan::FileName) -> String {
     }
 }
 
-fn module_name_to_file_(s: &str) -> Result<Url, Box<StdError + Send + Sync>> {
+fn module_name_to_file_(s: &str) -> Result<Url, failure::Error> {
     let mut result = s.replace(".", "/");
     result.push_str(".glu");
     Ok(filename_to_url(Path::new(&result))
         .or_else(|_| url::Url::from_file_path(s))
-        .map_err(|_| format!("Unable to convert module name to a url: `{}`", s))?)
+        .map_err(|_| failure::err_msg(format!("Unable to convert module name to a url: `{}`", s)))?)
 }
 
-fn filename_to_url(result: &Path) -> Result<Url, Box<StdError + Send + Sync>> {
+fn filename_to_url(result: &Path) -> Result<Url, failure::Error> {
     let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
         Ok(path) => Ok(path.join(result)),
         Err(_) => Err(err),
     })?;
     Ok(url::Url::from_file_path(path).map_err(|_| {
-        format!(
+        failure::err_msg(format!(
             "Unable to convert module name to a url: `{}`",
             result.display()
-        )
+        ))
     })?)
 }
 
@@ -619,13 +620,12 @@ fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> String {
     })
 }
 
-pub fn strip_file_prefix(
-    paths: &[PathBuf],
-    url: &Url,
-) -> Result<String, Box<StdError + Send + Sync>> {
+pub fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, failure::Error> {
     use std::env;
 
-    let path = url.to_file_path().map_err(|_| "Expected a file uri")?;
+    let path = url
+        .to_file_path()
+        .map_err(|_| failure::err_msg("Expected a file uri"))?;
     let name = match fs::canonicalize(&*path) {
         Ok(name) => name,
         Err(_) => env::current_dir()?.join(&*path),
@@ -939,7 +939,7 @@ pub fn start_server<R, W>(
     thread: RootedThread,
     input: R,
     mut output: W,
-) -> impl Future<Item = (), Error = Box<StdError + Send + Sync + 'static>>
+) -> impl Future<Item = (), Error = failure::Error>
 where
     R: tokio::io::AsyncRead + Send + 'static,
     W: tokio::io::AsyncWrite + Send + 'static,
@@ -989,7 +989,7 @@ where
                             .clone()
                             .send(response)
                             .map(|_| ())
-                            .map_err(|_| "Unable to send".into()),
+                            .map_err(|_| failure::err_msg("Unable to send")),
                     )
                 } else {
                     Either::B(Ok(()).into_future())
@@ -1000,11 +1000,8 @@ where
     tokio::spawn(cancelable(
         exit_receiver.clone(),
         message_log_receiver
-            .map_err(|_| {
-                let x: Box<StdError + Send + Sync> = "Unable to log message".into();
-                x
-            })
-            .for_each(move |message| -> Result<(), Box<StdError + Send + Sync>> {
+            .map_err(|_| failure::err_msg("Unable to log message"))
+            .for_each(move |message| -> Result<(), failure::Error> {
                 Ok(write_message_str(&mut output, &message)?)
             })
             .map_err(|err| {
@@ -1014,7 +1011,7 @@ where
 
     cancelable(
         exit_receiver,
-        request_handler_future.map_err(|t: Box<StdError + Send + Sync>| panic!("{}", t)),
+        request_handler_future.map_err(|t: failure::Error| panic!("{}", t)),
     ).map(|t| {
         info!("Server shutdown");
         t

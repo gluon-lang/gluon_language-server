@@ -4,12 +4,13 @@ use std::cell::RefCell;
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::error::Error as StdError;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::spawn;
+
+use failure;
 
 use codespan;
 
@@ -272,7 +273,7 @@ impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
 fn translate_request(
     message: String,
     current_command: &RefCell<String>,
-) -> Result<String, Box<StdError>> {
+) -> Result<String, failure::Error> {
     use languageserver_types::NumberOrString;
     use serde_json::Value;
 
@@ -311,7 +312,7 @@ fn translate_response(
     debugger: &Debugger,
     message: String,
     current_command: &str,
-) -> Result<String, Box<StdError>> {
+) -> Result<String, failure::Error> {
     use languageserver_types::NumberOrString;
     use serde_json::Value;
 
@@ -970,7 +971,7 @@ where
     // The response needs the command so we need extract it from the request and inject it
     // in the response
     let command = RefCell::new(String::new());
-    (move || -> Result<(), Box<StdError>> {
+    (move || -> Result<(), failure::Error> {
         while !exit_token.load(Ordering::SeqCst) {
             match try!(read_message(&mut input)) {
                 Some(json) => {
