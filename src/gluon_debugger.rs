@@ -1,11 +1,13 @@
 extern crate clap;
 extern crate env_logger;
 
+extern crate failure;
+
 extern crate gluon_language_server;
 
-use std::sync::Arc;
 use std::io::{self, BufReader};
 use std::net::TcpListener;
+use std::sync::Arc;
 
 use clap::{App, Arg};
 

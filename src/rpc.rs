@@ -2,12 +2,13 @@ extern crate bytes;
 extern crate combine;
 
 use std::collections::VecDeque;
-use std::error::Error as StdError;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 use std::marker::PhantomData;
 use std::str;
 use std::sync::{Arc, Mutex};
+
+use failure;
 
 use self::combine::combinator::{any_send_partial_state, AnySendPartialState};
 use self::combine::error::{ParseError, StreamError};
@@ -177,7 +178,7 @@ where
     }
 }
 
-pub fn read_message<R>(mut reader: R) -> Result<Option<String>, Box<StdError>>
+pub fn read_message<R>(mut reader: R) -> Result<Option<String>, failure::Error>
 where
     R: BufRead + Read,
 {
@@ -201,7 +202,7 @@ where
         try!(reader.read_exact(&mut content));
         Ok(Some(try!(String::from_utf8(content))))
     } else {
-        Err(format!("Invalid message: `{}`", header).into())
+        Err(failure::err_msg(format!("Invalid message: `{}`", header)))
     }
 }
 
@@ -276,7 +277,7 @@ where
 
 impl Decoder for LanguageServerDecoder {
     type Item = String;
-    type Error = Box<::std::error::Error + Send + Sync>;
+    type Error = failure::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let (opt, removed_len) = combine::stream::decode(
@@ -290,7 +291,11 @@ impl Decoder for LanguageServerDecoder {
                         .ok()
                         .map_or_else(|| format!("{:?}", r), |s| s.to_string())
                 }).map_position(|p| p.translate_position(&src[..]));
-            format!("{}\nIn input: `{}`", err, str::from_utf8(src).unwrap())
+            failure::err_msg(format!(
+                "{}\nIn input: `{}`",
+                err,
+                str::from_utf8(src).unwrap()
+            ))
         })?;
 
         src.split_to(removed_len);
