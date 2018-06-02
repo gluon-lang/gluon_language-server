@@ -1210,7 +1210,7 @@ fn initialize_rpc(
             retrieve_expr(&thread, &params.text_document.uri, |module| {
                 let expr = &module.expr;
 
-                let symbols = completion::all_symbols(expr);
+                let symbols = completion::all_symbols(module.source.span(), expr);
 
                 let source = &module.source;
 
@@ -1244,7 +1244,7 @@ fn initialize_rpc(
             for module in modules.values() {
                 let source = &module.source;
 
-                symbols.extend(completion::all_symbols(&module.expr)
+                symbols.extend(completion::all_symbols(module.source.span(), &module.expr)
                     .into_iter()
                     .filter(|symbol| match symbol.value {
                         CompletionSymbol::Value { ref name, .. }
