@@ -9,6 +9,7 @@ use gluon::base::pos::Span;
 use codespan_lsp::range_to_byte_span;
 use rpc::ServerError;
 
+#[derive(Debug)]
 struct VersionedChange {
     version: u64,
     content_changes: Vec<TextDocumentContentChangeEvent>,
@@ -52,7 +53,9 @@ impl TextChanges {
             assert!(
                 (change.version == version && change.content_changes.is_empty())
                     || change.version > version,
-                "BUG: Attempt to apply old change on newer contents"
+                "BUG: Attempt to apply old change on newer contents {} << {:?}",
+                version,
+                change,
             );
             if change.version > version + 1 {
                 self.changes.push_front(change);

@@ -825,6 +825,8 @@ impl DiagnosticsWorker {
                     module.version = version;
                 }
 
+                module.source = self.compiler.get_filemap(&name).expect("FileMap").clone();
+
                 module.dirty = false;
 
                 let waiters = mem::replace(&mut module.waiters, Vec::new());
