@@ -61,21 +61,19 @@ x + 2
 
         assert_eq!(
             edits,
-            vec![
-                TextEdit {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 4,
-                            character: 0,
-                        },
+            vec![TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
                     },
-                    new_text: expected.to_string(),
+                    end: Position {
+                        line: 4,
+                        character: 0,
+                    },
                 },
-            ]
+                new_text: expected.to_string(),
+            }]
         );
     });
 }
