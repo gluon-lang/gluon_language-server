@@ -85,12 +85,15 @@ let x = 1
 x + "abc"
 "#;
     support::send_rpc(move |stdin, stdout| {
+        // Insert a dummy file so that test is not the first file
+        support::did_open(stdin, "dummy", r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#);
+        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
         support::did_open(stdin, "test", text);
 
         let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
 
-        did_change_event(stdin, "test", 2, vec![]);
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+        // Since nothing changed we don't update the version
+        did_change_event(stdin, "test", 1, vec![]);
 
         hover(
             stdin,

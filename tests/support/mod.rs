@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 extern crate futures;
+extern crate languageserver_types;
 extern crate tokio;
 
 use std::collections::VecDeque;
@@ -60,6 +61,7 @@ where
     let value = to_value(value);
     let params = match value {
         Ok(Value::Object(map)) => Params::Map(map),
+        Ok(Value::Null) => Params::None,
         _ => panic!("Expected map"),
     };
     Call::MethodCall(MethodCall {
@@ -77,7 +79,8 @@ where
     let value = to_value(value);
     let params = match value {
         Ok(Value::Object(map)) => Params::Map(map),
-        _ => panic!("Expected map"),
+        Ok(Value::Null) => Params::None,
+        _ => panic!("Expected map or null"),
     };
     Call::Notification(Notification {
         jsonrpc: Some(Version::V2),
@@ -274,6 +277,10 @@ where
 
         {
             f(&mut stdin_write, &mut stdout_read);
+
+            write_message(&mut stdin_write, method_call("shutdown", 1_000_000, ())).unwrap();
+
+            let () = expect_response(&mut stdout_read);
 
             let exit = Call::Notification(Notification {
                 jsonrpc: Some(Version::V2),

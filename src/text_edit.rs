@@ -33,8 +33,15 @@ impl TextChanges {
         let i = self
             .changes
             .iter()
-            .position(|change| change.version > version)
+            .position(|change| change.version >= version)
             .unwrap_or(self.changes.len());
+        // The client may send an empty content change event with the same version as another event
+        match self.changes.get(i).map(|change| change.version) {
+            Some(found_version) if found_version == version => {
+                assert!(content_changes.is_empty());
+            }
+            _ => {}
+        }
         self.changes.insert(
             i,
             VersionedChange {
@@ -51,8 +58,7 @@ impl TextChanges {
     ) -> Result<u64, ServerError<()>> {
         while let Some(change) = self.changes.pop_front() {
             assert!(
-                (change.version == version && change.content_changes.is_empty())
-                    || change.version > version,
+                change.version >= version,
                 "BUG: Attempt to apply old change on newer contents {} << {:?}",
                 version,
                 change,
