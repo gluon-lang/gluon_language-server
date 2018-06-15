@@ -494,9 +494,10 @@ impl Debugger {
     }
 
     fn line(&self, line: i64) -> Line {
-        Line::from((line as usize)
-            .saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize)
-            as codespan::RawIndex)
+        Line::from(
+            (line as usize).saturating_sub(self.lines_start_at_1.load(Ordering::Acquire) as usize)
+                as codespan::RawIndex,
+        )
     }
 
     fn send_event<T>(&self, value: T)

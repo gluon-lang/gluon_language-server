@@ -687,11 +687,13 @@ fn create_diagnostics(
         diagnostics
             .entry(module_name_to_file(importer, &in_file_error.source_name()))
             .or_insert(Vec::new())
-            .extend(in_file_error
-                .errors()
-                .into_iter()
-                .map(|err| into_diagnostic(code_map, err))
-                .collect::<Result<Vec<_>, _>>()?);
+            .extend(
+                in_file_error
+                    .errors()
+                    .into_iter()
+                    .map(|err| into_diagnostic(code_map, err))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
         Ok(())
     }
 
@@ -1246,18 +1248,24 @@ fn initialize_rpc(
             for module in modules.values() {
                 let source = &module.source;
 
-                symbols.extend(completion::all_symbols(module.source.span(), &module.expr)
-                    .into_iter()
-                    .filter(|symbol| match symbol.value {
-                        CompletionSymbol::Value { ref name, .. }
-                        | CompletionSymbol::Type { ref name, .. } => {
-                            name.declared_name().contains(&params.query)
-                        }
-                    })
-                    .map(|symbol| {
-                        completion_symbol_to_symbol_information(&source, symbol, module.uri.clone())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?);
+                symbols.extend(
+                    completion::all_symbols(module.source.span(), &module.expr)
+                        .into_iter()
+                        .filter(|symbol| match symbol.value {
+                            CompletionSymbol::Value { ref name, .. }
+                            | CompletionSymbol::Type { ref name, .. } => {
+                                name.declared_name().contains(&params.query)
+                            }
+                        })
+                        .map(|symbol| {
+                            completion_symbol_to_symbol_information(
+                                &source,
+                                symbol,
+                                module.uri.clone(),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
             }
 
             Ok(Some(symbols))
