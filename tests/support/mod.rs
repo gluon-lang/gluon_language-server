@@ -10,14 +10,14 @@ use std::str;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::sync::Arc;
 
-use jsonrpc_core::request::{Call, MethodCall, Notification};
-use jsonrpc_core::version::Version;
-use jsonrpc_core::params::Params;
-use jsonrpc_core::response::{Output, Response};
 use jsonrpc_core::id::Id;
+use jsonrpc_core::params::Params;
+use jsonrpc_core::request::{Call, MethodCall, Notification};
+use jsonrpc_core::response::{Output, Response};
+use jsonrpc_core::version::Version;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::ser::Serializer;
 use serde_json::{from_str, from_value, to_value, Value};
 
@@ -120,13 +120,11 @@ where
         stdin,
         uri,
         version,
-        vec![
-            TextDocumentContentChangeEvent {
-                range: Some(range),
-                range_length: None,
-                text: text.to_string(),
-            },
-        ],
+        vec![TextDocumentContentChangeEvent {
+            range: Some(range),
+            range_length: None,
+            text: text.to_string(),
+        }],
     )
 }
 

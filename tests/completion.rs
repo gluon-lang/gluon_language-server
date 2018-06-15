@@ -121,15 +121,13 @@ let {  } = { (*>) = 1 }
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "*>".into(),
-                    kind: Some(CompletionItemKind::Variable),
-                    detail: Some("Int".into()),
-                    insert_text: Some("(*>)".to_string()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "*>".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("Int".into()),
+                insert_text: Some("(*>)".to_string()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }
@@ -155,14 +153,12 @@ fn prelude_completion() {
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "not".into(),
-                    kind: Some(CompletionItemKind::Function),
-                    detail: Some("std.types.Bool -> std.types.Bool".into()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "not".into(),
+                kind: Some(CompletionItemKind::Function),
+                detail: Some("std.types.Bool -> std.types.Bool".into()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }
@@ -240,14 +236,12 @@ r.
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "abc".into(),
-                    kind: Some(CompletionItemKind::Variable),
-                    detail: Some("Int".into()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "abc".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("Int".into()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }
@@ -299,14 +293,12 @@ test2
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "test1".into(),
-                    kind: Some(CompletionItemKind::Variable),
-                    detail: Some("String".into()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "test1".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("String".into()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }
@@ -375,14 +367,12 @@ test2
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "test1".into(),
-                    kind: Some(CompletionItemKind::Variable),
-                    detail: Some("String".into()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "test1".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("String".into()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }
@@ -412,14 +402,12 @@ let test = 1
         let completions = remove_completion_data(completions);
         assert_eq!(
             completions,
-            vec![
-                CompletionItem {
-                    label: "test".into(),
-                    kind: Some(CompletionItemKind::Variable),
-                    detail: Some("Int".into()),
-                    ..CompletionItem::default()
-                },
-            ]
+            vec![CompletionItem {
+                label: "test".into(),
+                kind: Some(CompletionItemKind::Variable),
+                detail: Some("Int".into()),
+                ..CompletionItem::default()
+            }]
         );
     });
 }

@@ -13,9 +13,9 @@ extern crate url;
 #[allow(dead_code)]
 mod support;
 
-use std::sync::Arc;
 use std::fs::canonicalize;
 use std::io::{self, BufRead, BufReader, Write};
+use std::sync::Arc;
 
 use serde_json::{from_str, Value};
 
@@ -27,7 +27,6 @@ use self::futures::future;
 
 macro_rules! request {
     ($stream:expr, $id:ident, $command:expr, $seq:expr, $expr:expr) => {
-
         let request = $id {
             arguments: $expr,
             command: $command.to_string(),
