@@ -13,6 +13,7 @@ extern crate serde_json;
 extern crate futures;
 extern crate jsonrpc_core;
 extern crate tokio;
+extern crate tokio_codec;
 extern crate tokio_io;
 
 extern crate env_logger;
@@ -107,9 +108,7 @@ use futures::sync::mpsc;
 use futures::sync::oneshot;
 use futures::{future, Future, IntoFuture, Sink, Stream};
 
-use tokio_io::codec::{Framed, FramedParts};
-
-use bytes::BytesMut;
+use tokio_codec::{Framed, FramedParts};
 
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
@@ -995,13 +994,9 @@ where
 
     let input = BufReader::new(input);
 
-    let parts = FramedParts {
-        inner: input,
-        readbuf: BytesMut::default(),
-        writebuf: BytesMut::default(),
-    };
+    let parts = FramedParts::new(input, rpc::LanguageServerDecoder::new());
 
-    let request_handler_future = Framed::from_parts(parts, rpc::LanguageServerDecoder::new())
+    let request_handler_future = Framed::from_parts(parts)
         .map_err(|err| panic!("{}", err))
         .for_each(move |json| {
             debug!("Handle: {}", json);
