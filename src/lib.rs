@@ -1332,6 +1332,10 @@ fn initialize_rpc(
         };
         io.add_notification(notification!("textDocument/didOpen"), f);
     }
+    {
+        let f = move |_: DidSaveTextDocumentParams| {};
+        io.add_notification(notification!("textDocument/didSave"), f);
+    }
 
     fn did_change<S>(
         thread: &Thread,
@@ -1382,6 +1386,7 @@ fn initialize_rpc(
                     .text_changes
                     .apply_changes(&mut source, current_version)
                 {
+                    Ok(version) if version == current_version => return Either::A(future::ok(())),
                     Ok(version) => {
                         module.source =
                             Arc::new(codespan::FileMap::new(module.source.name().clone(), source));
@@ -1389,16 +1394,14 @@ fn initialize_rpc(
                     }
                     Err(err) => Err(err),
                 },
-                None => return Either::A(Either::A(Ok(()).into_future())),
+                None => return Either::A(future::ok(())),
             }
         };
         match result {
             Ok(new_version) => {
-                if Some(new_version) == module.version {
-                    return Either::A(Either::B(Ok(()).into_future()));
-                }
                 module.version = Some(new_version);
                 let arc_source = module.source.clone();
+                debug!("Changed to\n{}", arc_source.src());
                 Either::B(Either::A(
                     work_queue
                         .send(Entry {
