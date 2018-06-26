@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
 
+use codespan::{self, RawIndex};
+
 use languageserver_types::TextDocumentContentChangeEvent;
 
-use gluon::base::source;
 use gluon::base::pos::Span;
 
+use codespan_lsp::range_to_byte_span;
 use rpc::ServerError;
-use location_translation::range_to_byte_span;
 
+#[derive(Debug)]
 struct VersionedChange {
     version: u64,
     content_changes: Vec<TextDocumentContentChangeEvent>,
@@ -28,10 +30,18 @@ impl TextChanges {
     }
 
     pub fn add(&mut self, version: u64, content_changes: Vec<TextDocumentContentChangeEvent>) {
-        let i = self.changes
+        let i = self
+            .changes
             .iter()
-            .position(|change| change.version > version)
+            .position(|change| change.version >= version)
             .unwrap_or(self.changes.len());
+        // The client may send an empty content change event with the same version as another event
+        match self.changes.get(i).map(|change| change.version) {
+            Some(found_version) if found_version == version => {
+                assert!(content_changes.is_empty());
+            }
+            _ => {}
+        }
         self.changes.insert(
             i,
             VersionedChange {
@@ -48,9 +58,10 @@ impl TextChanges {
     ) -> Result<u64, ServerError<()>> {
         while let Some(change) = self.changes.pop_front() {
             assert!(
-                (change.version == version && change.content_changes.is_empty())
-                    || change.version > version,
-                "BUG: Attempt to apply old change on newer contents"
+                change.version >= version,
+                "BUG: Attempt to apply old change on newer contents {} << {:?}",
+                version,
+                change,
             );
             if change.version > version + 1 {
                 self.changes.push_front(change);
@@ -68,27 +79,41 @@ fn apply_changes(
     content_changes: &[TextDocumentContentChangeEvent],
 ) -> Result<(), ServerError<()>> {
     for change in content_changes {
-        let lines = source::Lines::new(source.bytes());
-        apply_change(source, lines, change)?;
+        apply_change(source, change)?;
     }
     Ok(())
 }
 
+// Copied from ::std::string::String::replace_range
+fn replace_range(self_: &mut String, range: ::std::ops::Range<usize>, replace_with: &str) {
+    // Memory safety
+    //
+    // Replace_range does not have the memory safety issues of a vector Splice.
+    // of the vector version. The data is just plain bytes.
+
+    assert!(self_.is_char_boundary(range.start));
+    assert!(self_.is_char_boundary(range.end));
+
+    unsafe { self_.as_mut_vec() }.splice(range, replace_with.bytes());
+}
+
 fn apply_change(
     source: &mut String,
-    lines: source::Lines,
     change: &TextDocumentContentChangeEvent,
 ) -> Result<(), ServerError<()>> {
     info!("Applying change: {:?}", change);
     let span = match (change.range, change.range_length) {
-        (None, None) => Span::new(0.into(), source.len().into()),
+        (None, None) => Span::new(1.into(), (source.len() as RawIndex + 1).into()),
         (Some(range), None) | (Some(range), Some(_)) => {
-            range_to_byte_span(&source::Source::with_lines(source, lines), &range)?
+            range_to_byte_span(&codespan::FileMap::new("".into(), &**source), &range)?
         }
         (None, Some(_)) => panic!("Invalid change"),
     };
-    source.drain(span.start.to_usize()..span.end.to_usize());
-    source.insert_str(span.start.to_usize(), &change.text);
+    replace_range(
+        source,
+        (span.start().to_usize() - 1)..(span.end().to_usize() - 1),
+        &change.text,
+    );
     Ok(())
 }
 
@@ -103,66 +128,60 @@ mod tests {
         let mut source = String::new();
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                    }),
-                    range_length: None,
-                    text: "test".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                }),
+                range_length: None,
+                text: "test".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "test");
 
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 2,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 3,
-                        },
-                    }),
-                    range_length: Some(1),
-                    text: "".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                }),
+                range_length: Some(1),
+                text: "".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "tet");
 
         apply_changes(
             &mut source,
-            &[
-                TextDocumentContentChangeEvent {
-                    range: Some(Range {
-                        start: Position {
-                            line: 0,
-                            character: 2,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 3,
-                        },
-                    }),
-                    range_length: Some(1),
-                    text: "ab".to_string(),
-                },
-            ],
+            &[TextDocumentContentChangeEvent {
+                range: Some(Range {
+                    start: Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 3,
+                    },
+                }),
+                range_length: Some(1),
+                text: "ab".to_string(),
+            }],
         ).unwrap();
 
         assert_eq!(source, "teab");
