@@ -298,6 +298,11 @@ impl Decoder for LanguageServerDecoder {
             ))
         })?;
 
+        eprintln!(
+            "Accept: {:?}",
+            ::std::str::from_utf8(&src[..removed_len]).unwrap()
+        );
+        eprintln!("{:?}", ::std::str::from_utf8(&src[removed_len..]).unwrap());
         src.split_to(removed_len);
 
         match opt {

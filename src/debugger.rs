@@ -263,7 +263,7 @@ impl LanguageServerCommand<DisconnectArguments> for DisconnectHandler {
     type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
     type Output = Option<Value>;
     type Error = ();
-    fn execute(&self, _args: Value) -> BoxFuture<Option<Value>, ServerError<()>> {
+    fn execute(&self, _args: DisconnectArguments) -> BoxFuture<Option<Value>, ServerError<()>> {
         self.exit_token.store(true, Ordering::SeqCst);
         Box::new(Ok(None).into_future())
     }

@@ -62,6 +62,19 @@ macro_rules! expect_event {
     }};
 }
 
+fn configuration_done(seq: &mut i64, stream: &mut io::Write, read: &mut io::BufRead) {
+    request! {
+        stream,
+        ConfigurationDoneRequest,
+        "configurationDone",
+        *seq,
+        // FIXME
+        Some(vec![("test".to_string(), Default::default())].into_iter().collect())
+    };
+
+    expect_response!(*read, ConfigurationDoneResponse, "configurationDone");
+}
+
 fn run_debugger<F>(f: F)
 where
     F: FnOnce(&mut i64, &mut io::Write, &mut io::BufRead)
@@ -116,7 +129,7 @@ where
                 DisconnectRequest,
                 "disconnect",
                 seq,
-                None
+                Some(DisconnectArguments::new())
             };
             expect_response!(read, DisconnectResponse, "disconnect");
         }
@@ -227,14 +240,7 @@ fn launch_program() {
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         expect_event!(&mut read, TerminatedEvent, "terminated");
     });
@@ -249,15 +255,7 @@ fn infinite_loops_are_terminated() {
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-
-        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
     });
 }
 
@@ -270,14 +268,7 @@ fn pause() {
         assert_eq!(launch_response.request_seq, *seq);
         assert!(launch_response.success);
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(&mut read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         request! {
             stream,
@@ -345,14 +336,7 @@ fn breakpoints() {
         };
         expect_response!(read, SetBreakpointsResponse, "setBreakpoints");
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         let stopped = expect_event!(read, StoppedEvent, "stopped");
         assert_eq!(stopped.body.reason, "breakpoint");
@@ -416,14 +400,7 @@ fn step_in() {
         };
         expect_response!(read, SetBreakpointsResponse, "setBreakpoints");
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         let stopped = expect_event!(read, StoppedEvent, "stopped");
         assert_eq!(stopped.body.reason, "breakpoint");
@@ -496,14 +473,7 @@ fn step_out() {
         };
         expect_response!(read, SetBreakpointsResponse, "setBreakpoints");
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         let stopped = expect_event!(read, StoppedEvent, "stopped");
         assert_eq!(stopped.body.reason, "breakpoint");
@@ -573,14 +543,7 @@ fn step_over() {
         };
         expect_response!(read, SetBreakpointsResponse, "setBreakpoints");
 
-        request! {
-            stream,
-            ConfigurationDoneRequest,
-            "configurationDone",
-            *seq,
-            None
-        };
-        expect_response!(read, ConfigurationDoneResponse, "configurationDone");
+        configuration_done(seq, stream, read);
 
         let stopped = expect_event!(read, StoppedEvent, "stopped");
         assert_eq!(stopped.body.reason, "breakpoint");
