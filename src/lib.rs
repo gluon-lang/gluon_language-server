@@ -55,7 +55,6 @@ macro_rules! box_future {
 
 macro_rules! try_future {
     ($e:expr) => {
-
         match $e {
             Ok(x) => x,
             Err(err) => return box_future!(Err(err.into())),
@@ -63,7 +62,6 @@ macro_rules! try_future {
     };
 }
 
-pub mod debugger;
 #[macro_use]
 pub mod rpc;
 mod text_edit;
@@ -85,7 +83,7 @@ use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 use gluon::either;
 use gluon::import::{Import, Importer};
 use gluon::vm::macros::Error as MacroError;
-use gluon::vm::thread::{Thread, ThreadInternal};
+use gluon::vm::thread::Thread;
 use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 
 use completion::CompletionSymbol;
@@ -268,7 +266,8 @@ impl Importer for CheckImporter {
             self::Module {
                 expr: expr,
                 source: compiler.get_filemap(&module_name).unwrap().clone(),
-                uri: module_name_to_file_(module_name).map_err(|err| (None, err.compat().into()))?,
+                uri: module_name_to_file_(module_name)
+                    .map_err(|err| (None, err.compat().into()))?,
                 dirty: false,
                 waiters: Vec::new(),
                 version: None,
@@ -283,7 +282,7 @@ impl Importer for CheckImporter {
                         .into_iter()
                         .map(|sender| sender.send(())),
                 ).map(|_| ())
-                    .map_err(|_| ())
+                .map_err(|_| ())
             });
         }
         // Insert a global to ensure the globals type can be looked up
@@ -467,8 +466,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                             let msg = "Completion sender was unexpectedly dropped";
                             error!("{}", msg);
                             ServerError::from(msg.to_string())
-                        })
-                        .and_then(move |_| self_.clone().execute(change))
+                        }).and_then(move |_| self_.clone().execute(change))
                 );
             }
 
@@ -514,8 +512,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                         ),
                         ..CompletionItem::default()
                     }
-                })
-                .collect();
+                }).collect();
 
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
@@ -563,8 +560,7 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                                     contents: HoverContents::Scalar(MarkedString::String(contents)),
                                     range: byte_span_to_range(&source, span).ok(),
                                 })
-                            })
-                            .unwrap_or_else(|()| None),
+                            }).unwrap_or_else(|()| None),
                     )
                 })
             })().into_future(),
@@ -595,7 +591,9 @@ fn module_name_to_file_(s: &str) -> Result<Url, failure::Error> {
     result.push_str(".glu");
     Ok(filename_to_url(Path::new(&result))
         .or_else(|_| url::Url::from_file_path(s))
-        .map_err(|_| failure::err_msg(format!("Unable to convert module name to a url: `{}`", s)))?)
+        .map_err(|_| {
+            failure::err_msg(format!("Unable to convert module name to a url: `{}`", s))
+        })?)
 }
 
 fn filename_to_url(result: &Path) -> Result<Url, failure::Error> {
@@ -1023,8 +1021,7 @@ where
             .map_err(|_| failure::err_msg("Unable to log message"))
             .for_each(move |message| -> Result<(), failure::Error> {
                 Ok(write_message_str(&mut output, &message)?)
-            })
-            .map_err(|err| {
+            }).map_err(|err| {
                 error!("{}", err);
             }),
     ));
@@ -1076,13 +1073,11 @@ impl Handler for IoHandler {
 
 macro_rules! request {
     ($t:tt) => {
-
         ::std::option::Option::None::<lsp_request!($t)>
     };
 }
 macro_rules! notification {
     ($t:tt) => {
-
         ::std::option::Option::None::<lsp_notification!($t)>
     };
 }
@@ -1119,7 +1114,7 @@ fn initialize_rpc(
                     )
                 })
             }).select(exit_receiver.clone().then(|_| future::ok(())))
-                .then(|_| future::ok(())),
+            .then(|_| future::ok(())),
         );
 
         diagnostic_sink
@@ -1162,8 +1157,7 @@ fn initialize_rpc(
                             ).and_then(|metadata| metadata.comment.clone()))
                         },
                     )
-                })
-                .and_then(move |comment| {
+                }).and_then(move |comment| {
                     log_message!(message_log2, "{:?}", comment)
                         .map(move |()| {
                             item.documentation = Some(make_documentation(
@@ -1171,8 +1165,7 @@ fn initialize_rpc(
                                 comment.as_ref().map_or("", |comment| &comment.content),
                             ));
                             item
-                        })
-                        .map_err(|_| panic!("Unable to send log message"))
+                        }).map_err(|_| panic!("Unable to send log message"))
                 })
         };
         io.add_async_method(request!("completionItem/resolve"), resolve);
@@ -1221,8 +1214,7 @@ fn initialize_rpc(
                             kind: None,
                             range: byte_span_to_range(&source, span)?,
                         })
-                    })
-                    .collect::<Result<_, _>>()
+                    }).collect::<Result<_, _>>()
                     .map(Some)
             })
         };
@@ -1247,8 +1239,7 @@ fn initialize_rpc(
                             symbol,
                             params.text_document.uri.clone(),
                         )
-                    })
-                    .collect::<Result<_, _>>()
+                    }).collect::<Result<_, _>>()
                     .map(Some)
             })
         };
@@ -1277,15 +1268,13 @@ fn initialize_rpc(
                             | CompletionSymbol::Type { ref name, .. } => {
                                 name.declared_name().contains(&params.query)
                             }
-                        })
-                        .map(|symbol| {
+                        }).map(|symbol| {
                             completion_symbol_to_symbol_information(
                                 &source,
                                 symbol,
                                 module.uri.clone(),
                             )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                        }).collect::<Result<Vec<_>, _>>()?,
                 );
             }
 
@@ -1320,8 +1309,7 @@ fn initialize_rpc(
                             change.text_document.text,
                         )),
                         version: change.text_document.version,
-                    })
-                    .map(|_| ())
+                    }).map(|_| ())
                     .map_err(|_| ())
             });
         };
@@ -1403,8 +1391,7 @@ fn initialize_rpc(
                             key: uri,
                             value: arc_source,
                             version: new_version,
-                        })
-                        .map(|_| ()),
+                        }).map(|_| ()),
                 ))
             }
             Err(err) => Either::B(Either::B(
@@ -1428,10 +1415,9 @@ fn initialize_rpc(
                     work_queue.clone().sink_map_err(|_| ()),
                     change,
                 )).catch_unwind()
-                    .map_err(|err| {
-                        error!("{:?}", err);
-                    })
-                    .and_then(|result| result)
+                .map_err(|err| {
+                    error!("{:?}", err);
+                }).and_then(|result| result)
             });
         };
 
@@ -1484,8 +1470,7 @@ fn initialize_rpc(
                                                         Some(typ),
                                                         "",
                                                     )),
-                                                })
-                                                .collect(),
+                                                }).collect(),
                                         ),
                                     }],
                                     active_signature: None,

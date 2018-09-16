@@ -9,10 +9,6 @@ repository = "https://github.com/gluon-lang/gluon_language-server"
 [workspace]
 
 [[bin]]
-name = "gluon_debugger"
-path = "src/gluon_debugger.rs"
-
-[[bin]]
 name = "gluon_language-server"
 path = "src/main.rs"
 
@@ -50,12 +46,25 @@ serde_derive = "1.0.0"
 languageserver-types = "0.39.0"
 debugserver-types = "0.4.0"
 
-gluon = "0.8"
-gluon_completion = "0.8"
-gluon_format = "0.8"
+gluon = "0.9"
+gluon_completion = "0.9"
+gluon_format = "0.9"
+
 codespan-reporting = "0.1.3"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
 partial-io = { version = "0.3.0", features = ["tokio", "quickcheck"] }
 quickcheck = "0.6.0"
+
+[profile.release]
+debug = true
+
+# [patch.crates-io]
+# gluon_base = { path = "../gluon/base" }
+# gluon_parser = { path = "../gluon/parser" }
+# gluon_check = { path = "../gluon/check" }
+# gluon_format = { path = "../gluon/format" }
+# gluon_completion = { path = "../gluon/completion" }
+# gluon_vm = { path = "../gluon/vm" }
+# gluon = { path = "../gluon" }
