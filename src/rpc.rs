@@ -133,9 +133,10 @@ where
             Ok(value) => {
                 return Box::new(self.0.execute(value).into_future().then(|result| {
                     match result {
-                        Ok(value) => Ok(
-                            to_value(&value).expect("result data could not be serialized")
-                        ).into_future(),
+                        Ok(value) => {
+                            Ok(to_value(&value).expect("result data could not be serialized"))
+                                .into_future()
+                        }
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
                             message: error.message,
@@ -269,9 +270,10 @@ where
             skip_many(range(&b"\r\n"[..])),
             content_length,
             range(&b"\r\n\r\n"[..]).map(|_| ()),
-        ).then_partial(|&mut (_, message_length, _)| {
-            take(message_length).map(|bytes: &[u8]| bytes.to_owned())
-        }),
+        )
+            .then_partial(|&mut (_, message_length, _)| {
+                take(message_length).map(|bytes: &[u8]| bytes.to_owned())
+            }),
     )
 }
 
@@ -285,8 +287,8 @@ impl Decoder for LanguageServerDecoder {
             easy::Stream(PartialStream(&src[..])),
             &mut self.state,
         ).map_err(|err| {
-            let err =
-                err.map_range(|r| {
+            let err = err
+                .map_range(|r| {
                     str::from_utf8(r)
                         .ok()
                         .map_or_else(|| format!("{:?}", r), |s| s.to_string())
@@ -298,11 +300,6 @@ impl Decoder for LanguageServerDecoder {
             ))
         })?;
 
-        eprintln!(
-            "Accept: {:?}",
-            ::std::str::from_utf8(&src[..removed_len]).unwrap()
-        );
-        eprintln!("{:?}", ::std::str::from_utf8(&src[removed_len..]).unwrap());
         src.split_to(removed_len);
 
         match opt {
