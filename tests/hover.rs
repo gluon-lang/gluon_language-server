@@ -17,10 +17,12 @@ let prelude = import! "std/prelude.glu"
 let { Num } = prelude
 let { Option } = import! "std/option.glu"
 
+rec
 type Stream_ a =
     | Value a (Stream a)
     | Empty
-and Stream a = Lazy (Stream_ a)
+type Stream a = Lazy (Stream_ a)
+in
 
 let from f : (Int -> Option a) -> Stream a =
         let from_ i =
@@ -126,28 +128,28 @@ fn stream() {
             2,
             "stream",
             Position {
-                line: 13,
+                line: 15,
                 character: 29,
             },
         );
 
-        let hover: Hover = expect_response(stdout);
+        let hover: Option<Hover> = expect_response(stdout);
 
         assert_eq!(
             hover,
-            Hover {
+            Some(Hover {
                 contents: HoverContents::Scalar(MarkedString::String("Int".into())),
                 range: Some(Range {
                     start: Position {
-                        line: 13,
+                        line: 15,
                         character: 28,
                     },
                     end: Position {
-                        line: 13,
+                        line: 15,
                         character: 29,
                     },
                 }),
-            }
+            })
         );
     });
 }
