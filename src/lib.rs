@@ -29,7 +29,6 @@ extern crate codespan;
 extern crate codespan_lsp;
 extern crate codespan_reporting;
 
-#[macro_use]
 extern crate languageserver_types;
 
 extern crate gluon;
@@ -975,13 +974,14 @@ where
             let import = macros.get("import").expect("Import macro");
             let import = import.downcast_ref::<Import>().expect("Importer");
             check_import.paths = RwLock::new((*import.paths.read().unwrap()).clone());
-            check_import.loaders = RwLock::new(
-                import
+
+                let mut loaders = import
                     .loaders
-                    .read()
-                    .unwrap()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
+                    .write()
+                    .unwrap();
+            check_import.loaders = RwLock::new(
+                loaders
+                    .drain()
                     .collect(),
             );
         }
