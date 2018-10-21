@@ -26,9 +26,10 @@ use languageserver_types::*;
 
 use {
     check_importer::{CheckImporter, Module},
-    filename_to_url, module_name_to_file, module_name_to_file_,
+    name::{
+        filename_to_url, module_name_to_file, module_name_to_file_, strip_file_prefix_with_thread,
+    },
     rpc::ServerError,
-    strip_file_prefix_with_thread,
     text_edit::TextChanges,
     BoxFuture,
 };

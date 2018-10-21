@@ -177,7 +177,8 @@ fn resolve_completion() {
                         character: 2,
                         line: 4,
                     },
-                }).unwrap(),
+                })
+                .unwrap(),
             ),
             ..CompletionItem::default()
         };
@@ -199,7 +200,10 @@ te
         assert_eq!(
             actual,
             CompletionItem {
-                documentation: Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: "doc".to_string() })),
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: "doc".to_string()
+                })),
                 ..completion
             }
         );

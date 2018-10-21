@@ -1,20 +1,6 @@
-use std::{
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use completion::{self, CompletionSymbol};
-use gluon::{
-    base::{
-        ast::{Expr, SpannedExpr},
-        filename_to_module,
-        pos::{BytePos, Spanned},
-        symbol::Symbol,
-        types::{ArcType, BuiltinType, Type},
-    },
-    import::Import,
-    Compiler, RootedThread, Thread,
-};
+use gluon::{base::filename_to_module, import::Import, RootedThread, Thread};
 
 use futures::{
     future::{self, Either},
@@ -28,20 +14,16 @@ use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use url::Url;
 
-use codespan_lsp::{byte_span_to_range, position_to_byte_index};
-
 use languageserver_types::*;
 
 use {
     check_importer::{CheckImporter, Module},
     diagnostics::DiagnosticsWorker,
-    retrieve_expr, retrieve_expr_with_pos,
+    name::{strip_file_prefix, strip_file_prefix_with_thread},
     rpc::{self, *},
-    strip_file_prefix, strip_file_prefix_with_thread, BoxFuture, Completion, CompletionData,
-    HoverCommand, Initialize,
 };
 
-trait Handler {
+pub trait Handler {
     fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
     where
         T: ::languageserver_types::request::Request,
@@ -128,175 +110,15 @@ impl Server {
         };
 
         let mut io = IoHandler::new();
-        io.add_async_method(request!("initialize"), Initialize(thread.clone()));
-        io.add_async_method(
-            request!("textDocument/completion"),
-            Completion(thread.clone()),
-        );
 
-        {
-            let thread = thread.clone();
-            let message_log = message_log.clone();
-            let resolve = move |mut item: CompletionItem| {
-                let data: CompletionData =
-                    serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
-
-                let message_log2 = message_log.clone();
-                let thread = thread.clone();
-                let label = item.label.clone();
-                log_message!(message_log.clone(), "{:?}", data.text_document_uri)
-                    .then(move |_| {
-                        retrieve_expr_with_pos(
-                            &thread,
-                            &data.text_document_uri,
-                            &data.position,
-                            |module, byte_index| {
-                                let type_env = thread.global_env().get_env();
-                                let (_, metadata_map) =
-                                    gluon::check::metadata::metadata(&*type_env, &module.expr);
-                                Ok(completion::suggest_metadata(
-                                    &metadata_map,
-                                    &*type_env,
-                                    module.source.span(),
-                                    &module.expr,
-                                    byte_index,
-                                    &label,
-                                )
-                                .and_then(|metadata| metadata.comment.clone()))
-                            },
-                        )
-                    })
-                    .and_then(move |comment| {
-                        log_message!(message_log2, "{:?}", comment)
-                            .map(move |()| {
-                                item.documentation = Some(make_documentation(
-                                    None::<&str>,
-                                    comment.as_ref().map_or("", |comment| &comment.content),
-                                ));
-                                item
-                            })
-                            .map_err(|_| panic!("Unable to send log message"))
-                    })
-            };
-            io.add_async_method(request!("completionItem/resolve"), resolve);
-        }
-
-        io.add_async_method(request!("textDocument/hover"), HoverCommand(thread.clone()));
-
-        {
-            let thread = thread.clone();
-            let format = move |params: DocumentFormattingParams| {
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let formatted = gluon_format::format_expr(
-                        &mut Compiler::new(),
-                        &thread,
-                        &module.source.name().to_string(),
-                        module.source.src(),
-                    )?;
-                    let range = byte_span_to_range(&module.source, module.source.span())?;
-                    Ok(Some(vec![TextEdit {
-                        range,
-                        new_text: formatted,
-                    }]))
-                })
-            };
-            io.add_async_method(request!("textDocument/formatting"), format);
-        }
-
-        {
-            let thread = thread.clone();
-            let f = move |params: TextDocumentPositionParams| {
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let expr = &module.expr;
-
-                    let source = &module.source;
-
-                    let byte_index = position_to_byte_index(&source, &params.position)?;
-
-                    let symbol_spans =
-                        completion::find_all_symbols(source.span(), expr, byte_index)
-                            .map(|t| t.1)
-                            .unwrap_or(Vec::new());
-
-                    symbol_spans
-                        .into_iter()
-                        .map(|span| {
-                            Ok(DocumentHighlight {
-                                kind: None,
-                                range: byte_span_to_range(&source, span)?,
-                            })
-                        })
-                        .collect::<Result<_, _>>()
-                        .map(Some)
-                })
-            };
-            io.add_async_method(request!("textDocument/documentHighlight"), f);
-        }
-
-        {
-            let thread = thread.clone();
-            let f = move |params: DocumentSymbolParams| {
-                retrieve_expr(&thread, &params.text_document.uri, |module| {
-                    let expr = &module.expr;
-
-                    let symbols = completion::all_symbols(module.source.span(), expr);
-
-                    let source = &module.source;
-
-                    symbols
-                        .into_iter()
-                        .map(|symbol| {
-                            completion_symbol_to_symbol_information(
-                                &source,
-                                symbol,
-                                params.text_document.uri.clone(),
-                            )
-                        })
-                        .collect::<Result<_, _>>()
-                        .map(Some)
-                })
-            };
-            io.add_async_method(request!("textDocument/documentSymbol"), f);
-        }
-
-        {
-            let thread = thread.clone();
-            let f = move |params: WorkspaceSymbolParams| -> _ {
-                let import = thread.get_macros().get("import").expect("Import macro");
-                let import = import
-                    .downcast_ref::<Import<CheckImporter>>()
-                    .expect("Check importer");
-                let modules = import.importer.0.lock().unwrap();
-
-                let mut symbols = Vec::<SymbolInformation>::new();
-
-                for module in modules.values() {
-                    let source = &module.source;
-
-                    symbols.extend(
-                        completion::all_symbols(module.source.span(), &module.expr)
-                            .into_iter()
-                            .filter(|symbol| match symbol.value {
-                                CompletionSymbol::Value { ref name, .. }
-                                | CompletionSymbol::Type { ref name, .. } => {
-                                    name.declared_name().contains(&params.query)
-                                }
-                            })
-                            .map(|symbol| {
-                                completion_symbol_to_symbol_information(
-                                    &source,
-                                    symbol,
-                                    module.uri.clone(),
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
-                }
-
-                Ok(Some(symbols))
-            };
-            io.add_async_method(request!("workspace/symbol"), f);
-        }
+        ::command::initialize::register(&mut io, thread);
+        ::command::completion::register(&mut io, thread, &message_log);
+        ::command::hover::register(&mut io, thread);
+        ::command::signature_help::register(&mut io, thread);
+        ::command::symbol::register(&mut io, thread);
+        ::command::document_highlight::register(&mut io, thread);
+        ::command::document_symbols::register(&mut io, thread);
+        ::command::formatting::register(&mut io, thread);
 
         io.add_async_method(request!("shutdown"), |_| Ok::<(), ServerError<()>>(()));
 
@@ -447,141 +269,12 @@ impl Server {
 
             io.add_notification(notification!("textDocument/didChange"), f);
         }
-        {
-            let thread = thread.clone();
 
-            io.add_async_method(
-                request!("textDocument/signatureHelp"),
-                move |params: TextDocumentPositionParams| -> BoxFuture<_, _> {
-                    let result = retrieve_expr(&thread, &params.text_document.uri, |module| {
-                        let expr = &module.expr;
-
-                        let source = &module.source;
-                        let byte_pos = position_to_byte_index(&source, &params.position)?;
-
-                        let env = thread.get_env();
-
-                        Ok(
-                            completion::signature_help(&*env, module.source.span(), expr, byte_pos)
-                                .map(|help| {
-                                    let (_, metadata_map) =
-                                        gluon::check::metadata::metadata(&*env, expr);
-                                    let comment = if help.name.is_empty() {
-                                        None
-                                    } else {
-                                        completion::suggest_metadata(
-                                            &metadata_map,
-                                            &*env,
-                                            module.source.span(),
-                                            expr,
-                                            byte_pos,
-                                            &help.name,
-                                        )
-                                        .and_then(|metadata| metadata.comment.clone())
-                                    };
-
-                                    SignatureHelp {
-                                        signatures: vec![SignatureInformation {
-                                            label: help.name,
-                                            documentation: Some(make_documentation(
-                                                Some(&help.typ),
-                                                &comment.as_ref().map_or("", |c| &c.content),
-                                            )),
-                                            parameters: Some(
-                                                ::gluon::base::types::arg_iter(&help.typ)
-                                                    .map(|typ| ParameterInformation {
-                                                        label: "".to_string(),
-                                                        documentation: Some(make_documentation(
-                                                            Some(typ),
-                                                            "",
-                                                        )),
-                                                    })
-                                                    .collect(),
-                                            ),
-                                        }],
-                                        active_signature: None,
-                                        active_parameter: help.index.map(u64::from),
-                                    }
-                                }),
-                        )
-                    });
-
-                    Box::new(result.into_future())
-                },
-            );
-        }
         Server {
             handlers: io,
             shutdown: exit_receiver,
             message_receiver: message_log_receiver,
             message_sender: message_log,
         }
-    }
-}
-
-fn make_documentation<T>(typ: Option<T>, comment: &str) -> Documentation
-where
-    T: fmt::Display,
-{
-    use std::fmt::Write;
-    let mut value = String::new();
-    if let Some(typ) = typ {
-        write!(value, "```gluon\n{}\n```\n", typ).unwrap();
-    }
-    value.push_str(comment);
-
-    Documentation::MarkupContent(MarkupContent {
-        kind: MarkupKind::Markdown,
-        value,
-    })
-}
-
-fn completion_symbol_to_symbol_information(
-    source: &codespan::FileMap,
-    symbol: Spanned<CompletionSymbol, BytePos>,
-    uri: Url,
-) -> Result<SymbolInformation, ServerError<()>> {
-    let (kind, name) = match symbol.value {
-        CompletionSymbol::Type { ref name, .. } => (SymbolKind::Class, name),
-        CompletionSymbol::Value {
-            ref name,
-            ref typ,
-            ref expr,
-        } => {
-            let kind = expr_to_kind(expr, typ);
-            (kind, name)
-        }
-    };
-    Ok(SymbolInformation {
-        kind,
-        location: Location {
-            uri,
-            range: byte_span_to_range(source, symbol.span)?,
-        },
-        name: name.declared_name().to_string(),
-        container_name: None,
-    })
-}
-
-fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
-    match expr.value {
-        // import! "std/prelude.glu" will replace itself with a symbol like `std.prelude
-        Expr::Ident(ref id) if id.name.declared_name().contains('.') => SymbolKind::Module,
-        _ => type_to_kind(typ),
-    }
-}
-
-fn type_to_kind(typ: &ArcType) -> SymbolKind {
-    match **typ {
-        _ if typ.as_function().is_some() => SymbolKind::Function,
-        Type::Ident(ref id) if id.declared_name() == "Bool" => SymbolKind::Boolean,
-        Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
-        Type::Builtin(builtin) => match builtin {
-            BuiltinType::Char | BuiltinType::String => SymbolKind::String,
-            BuiltinType::Byte | BuiltinType::Int | BuiltinType::Float => SymbolKind::Number,
-            BuiltinType::Array => SymbolKind::Array,
-            BuiltinType::Function => SymbolKind::Function,
-        },
-        _ => SymbolKind::Variable,
     }
 }
