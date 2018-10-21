@@ -3,7 +3,7 @@ extern crate combine;
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::str;
 use std::sync::{Arc, Mutex};
@@ -144,7 +144,8 @@ where
                                 .data
                                 .as_ref()
                                 .map(|v| to_value(v).expect("error data could not be serialized")),
-                        }).into_future(),
+                        })
+                        .into_future(),
                     }
                 }))
             }
@@ -176,34 +177,6 @@ where
             },
             _ => (), // FIXME log_message!("Invalid parameters: {:?}", param),
         }
-    }
-}
-
-pub fn read_message<R>(mut reader: R) -> Result<Option<String>, failure::Error>
-where
-    R: BufRead + Read,
-{
-    let mut header = String::new();
-    let n = try!(reader.read_line(&mut header));
-    if n == 0 {
-        return Ok(None);
-    }
-
-    if header.starts_with("Content-Length: ") {
-        let content_length = {
-            let len = header["Content-Length:".len()..].trim();
-            debug!("{}", len);
-            try!(len.parse::<usize>())
-        };
-        while header != "\r\n" {
-            header.clear();
-            try!(reader.read_line(&mut header));
-        }
-        let mut content = vec![0; content_length];
-        try!(reader.read_exact(&mut content));
-        Ok(Some(try!(String::from_utf8(content))))
-    } else {
-        Err(failure::err_msg(format!("Invalid message: `{}`", header)))
     }
 }
 
@@ -259,9 +232,11 @@ where
 {
     let content_length = range(&b"Content-Length: "[..]).with(
         recognize(skip_many1(digit())).and_then(|digits: &[u8]| {
-            str::from_utf8(digits).unwrap().parse::<usize>()
-                                // Convert the error from `.parse` into an error combine understands
-                                .map_err(StreamErrorFor::<I>::other)
+            str::from_utf8(digits)
+                .unwrap()
+                .parse::<usize>()
+                // Convert the error from `.parse` into an error combine understands
+                .map_err(StreamErrorFor::<I>::other)
         }),
     );
 
@@ -286,13 +261,15 @@ impl Decoder for LanguageServerDecoder {
             decode_parser(),
             easy::Stream(PartialStream(&src[..])),
             &mut self.state,
-        ).map_err(|err| {
+        )
+        .map_err(|err| {
             let err = err
                 .map_range(|r| {
                     str::from_utf8(r)
                         .ok()
                         .map_or_else(|| format!("{:?}", r), |s| s.to_string())
-                }).map_position(|p| p.translate_position(&src[..]));
+                })
+                .map_position(|p| p.translate_position(&src[..]));
             failure::err_msg(format!(
                 "{}\nIn input: `{}`",
                 err,
@@ -318,7 +295,7 @@ pub struct LanguageServerEncoder;
 
 impl Encoder for LanguageServerEncoder {
     type Item = String;
-    type Error = Box<::std::error::Error>;
+    type Error = failure::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         write_message_str(dst.writer(), &item)?;
         Ok(())

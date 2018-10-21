@@ -3,34 +3,44 @@
 extern crate futures;
 extern crate languageserver_types;
 extern crate tokio;
+extern crate tokio_io;
 
-use std::collections::VecDeque;
-use std::env;
-use std::io::{self, BufRead, BufReader, Write};
-use std::str;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    env,
+    io::{self, BufRead, BufReader, Write},
+    str,
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender, TryRecvError},
+        Arc,
+    },
+};
 
-use jsonrpc_core::id::Id;
-use jsonrpc_core::params::Params;
-use jsonrpc_core::request::{Call, MethodCall, Notification};
-use jsonrpc_core::response::{Output, Response};
-use jsonrpc_core::version::Version;
+use jsonrpc_core::{
+    id::Id,
+    params::Params,
+    request::{Call, MethodCall, Notification},
+    response::{Output, Response},
+    version::Version,
+};
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::ser::Serializer;
-use serde_json::{from_str, from_value, to_value, Value};
+use serde::{de::DeserializeOwned, Serialize};
+use serde_json::{from_str, from_value, ser::Serializer, to_value, Value};
 
-use self::tokio::prelude::task;
-
-use self::futures::{future, Future, Poll};
+use self::{
+    futures::{future, Future, Poll, Stream},
+    tokio::{
+        codec::{Decoder, FramedRead},
+        prelude::task,
+    },
+    tokio_io::io::AllowStdIo,
+};
 
 use url::Url;
 
 use languageserver_types::*;
 
-use gluon_language_server::rpc::read_message;
+use gluon_language_server::rpc::LanguageServerDecoder;
 
 extern crate gluon;
 use self::gluon::new_vm;
@@ -153,24 +163,32 @@ pub fn did_change_event<W: ?Sized>(
     write_message(stdin, hover).unwrap();
 }
 
-pub fn expect_response<R, T>(mut output: R) -> T
+fn read_until<T>(output: impl BufRead, f: impl FnMut(String) -> Option<T>) -> T {
+    FramedRead::new(AllowStdIo::new(output), LanguageServerDecoder::new())
+        .filter_map(f)
+        .into_future()
+        .map_err(|(err, _)| err)
+        .wait()
+        .expect("Success")
+        .0
+        .expect("Expected a response")
+}
+
+pub fn expect_response<R, T>(output: R) -> T
 where
     T: DeserializeOwned,
     R: BufRead,
 {
-    while let Some(json) = read_message(&mut output).unwrap() {
+    read_until(output, |json| {
         // Skip all notifications
         if let Ok(Notification { .. }) = from_str(&json) {
-            continue;
-        }
-
-        if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
-            return from_value(response.result).unwrap_or_else(|err| panic!("{}\n{}", err, json));
+            None
+        } else if let Ok(Response::Single(Output::Success(response))) = from_str(&json) {
+            Some(from_value(response.result).unwrap_or_else(|err| panic!("{}\n{}", err, json)))
         } else {
             panic!("Expected response, got `{}`", json)
         }
-    }
-    panic!("Expected a response")
+    })
 }
 
 pub fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
@@ -189,13 +207,13 @@ where
     write_message(stdin, hover).unwrap();
 }
 
-pub fn expect_notification<R, T>(mut output: R) -> T
+pub fn expect_notification<R, T>(output: R) -> T
 where
     T: DeserializeOwned,
     R: BufRead,
 {
-    while let Some(json) = read_message(&mut output).unwrap() {
-        match from_str(&json) {
+    read_until(output, |json| {
+        Some(match from_str(&json) {
             Ok(Notification {
                 params: Some(params),
                 ..
@@ -209,9 +227,8 @@ where
             }
             Ok(_) => panic!("Expected notification\n{}", json),
             Err(err) => panic!("Expected notification, got `{}`\n{}", err, json),
-        }
-    }
-    panic!("Expected a notification")
+        })
+    })
 }
 
 pub fn run_no_panic_catch<F>(fut: F)
@@ -314,11 +331,13 @@ impl io::Read for ReadPipe {
                 Ok(l + extra)
             }
             Err(TryRecvError::Disconnected) => Ok(0),
-            Err(TryRecvError::Empty) => if l == 0 {
-                Err(io::ErrorKind::WouldBlock.into())
-            } else {
-                Ok(l)
-            },
+            Err(TryRecvError::Empty) => {
+                if l == 0 {
+                    Err(io::ErrorKind::WouldBlock.into())
+                } else {
+                    Ok(l)
+                }
+            }
         }
     }
 
