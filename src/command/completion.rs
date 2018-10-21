@@ -1,7 +1,4 @@
-use futures::{
-    future::Either,
-    sync::{mpsc, oneshot},
-};
+use futures::sync::{mpsc, oneshot};
 
 use languageserver_types::CompletionItem;
 

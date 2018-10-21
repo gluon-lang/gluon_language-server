@@ -39,9 +39,9 @@ extern crate gluon_format;
 macro_rules! log_message {
     ($sender: expr, $($ts: tt)+) => {
         if log_enabled!(::log::Level::Debug) {
-            Either::A(::log_message($sender, format!( $($ts)+ )))
+            $crate::Either::A(::log_message($sender, format!( $($ts)+ )))
         } else {
-            Either::B(Ok(()).into_future())
+            $crate::Either::B(Ok(()).into_future())
         }
     }
 }

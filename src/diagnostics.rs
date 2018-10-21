@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map, BTreeMap},
     fmt, mem,
+    sync::Arc,
 };
 
 use gluon::{
@@ -15,21 +16,31 @@ use gluon::{
     },
     compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable},
     import::Import,
-    Compiler, Error as GluonError, Result as GluonResult, RootedThread,
+    Compiler, Error as GluonError, Result as GluonResult, RootedThread, Thread,
 };
 
-use futures::{future, prelude::*, stream, sync::mpsc};
+use futures::{
+    future::{self, Either},
+    prelude::*,
+    stream,
+    sync::mpsc,
+};
 
 use url::Url;
+
+use jsonrpc_core::IoHandler;
 
 use languageserver_types::*;
 
 use {
+    cancelable,
     check_importer::{CheckImporter, Module},
     name::{
-        filename_to_url, module_name_to_file, module_name_to_file_, strip_file_prefix_with_thread,
+        filename_to_url, module_name_to_file, module_name_to_file_, strip_file_prefix,
+        strip_file_prefix_with_thread,
     },
-    rpc::ServerError,
+    rpc::{self, Entry, ServerError},
+    server::{Handler, ShutdownReceiver},
     text_edit::TextChanges,
     BoxFuture,
 };
@@ -107,14 +118,14 @@ fn create_diagnostics(
     Ok(())
 }
 
-pub(crate) struct DiagnosticsWorker {
+struct DiagnosticsWorker {
     thread: RootedThread,
     message_log: mpsc::Sender<String>,
     compiler: Compiler,
 }
 
 impl DiagnosticsWorker {
-    pub(crate) fn new(thread: RootedThread, message_log: mpsc::Sender<String>) -> Self {
+    pub fn new(thread: RootedThread, message_log: mpsc::Sender<String>) -> Self {
         DiagnosticsWorker {
             thread,
             compiler: Compiler::new(),
@@ -122,7 +133,7 @@ impl DiagnosticsWorker {
         }
     }
 
-    pub(crate) fn run_diagnostics(
+    pub fn run_diagnostics(
         &mut self,
         uri_filename: &Url,
         version: Option<u64>,
@@ -304,6 +315,171 @@ impl DiagnosticsWorker {
         }
 
         (Some(expr), errors)
+    }
+}
+
+pub fn register(
+    io: &mut IoHandler,
+    thread: &RootedThread,
+    message_log: &mpsc::Sender<String>,
+    shutdown: ShutdownReceiver,
+) {
+    let work_queue = {
+        let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
+
+        let mut diagnostics_runner = DiagnosticsWorker::new(thread.clone(), message_log.clone());
+
+        tokio::spawn(cancelable(
+            shutdown,
+            future::lazy(move || {
+                diagnostic_stream.for_each(move |entry: Entry<Url, Arc<codespan::FileMap>, _>| {
+                    diagnostics_runner.run_diagnostics(
+                        &entry.key,
+                        Some(entry.version),
+                        &entry.value.src(),
+                    )
+                })
+            }),
+        ));
+
+        diagnostic_sink
+    };
+
+    {
+        let work_queue = work_queue.clone();
+        let thread = thread.clone();
+
+        let f = move |change: DidOpenTextDocumentParams| {
+            let work_queue = work_queue.clone();
+            let thread = thread.clone();
+            tokio::spawn({
+                let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
+                let module = filename_to_module(&filename);
+                work_queue
+                    .send(Entry {
+                        key: change.text_document.uri,
+                        value: Arc::new(codespan::FileMap::new(
+                            module.into(),
+                            change.text_document.text,
+                        )),
+                        version: change.text_document.version,
+                    })
+                    .map(|_| ())
+                    .map_err(|_| ())
+            });
+        };
+        io.add_notification(notification!("textDocument/didOpen"), f);
+    }
+    {
+        let f = move |_: DidSaveTextDocumentParams| {};
+        io.add_notification(notification!("textDocument/didSave"), f);
+    }
+
+    fn did_change<S>(
+        thread: &Thread,
+        message_log: mpsc::Sender<String>,
+        work_queue: S,
+        change: DidChangeTextDocumentParams,
+    ) -> impl Future<Item = (), Error = ()> + Send + 'static
+    where
+        S: Sink<SinkItem = Entry<Url, Arc<codespan::FileMap>, u64>, SinkError = ()>
+            + Send
+            + 'static,
+    {
+        // If it does not exist in sources it should exist in the `import` macro
+        let import = thread.get_macros().get("import").expect("Import macro");
+        let import = import
+            .downcast_ref::<Import<CheckImporter>>()
+            .expect("Check importer");
+        let mut modules = import.importer.0.lock().unwrap();
+        let paths = import.paths.read().unwrap();
+        let module_name = strip_file_prefix(&paths, &change.text_document.uri)
+            .unwrap_or_else(|err| panic!("{}", err));
+        let module_name = filename_to_module(&module_name);
+        let module = modules
+            .entry(module_name)
+            .or_insert_with(|| Module::empty(change.text_document.uri.clone()));
+
+        module.text_changes.add(
+            change.text_document.version.expect("version"),
+            change.content_changes,
+        );
+
+        module.dirty = true;
+
+        let uri = change.text_document.uri;
+        // If the module was loaded via `import!` before we open it in the editor
+        // `module.uri` has been set by looking at the current working directory which is
+        // not necessarily correct (works in VS code but not with (neo)vim) so update the
+        // uri to match the one supplied by the client to ensure errors show up.
+        if module.uri != uri {
+            module.uri.clone_from(&uri);
+        }
+        let result = {
+            let mut source = module.source.src().to_string();
+            debug!("Change source {}:\n{}", uri, source);
+
+            match module.version {
+                Some(current_version) => match module
+                    .text_changes
+                    .apply_changes(&mut source, current_version)
+                {
+                    Ok(version) if version == current_version => return Either::A(future::ok(())),
+                    Ok(version) => {
+                        module.source =
+                            Arc::new(codespan::FileMap::new(module.source.name().clone(), source));
+                        Ok(version)
+                    }
+                    Err(err) => Err(err),
+                },
+                None => return Either::A(future::ok(())),
+            }
+        };
+        match result {
+            Ok(new_version) => {
+                module.version = Some(new_version);
+                let arc_source = module.source.clone();
+                debug!("Changed to\n{}", arc_source.src());
+                Either::B(Either::A(
+                    work_queue
+                        .send(Entry {
+                            key: uri,
+                            value: arc_source,
+                            version: new_version,
+                        })
+                        .map(|_| ()),
+                ))
+            }
+            Err(err) => Either::B(Either::B(
+                log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())),
+            )),
+        }
+    }
+    {
+        let thread = thread.clone();
+        let message_log = message_log.clone();
+
+        let f = move |change: DidChangeTextDocumentParams| {
+            let work_queue = work_queue.clone();
+            let thread = thread.clone();
+            let message_log = message_log.clone();
+            tokio::spawn({
+                let work_queue = work_queue.clone();
+                ::std::panic::AssertUnwindSafe(did_change(
+                    &thread,
+                    message_log.clone(),
+                    work_queue.clone().sink_map_err(|_| ()),
+                    change,
+                ))
+                .catch_unwind()
+                .map_err(|err| {
+                    error!("{:?}", err);
+                })
+                .and_then(|result| result)
+            });
+        };
+
+        io.add_notification(notification!("textDocument/didChange"), f);
     }
 }
 
