@@ -63,6 +63,7 @@ macro_rules! try_future {
 
 #[macro_use]
 pub mod rpc;
+mod check_importer;
 mod text_edit;
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
@@ -72,7 +73,6 @@ use url::Url;
 use gluon::base::ast::{Expr, SpannedExpr, Typed};
 use gluon::base::error::Errors;
 use gluon::base::filename_to_module;
-use gluon::base::fnv::FnvMap;
 use gluon::base::kind::ArcKind;
 use gluon::base::metadata::Metadata;
 use gluon::base::pos::{self, BytePos, Spanned};
@@ -80,8 +80,7 @@ use gluon::base::symbol::Symbol;
 use gluon::base::types::{ArcType, BuiltinType, Type, TypeCache};
 use gluon::compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable};
 use gluon::either;
-use gluon::import::{Import, Importer};
-use gluon::vm::macros::Error as MacroError;
+use gluon::import::Import;
 use gluon::vm::thread::Thread;
 use gluon::{new_vm, Compiler, Error as GluonError, Result as GluonResult, RootedThread};
 
@@ -110,8 +109,12 @@ use tokio_codec::{Framed, FramedParts};
 pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
 
 use codespan_lsp::{byte_span_to_range, position_to_byte_index};
-use rpc::*;
-use text_edit::TextChanges;
+
+use {
+    check_importer::{CheckImporter, Module},
+    rpc::*,
+    text_edit::TextChanges,
+};
 
 fn log_message(
     sender: mpsc::Sender<String>,
@@ -123,7 +126,8 @@ fn log_message(
         serde_json::to_value(&LogMessageParams {
             typ: MessageType::Log,
             message: message,
-        }).unwrap()
+        })
+        .unwrap()
     );
     sender.send(r).map(|_| ()).map_err(|_| ())
 }
@@ -205,94 +209,6 @@ fn completion_symbol_to_symbol_information(
     })
 }
 
-struct Module {
-    source: Arc<codespan::FileMap>,
-    expr: SpannedExpr<Symbol>,
-    uri: Url,
-    dirty: bool,
-    waiters: Vec<oneshot::Sender<()>>,
-    version: Option<u64>,
-    text_changes: TextChanges,
-}
-
-impl Module {
-    fn empty(uri: Url) -> Module {
-        Module {
-            source: Arc::new(codespan::FileMap::new("".into(), "".into())),
-            expr: pos::spanned2(0.into(), 0.into(), Expr::Error(None)),
-            uri,
-            dirty: false,
-            waiters: Vec::new(),
-            version: None,
-            text_changes: TextChanges::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct CheckImporter(Arc<Mutex<FnvMap<String, Module>>>);
-impl CheckImporter {
-    fn new() -> CheckImporter {
-        CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
-    }
-}
-impl Importer for CheckImporter {
-    fn import(
-        &self,
-        compiler: &mut Compiler,
-        vm: &Thread,
-        _earlier_errors_exist: bool,
-        module_name: &str,
-        input: &str,
-        mut expr: SpannedExpr<Symbol>,
-    ) -> Result<(), (Option<ArcType>, MacroError)> {
-        let result = MacroValue { expr: &mut expr }
-            .typecheck(compiler, vm, module_name, input)
-            .map(|res| res.typ);
-
-        let typ = result.as_ref().ok().map_or_else(
-            || {
-                expr.try_type_of(&*vm.get_env())
-                    .unwrap_or_else(|_| Type::hole())
-            },
-            |typ| typ.clone(),
-        );
-
-        let (metadata, _) = gluon::check::metadata::metadata(&*vm.global_env().get_env(), &expr);
-
-        let previous = self.0.lock().unwrap().insert(
-            module_name.into(),
-            self::Module {
-                expr: expr,
-                source: compiler.get_filemap(&module_name).unwrap().clone(),
-                uri: module_name_to_file_(module_name)
-                    .map_err(|err| (None, err.compat().into()))?,
-                dirty: false,
-                waiters: Vec::new(),
-                version: None,
-                text_changes: TextChanges::new(),
-            },
-        );
-        if let Some(previous_module) = previous {
-            tokio::spawn({
-                future::join_all(
-                    previous_module
-                        .waiters
-                        .into_iter()
-                        .map(|sender| sender.send(())),
-                ).map(|_| ())
-                .map_err(|_| ())
-            });
-        }
-        // Insert a global to ensure the globals type can be looked up
-        vm.global_env()
-            .set_dummy_global(module_name, typ.clone(), metadata)
-            .map_err(|err| (None, err.into()))?;
-
-        result.map(|_| ()).map_err(|err| (Some(typ), err.into()))
-    }
-}
-
 struct Initialize(RootedThread);
 impl LanguageServerCommand<InitializeParams> for Initialize {
     type Future = BoxFuture<Self::Output, ServerError<Self::Error>>;
@@ -329,7 +245,8 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     workspace_symbol_provider: Some(true),
                     ..ServerCapabilities::default()
                 },
-            }).into_future(),
+            })
+            .into_future(),
         )
     }
 
@@ -368,7 +285,8 @@ where
                 importer.keys().collect::<Vec<_>>()
             ),
             data: None,
-        }).into_future(),
+        })
+        .into_future(),
     )
 }
 
@@ -465,7 +383,8 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                             let msg = "Completion sender was unexpectedly dropped";
                             error!("{}", msg);
                             ServerError::from(msg.to_string())
-                        }).and_then(move |_| self_.clone().execute(change))
+                        })
+                        .and_then(move |_| self_.clone().execute(change))
                 );
             }
 
@@ -507,11 +426,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                             serde_json::to_value(CompletionData {
                                 text_document_uri: change.text_document.uri.clone(),
                                 position: change.position,
-                            }).expect("CompletionData"),
+                            })
+                            .expect("CompletionData"),
                         ),
                         ..CompletionItem::default()
                     }
-                }).collect();
+                })
+                .collect();
 
             items.sort_by(|l, r| l.label.cmp(&r.label));
 
@@ -559,10 +480,12 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                                     contents: HoverContents::Scalar(MarkedString::String(contents)),
                                     range: byte_span_to_range(&source, span).ok(),
                                 })
-                            }).unwrap_or_else(|()| None),
+                            })
+                            .unwrap_or_else(|()| None),
                     )
                 })
-            })().into_future(),
+            })()
+            .into_future(),
         )
     }
 
@@ -721,9 +644,11 @@ fn create_diagnostics(
 
         GluonError::Macro(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
 
-        GluonError::Multiple(errors) => for err in errors {
-            create_diagnostics(diagnostics, code_map, importer, filename, err)?;
-        },
+        GluonError::Multiple(errors) => {
+            for err in errors {
+                create_diagnostics(diagnostics, code_map, importer, filename, err)?;
+            }
+        }
 
         err => diagnostics
             .entry(filename.clone())
@@ -799,7 +724,8 @@ impl DiagnosticsWorker {
                     serde_json::to_value(&PublishDiagnosticsParams {
                         uri: source_name,
                         diagnostics: diagnostic,
-                    }).unwrap()
+                    })
+                    .unwrap()
                 ))
             }));
 
@@ -975,15 +901,8 @@ where
             let import = import.downcast_ref::<Import>().expect("Importer");
             check_import.paths = RwLock::new((*import.paths.read().unwrap()).clone());
 
-                let mut loaders = import
-                    .loaders
-                    .write()
-                    .unwrap();
-            check_import.loaders = RwLock::new(
-                loaders
-                    .drain()
-                    .collect(),
-            );
+            let mut loaders = import.loaders.write().unwrap();
+            check_import.loaders = RwLock::new(loaders.drain().collect());
         }
         macros.insert("import".into(), check_import);
     }
@@ -1021,7 +940,8 @@ where
             .map_err(|_| failure::err_msg("Unable to log message"))
             .for_each(move |message| -> Result<(), failure::Error> {
                 Ok(write_message_str(&mut output, &message)?)
-            }).map_err(|err| {
+            })
+            .map_err(|err| {
                 error!("{}", err);
             }),
     ));
@@ -1029,7 +949,8 @@ where
     cancelable(
         exit_receiver,
         request_handler_future.map_err(|t: failure::Error| panic!("{}", t)),
-    ).map(|t| {
+    )
+    .map(|t| {
         info!("Server shutdown");
         t
     })
@@ -1113,7 +1034,8 @@ fn initialize_rpc(
                         &entry.value.src(),
                     )
                 })
-            }).select(exit_receiver.clone().then(|_| future::ok(())))
+            })
+            .select(exit_receiver.clone().then(|_| future::ok(())))
             .then(|_| future::ok(())),
         );
 
@@ -1154,10 +1076,12 @@ fn initialize_rpc(
                                 &module.expr,
                                 byte_index,
                                 &label,
-                            ).and_then(|metadata| metadata.comment.clone()))
+                            )
+                            .and_then(|metadata| metadata.comment.clone()))
                         },
                     )
-                }).and_then(move |comment| {
+                })
+                .and_then(move |comment| {
                     log_message!(message_log2, "{:?}", comment)
                         .map(move |()| {
                             item.documentation = Some(make_documentation(
@@ -1165,7 +1089,8 @@ fn initialize_rpc(
                                 comment.as_ref().map_or("", |comment| &comment.content),
                             ));
                             item
-                        }).map_err(|_| panic!("Unable to send log message"))
+                        })
+                        .map_err(|_| panic!("Unable to send log message"))
                 })
         };
         io.add_async_method(request!("completionItem/resolve"), resolve);
@@ -1214,7 +1139,8 @@ fn initialize_rpc(
                             kind: None,
                             range: byte_span_to_range(&source, span)?,
                         })
-                    }).collect::<Result<_, _>>()
+                    })
+                    .collect::<Result<_, _>>()
                     .map(Some)
             })
         };
@@ -1239,7 +1165,8 @@ fn initialize_rpc(
                             symbol,
                             params.text_document.uri.clone(),
                         )
-                    }).collect::<Result<_, _>>()
+                    })
+                    .collect::<Result<_, _>>()
                     .map(Some)
             })
         };
@@ -1268,13 +1195,15 @@ fn initialize_rpc(
                             | CompletionSymbol::Type { ref name, .. } => {
                                 name.declared_name().contains(&params.query)
                             }
-                        }).map(|symbol| {
+                        })
+                        .map(|symbol| {
                             completion_symbol_to_symbol_information(
                                 &source,
                                 symbol,
                                 module.uri.clone(),
                             )
-                        }).collect::<Result<Vec<_>, _>>()?,
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                 );
             }
 
@@ -1309,7 +1238,8 @@ fn initialize_rpc(
                             change.text_document.text,
                         )),
                         version: change.text_document.version,
-                    }).map(|_| ())
+                    })
+                    .map(|_| ())
                     .map_err(|_| ())
             });
         };
@@ -1391,7 +1321,8 @@ fn initialize_rpc(
                             key: uri,
                             value: arc_source,
                             version: new_version,
-                        }).map(|_| ()),
+                        })
+                        .map(|_| ()),
                 ))
             }
             Err(err) => Either::B(Either::B(
@@ -1414,10 +1345,12 @@ fn initialize_rpc(
                     message_log.clone(),
                     work_queue.clone().sink_map_err(|_| ()),
                     change,
-                )).catch_unwind()
+                ))
+                .catch_unwind()
                 .map_err(|err| {
                     error!("{:?}", err);
-                }).and_then(|result| result)
+                })
+                .and_then(|result| result)
             });
         };
 
@@ -1452,7 +1385,8 @@ fn initialize_rpc(
                                         expr,
                                         byte_pos,
                                         &help.name,
-                                    ).and_then(|metadata| metadata.comment.clone())
+                                    )
+                                    .and_then(|metadata| metadata.comment.clone())
                                 };
 
                                 SignatureHelp {
@@ -1470,7 +1404,8 @@ fn initialize_rpc(
                                                         Some(typ),
                                                         "",
                                                     )),
-                                                }).collect(),
+                                                })
+                                                .collect(),
                                         ),
                                     }],
                                     active_signature: None,
@@ -1501,7 +1436,8 @@ mod tests {
         let renamed = strip_file_prefix(
             &[PathBuf::from(".")],
             &Url::from_file_path(env::current_dir().unwrap().join("test")).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(renamed, "test");
     }
 }
