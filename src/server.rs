@@ -11,7 +11,7 @@ use futures::{
     sync::{mpsc, oneshot},
 };
 
-use tokio_codec::{Framed, FramedParts};
+use tokio_codec::{FramedRead, FramedWrite};
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
@@ -83,7 +83,7 @@ impl Server {
     pub fn start<R, W>(
         thread: RootedThread,
         input: R,
-        mut output: W,
+        output: W,
     ) -> impl Future<Item = (), Error = failure::Error>
     where
         R: tokio::io::AsyncRead + Send + 'static,
@@ -114,9 +114,7 @@ impl Server {
 
         let input = BufReader::new(input);
 
-        let parts = FramedParts::new(input, rpc::LanguageServerDecoder::new());
-
-        let request_handler_future = Framed::from_parts(parts)
+        let request_handler_future = FramedRead::new(input, rpc::LanguageServerDecoder::new())
             .map_err(|err| panic!("{}", err))
             .for_each(move |json| {
                 debug!("Handle: {}", json);
@@ -139,9 +137,8 @@ impl Server {
         tokio::spawn(
             message_receiver
                 .map_err(|_| failure::err_msg("Unable to log message"))
-                .for_each(move |message| -> Result<(), failure::Error> {
-                    Ok(write_message_str(&mut output, &message)?)
-                })
+                .forward(FramedWrite::new(output, LanguageServerEncoder))
+                .map(|_| ())
                 .map_err(|err| {
                     error!("{}", err);
                 }),

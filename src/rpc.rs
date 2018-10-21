@@ -31,6 +31,8 @@ use futures::{self, sync::mpsc, Async, Future, IntoFuture, Poll, Sink, StartSend
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
+use languageserver_types::{notification, LogMessageParams, MessageType};
+
 use serde;
 use serde_json::{from_value, to_string, to_value};
 
@@ -182,6 +184,48 @@ where
             _ => (), // FIXME log_message!("Invalid parameters: {:?}", param),
         }
     }
+}
+
+pub(crate) fn log_message(
+    sender: mpsc::Sender<String>,
+    message: String,
+) -> impl Future<Item = (), Error = ()> {
+    debug!("{}", message);
+    send_response(
+        sender,
+        notification!("window/logMessage"),
+        LogMessageParams {
+            typ: MessageType::Log,
+            message: message,
+        },
+    )
+}
+
+macro_rules! log_message {
+    ($sender: expr, $($ts: tt)+) => {
+        if log_enabled!(::log::Level::Debug) {
+            $crate::Either::A(::rpc::log_message($sender, format!( $($ts)+ )))
+        } else {
+            $crate::Either::B(Ok(()).into_future())
+        }
+    }
+}
+
+pub fn send_response<T>(
+    sender: mpsc::Sender<String>,
+    _: Option<T>,
+    value: T::Params,
+) -> impl Future<Item = (), Error = ()>
+where
+    T: notification::Notification,
+    T::Params: serde::Serialize,
+{
+    let r = format!(
+        r#"{{"jsonrpc": "2.0", "method": "{}", "params": {} }}"#,
+        T::METHOD,
+        serde_json::to_value(value).unwrap()
+    );
+    sender.send(r).map(|_| ()).map_err(|_| ())
 }
 
 pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>

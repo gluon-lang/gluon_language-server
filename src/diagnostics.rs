@@ -39,7 +39,7 @@ use {
         filename_to_url, module_name_to_file, module_name_to_file_, strip_file_prefix,
         strip_file_prefix_with_thread,
     },
-    rpc::{self, Entry, ServerError},
+    rpc::{self, send_response, Entry, ServerError},
     server::{Handler, ShutdownReceiver},
     text_edit::TextChanges,
     BoxFuture,
@@ -176,28 +176,19 @@ impl DiagnosticsWorker {
             }
         };
 
-        let diagnostics_stream =
+        let message_log = self.message_log.clone();
+        Box::new(
             stream::futures_ordered(diagnostics.into_iter().map(|(source_name, diagnostic)| {
-                Ok(format!(
-                    r#"{{
-                            "jsonrpc": "2.0",
-                            "method": "textDocument/publishDiagnostics",
-                            "params": {}
-                        }}"#,
-                    serde_json::to_value(&PublishDiagnosticsParams {
+                send_response(
+                    message_log.clone(),
+                    notification!("textDocument/publishDiagnostics"),
+                    PublishDiagnosticsParams {
                         uri: source_name,
                         diagnostics: diagnostic,
-                    })
-                    .unwrap()
-                ))
-            }));
-
-        Box::new(
-            self.message_log
-                .clone()
-                .send_all(diagnostics_stream)
-                .map(|_| ())
-                .map_err(|_| ()),
+                    },
+                )
+            }))
+            .for_each(|_| Ok(())),
         )
     }
 

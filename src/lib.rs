@@ -36,16 +36,6 @@ extern crate gluon;
 extern crate gluon_completion as completion;
 extern crate gluon_format;
 
-macro_rules! log_message {
-    ($sender: expr, $($ts: tt)+) => {
-        if log_enabled!(::log::Level::Debug) {
-            $crate::Either::A(::log_message($sender, format!( $($ts)+ )))
-        } else {
-            $crate::Either::B(Ok(()).into_future())
-        }
-    }
-}
-
 macro_rules! box_future {
     ($e:expr) => {{
         let fut: $crate::BoxFuture<_, _> = Box::new($e.into_future());
@@ -75,10 +65,7 @@ mod text_edit;
 
 use gluon::{either, new_vm};
 
-use languageserver_types::*;
-
 use futures::future::Either;
-use futures::sync::mpsc;
 use futures::{future, prelude::*};
 
 pub use {command::completion::CompletionData, server::Server};
@@ -98,22 +85,6 @@ pub fn run() {
         Server::start(thread, tokio::io::stdin(), tokio::io::stdout())
             .map_err(|err| panic!("{}", err))
     }))
-}
-
-fn log_message(
-    sender: mpsc::Sender<String>,
-    message: String,
-) -> impl Future<Item = (), Error = ()> {
-    debug!("{}", message);
-    let r = format!(
-        r#"{{"jsonrpc": "2.0", "method": "window/logMessage", "params": {} }}"#,
-        serde_json::to_value(&LogMessageParams {
-            typ: MessageType::Log,
-            message: message,
-        })
-        .unwrap()
-    );
-    sender.send(r).map(|_| ()).map_err(|_| ())
 }
 
 fn cancelable<F, G>(f: F, g: G) -> impl Future<Item = (), Error = G::Error>
