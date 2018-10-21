@@ -556,7 +556,12 @@ where
         macros.insert("import".into(), check_import);
     }
 
-    let (io, exit_receiver, message_log_receiver, message_log) = server::initialize(&thread);
+    let server::Server {
+        handlers,
+        shutdown,
+        message_receiver,
+        message_sender,
+    } = server::Server::new(&thread);
 
     let input = BufReader::new(input);
 
@@ -566,13 +571,12 @@ where
         .map_err(|err| panic!("{}", err))
         .for_each(move |json| {
             debug!("Handle: {}", json);
-            let message_log = message_log.clone();
-            io.handle_request(&json).then(move |result| {
+            let message_sender = message_sender.clone();
+            handlers.handle_request(&json).then(move |result| {
                 if let Ok(Some(response)) = result {
                     debug!("Response: {}", response);
                     Either::A(
-                        message_log
-                            .clone()
+                        message_sender
                             .send(response)
                             .map(|_| ())
                             .map_err(|_| failure::err_msg("Unable to send")),
@@ -584,7 +588,7 @@ where
         });
 
     tokio::spawn(
-        message_log_receiver
+        message_receiver
             .map_err(|_| failure::err_msg("Unable to log message"))
             .for_each(move |message| -> Result<(), failure::Error> {
                 Ok(write_message_str(&mut output, &message)?)
@@ -595,7 +599,7 @@ where
     );
 
     cancelable(
-        exit_receiver,
+        shutdown,
         request_handler_future.map_err(|t: failure::Error| panic!("{}", t)),
     )
     .map(|t| {
