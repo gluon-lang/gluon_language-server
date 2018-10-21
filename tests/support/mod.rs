@@ -261,7 +261,7 @@ fn start_local() -> (Box<Write>, Box<BufRead>) {
 
     let thread = new_vm();
     tokio::spawn(
-        ::gluon_language_server::start_server(thread, stdin_read, stdout_write)
+        ::gluon_language_server::Server::start(thread, stdin_read, stdout_write)
             .map_err(|err| panic!("{}", err)),
     );
     (Box::new(stdin_write), Box::new(stdout_read))

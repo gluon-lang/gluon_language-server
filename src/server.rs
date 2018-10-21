@@ -1,18 +1,27 @@
-use std::sync::Mutex;
+use std::{
+    io::BufReader,
+    sync::{Mutex, RwLock},
+};
 
-use gluon::RootedThread;
+use gluon::{import::Import, RootedThread};
 
 use futures::{
-    future,
+    future::{self, Either},
     prelude::*,
     sync::{mpsc, oneshot},
 };
+
+use tokio_codec::{Framed, FramedParts};
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use languageserver_types::*;
 
-use rpc::*;
+use {
+    cancelable,
+    check_importer::CheckImporter,
+    rpc::{self, *},
+};
 
 pub trait Handler {
     fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
@@ -63,15 +72,92 @@ macro_rules! notification {
 
 pub type ShutdownReceiver = future::Shared<oneshot::Receiver<()>>;
 
-pub(crate) struct Server {
-    pub handlers: IoHandler,
-    pub shutdown: ShutdownReceiver,
-    pub message_receiver: mpsc::Receiver<String>,
-    pub message_sender: mpsc::Sender<String>,
+pub struct Server {
+    handlers: IoHandler,
+    shutdown: ShutdownReceiver,
+    message_receiver: mpsc::Receiver<String>,
+    message_sender: mpsc::Sender<String>,
 }
 
 impl Server {
-    pub(crate) fn new(thread: &RootedThread) -> Server {
+    pub fn start<R, W>(
+        thread: RootedThread,
+        input: R,
+        mut output: W,
+    ) -> impl Future<Item = (), Error = failure::Error>
+    where
+        R: tokio::io::AsyncRead + Send + 'static,
+        W: tokio::io::AsyncWrite + Send + 'static,
+    {
+        let _ = ::env_logger::try_init();
+
+        {
+            let macros = thread.get_macros();
+            let mut check_import = Import::new(CheckImporter::new());
+            {
+                let import = macros.get("import").expect("Import macro");
+                let import = import.downcast_ref::<Import>().expect("Importer");
+                check_import.paths = RwLock::new((*import.paths.read().unwrap()).clone());
+
+                let mut loaders = import.loaders.write().unwrap();
+                check_import.loaders = RwLock::new(loaders.drain().collect());
+            }
+            macros.insert("import".into(), check_import);
+        }
+
+        let Server {
+            handlers,
+            shutdown,
+            message_receiver,
+            message_sender,
+        } = Server::initialize(&thread);
+
+        let input = BufReader::new(input);
+
+        let parts = FramedParts::new(input, rpc::LanguageServerDecoder::new());
+
+        let request_handler_future = Framed::from_parts(parts)
+            .map_err(|err| panic!("{}", err))
+            .for_each(move |json| {
+                debug!("Handle: {}", json);
+                let message_sender = message_sender.clone();
+                handlers.handle_request(&json).then(move |result| {
+                    if let Ok(Some(response)) = result {
+                        debug!("Response: {}", response);
+                        Either::A(
+                            message_sender
+                                .send(response)
+                                .map(|_| ())
+                                .map_err(|_| failure::err_msg("Unable to send")),
+                        )
+                    } else {
+                        Either::B(Ok(()).into_future())
+                    }
+                })
+            });
+
+        tokio::spawn(
+            message_receiver
+                .map_err(|_| failure::err_msg("Unable to log message"))
+                .for_each(move |message| -> Result<(), failure::Error> {
+                    Ok(write_message_str(&mut output, &message)?)
+                })
+                .map_err(|err| {
+                    error!("{}", err);
+                }),
+        );
+
+        cancelable(
+            shutdown,
+            request_handler_future.map_err(|t: failure::Error| panic!("{}", t)),
+        )
+        .map(|t| {
+            info!("Server shutdown");
+            t
+        })
+    }
+
+    fn initialize(thread: &RootedThread) -> Server {
         let (message_log, message_log_receiver) = mpsc::channel(1);
 
         let (exit_sender, exit_receiver) = oneshot::channel();
