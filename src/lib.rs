@@ -657,8 +657,7 @@ where
             })
         });
 
-    tokio::spawn(cancelable(
-        exit_receiver.clone(),
+    tokio::spawn(
         message_log_receiver
             .map_err(|_| failure::err_msg("Unable to log message"))
             .for_each(move |message| -> Result<(), failure::Error> {
@@ -667,7 +666,7 @@ where
             .map_err(|err| {
                 error!("{}", err);
             }),
-    ));
+    );
 
     cancelable(
         exit_receiver,
