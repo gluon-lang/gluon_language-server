@@ -129,7 +129,7 @@ where
             Params::Array(arr) => Value::Array(arr),
             Params::None => Value::Null,
         };
-        let err = match from_value(value.clone()) {
+        let err = match from_value(value) {
             Ok(value) => {
                 return Box::new(self.0.execute(value).into_future().then(|result| {
                     match result {
