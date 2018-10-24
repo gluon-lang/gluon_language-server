@@ -1,34 +1,40 @@
 extern crate bytes;
 extern crate combine;
 
-use std::collections::VecDeque;
-use std::fmt;
-use std::io::{self, BufRead, Read, Write};
-use std::marker::PhantomData;
-use std::str;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    fmt,
+    io::{self, Write},
+    marker::PhantomData,
+    str,
+};
 
 use failure;
 
-use self::combine::combinator::{any_send_partial_state, AnySendPartialState};
-use self::combine::error::{ParseError, StreamError};
-use self::combine::parser::byte::digit;
-use self::combine::parser::range::{range, recognize, take};
-use self::combine::stream::easy;
-use self::combine::stream::{PartialStream, RangeStream, StreamErrorFor};
-use self::combine::{skip_many, skip_many1, Parser};
+use self::combine::{
+    combinator::{any_send_partial_state, AnySendPartialState},
+    error::{ParseError, StreamError},
+    parser::{
+        byte::digit,
+        range::{range, recognize, take},
+    },
+    skip_many, skip_many1,
+    stream::{easy, PartialStream, RangeStream, StreamErrorFor},
+    Parser,
+};
 
 use self::bytes::{BufMut, BytesMut};
 
 use tokio_io::codec::{Decoder, Encoder};
 
-use futures::sync::mpsc;
-use futures::{self, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+use futures::{self, sync::mpsc, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
+use languageserver_types::{notification, LogMessageParams, MessageType};
+
 use serde;
-use serde_json::{from_value, to_string, to_value};
+use serde_json::{self, from_value, to_string, to_value};
 
 use BoxFuture;
 
@@ -129,7 +135,7 @@ where
             Params::Array(arr) => Value::Array(arr),
             Params::None => Value::Null,
         };
-        let err = match from_value(value.clone()) {
+        let err = match from_value(value) {
             Ok(value) => {
                 return Box::new(self.0.execute(value).into_future().then(|result| {
                     match result {
@@ -144,7 +150,8 @@ where
                                 .data
                                 .as_ref()
                                 .map(|v| to_value(v).expect("error data could not be serialized")),
-                        }).into_future(),
+                        })
+                        .into_future(),
                     }
                 }))
             }
@@ -179,32 +186,46 @@ where
     }
 }
 
-pub fn read_message<R>(mut reader: R) -> Result<Option<String>, failure::Error>
-where
-    R: BufRead + Read,
-{
-    let mut header = String::new();
-    let n = try!(reader.read_line(&mut header));
-    if n == 0 {
-        return Ok(None);
-    }
+pub(crate) fn log_message(
+    sender: mpsc::Sender<String>,
+    message: String,
+) -> impl Future<Item = (), Error = ()> {
+    debug!("{}", message);
+    send_response(
+        sender,
+        notification!("window/logMessage"),
+        LogMessageParams {
+            typ: MessageType::Log,
+            message: message,
+        },
+    )
+}
 
-    if header.starts_with("Content-Length: ") {
-        let content_length = {
-            let len = header["Content-Length:".len()..].trim();
-            debug!("{}", len);
-            try!(len.parse::<usize>())
-        };
-        while header != "\r\n" {
-            header.clear();
-            try!(reader.read_line(&mut header));
+macro_rules! log_message {
+    ($sender: expr, $($ts: tt)+) => {
+        if log_enabled!(::log::Level::Debug) {
+            $crate::Either::A(::rpc::log_message($sender, format!( $($ts)+ )))
+        } else {
+            $crate::Either::B(Ok(()).into_future())
         }
-        let mut content = vec![0; content_length];
-        try!(reader.read_exact(&mut content));
-        Ok(Some(try!(String::from_utf8(content))))
-    } else {
-        Err(failure::err_msg(format!("Invalid message: `{}`", header)))
     }
+}
+
+pub fn send_response<T>(
+    sender: mpsc::Sender<String>,
+    _: Option<T>,
+    value: T::Params,
+) -> impl Future<Item = (), Error = ()>
+where
+    T: notification::Notification,
+    T::Params: serde::Serialize,
+{
+    let r = format!(
+        r#"{{"jsonrpc": "2.0", "method": "{}", "params": {} }}"#,
+        T::METHOD,
+        serde_json::to_value(value).unwrap()
+    );
+    sender.send(r).map(|_| ()).map_err(|_| ())
 }
 
 pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>
@@ -259,9 +280,11 @@ where
 {
     let content_length = range(&b"Content-Length: "[..]).with(
         recognize(skip_many1(digit())).and_then(|digits: &[u8]| {
-            str::from_utf8(digits).unwrap().parse::<usize>()
-                                // Convert the error from `.parse` into an error combine understands
-                                .map_err(StreamErrorFor::<I>::other)
+            str::from_utf8(digits)
+                .unwrap()
+                .parse::<usize>()
+                // Convert the error from `.parse` into an error combine understands
+                .map_err(StreamErrorFor::<I>::other)
         }),
     );
 
@@ -286,13 +309,15 @@ impl Decoder for LanguageServerDecoder {
             decode_parser(),
             easy::Stream(PartialStream(&src[..])),
             &mut self.state,
-        ).map_err(|err| {
+        )
+        .map_err(|err| {
             let err = err
                 .map_range(|r| {
                     str::from_utf8(r)
                         .ok()
                         .map_or_else(|| format!("{:?}", r), |s| s.to_string())
-                }).map_position(|p| p.translate_position(&src[..]));
+                })
+                .map_position(|p| p.translate_position(&src[..]));
             failure::err_msg(format!(
                 "{}\nIn input: `{}`",
                 err,
@@ -318,7 +343,7 @@ pub struct LanguageServerEncoder;
 
 impl Encoder for LanguageServerEncoder {
     type Item = String;
-    type Error = Box<::std::error::Error>;
+    type Error = failure::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         write_message_str(dst.writer(), &item)?;
         Ok(())
@@ -329,41 +354,6 @@ pub struct Entry<K, V, W> {
     pub key: K,
     pub value: V,
     pub version: W,
-}
-
-#[derive(Debug)]
-pub struct SharedSink<S>(Arc<Mutex<S>>);
-
-impl<S> Clone for SharedSink<S> {
-    fn clone(&self) -> Self {
-        SharedSink(self.0.clone())
-    }
-}
-
-impl<S> SharedSink<S> {
-    pub fn new(sink: S) -> SharedSink<S> {
-        SharedSink(Arc::new(Mutex::new(sink)))
-    }
-}
-
-impl<S> Sink for SharedSink<S>
-where
-    S: Sink,
-{
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
-
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        self.0.lock().unwrap().start_send(item)
-    }
-
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        self.0.lock().unwrap().poll_complete()
-    }
-
-    fn close(&mut self) -> Poll<(), Self::SinkError> {
-        self.0.lock().unwrap().close()
-    }
 }
 
 /// Queue which only keeps the latest work item for each key
@@ -454,36 +444,5 @@ impl<K, V, W> Sink for UniqueSink<K, V, W> {
 
     fn close(&mut self) -> Poll<(), Self::SinkError> {
         self.sender.close()
-    }
-}
-
-pub struct SinkFn<F, I> {
-    f: F,
-    _marker: PhantomData<fn(I) -> I>,
-}
-
-pub fn sink_fn<F, I, E>(f: F) -> SinkFn<F, I>
-where
-    F: FnMut(I) -> StartSend<I, E>,
-{
-    SinkFn {
-        f,
-        _marker: PhantomData,
-    }
-}
-
-impl<F, I, E> Sink for SinkFn<F, I>
-where
-    F: FnMut(I) -> StartSend<I, E>,
-{
-    type SinkItem = I;
-    type SinkError = E;
-
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        (self.f)(item)
-    }
-
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        Ok(Async::Ready(()))
     }
 }
