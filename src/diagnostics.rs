@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use gluon::{
+use gluon::{self,
     base::{
         ast::{Expr, SpannedExpr, Typed},
         error::Errors,
@@ -26,6 +26,11 @@ use futures::{
     sync::mpsc,
 };
 
+use tokio;
+
+use codespan;
+use codespan_lsp;
+
 use url::Url;
 
 use jsonrpc_core::IoHandler;
@@ -36,7 +41,8 @@ use {
     cancelable,
     check_importer::{CheckImporter, Module},
     name::{
-        filename_to_url, module_name_to_file, module_name_to_file_, strip_file_prefix,
+        codespan_name_to_file,
+        module_name_to_file, strip_file_prefix,
         strip_file_prefix_with_thread,
     },
     rpc::{self, send_response, Entry, ServerError},
@@ -474,9 +480,3 @@ pub fn register(
     }
 }
 
-fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, failure::Error> {
-    match *name {
-        codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
-        codespan::FileName::Real(ref p) => filename_to_url(p),
-    }
-}

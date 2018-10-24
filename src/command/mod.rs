@@ -5,7 +5,7 @@ use futures::{future::Either, prelude::*};
 use either;
 
 use completion::CompletionSymbol;
-use gluon::{
+use gluon::{self,
     base::{
         ast::{Expr, SpannedExpr},
         filename_to_module,
@@ -19,6 +19,8 @@ use gluon::{
 };
 
 use jsonrpc_core::IoHandler;
+
+use codespan;
 
 use url::Url;
 

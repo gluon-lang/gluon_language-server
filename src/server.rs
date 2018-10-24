@@ -11,11 +11,15 @@ use futures::{
     sync::{mpsc, oneshot},
 };
 
+use tokio;
+
 use tokio_codec::{FramedRead, FramedWrite};
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
-use languageserver_types::*;
+use serde;
+
+use failure;
 
 use {
     cancelable,

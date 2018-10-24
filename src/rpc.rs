@@ -34,7 +34,7 @@ use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSim
 use languageserver_types::{notification, LogMessageParams, MessageType};
 
 use serde;
-use serde_json::{from_value, to_string, to_value};
+use serde_json::{self, from_value, to_string, to_value};
 
 use BoxFuture;
 

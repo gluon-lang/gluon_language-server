@@ -4,11 +4,16 @@ use languageserver_types::CompletionItem;
 
 use completion;
 
-use check_importer::Module;
-
 use languageserver_types::{CompletionParams, CompletionResponse};
 
-use {name::with_import, rpc::LanguageServerCommand, BoxFuture};
+use {
+check_importer::Module,
+    name::with_import, rpc::LanguageServerCommand, BoxFuture};
+
+use url_serde;
+
+use serde_json;
+use serde::{ Deserialize};
 
 use super::*;
 
@@ -120,7 +125,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread, message_log: &mpsc::S
     let message_log = message_log.clone();
     let resolve = move |mut item: CompletionItem| {
         let data: CompletionData =
-            serde_json::from_value(item.data.clone().unwrap()).expect("CompletionData");
+            CompletionData::deserialize(item.data.as_ref().unwrap()).expect("CompletionData");
 
         let message_log2 = message_log.clone();
         let thread = thread.clone();

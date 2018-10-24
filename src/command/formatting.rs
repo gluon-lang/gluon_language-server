@@ -2,6 +2,8 @@ use gluon::Compiler;
 
 use languageserver_types::{DocumentFormattingParams, TextEdit};
 
+use gluon_format;
+
 use super::{byte_span_to_range, retrieve_expr, Handler, IoHandler, RootedThread};
 
 pub fn register(io: &mut IoHandler, thread: &RootedThread) {

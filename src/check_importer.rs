@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use gluon::{
+    self,
     base::{
         ast::{Expr, SpannedExpr, Typed},
         fnv::FnvMap,
@@ -15,6 +16,8 @@ use gluon::{
 };
 
 use futures::{future, sync::oneshot, Future};
+
+use tokio;
 
 use codespan;
 

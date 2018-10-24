@@ -13,6 +13,14 @@ use codespan;
 use failure;
 use url::{self, Url};
 
+
+pub(crate) fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, failure::Error> {
+    match *name {
+        codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
+        codespan::FileName::Real(ref p) => filename_to_url(p),
+    }
+}
+
 fn codspan_name_to_module(name: &codespan::FileName) -> String {
     match *name {
         codespan::FileName::Virtual(ref s) => s.to_string(),
