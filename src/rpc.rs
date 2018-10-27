@@ -345,6 +345,7 @@ impl Encoder for LanguageServerEncoder {
     type Item = String;
     type Error = failure::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        dst.reserve(item.len() + 60);// Ensure Content-Length fits
         write_message_str(dst.writer(), &item)?;
         Ok(())
     }
