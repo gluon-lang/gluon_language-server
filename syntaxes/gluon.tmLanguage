@@ -133,9 +133,27 @@
 		</dict>
 		<dict>
 			<key>match</key>
-			<string>\b(if|then|else|match|with|do|let|type|and|in|forall)\b</string>
+			<string>\b(if|then|else|match|with|do|rec|in)\b</string>
 			<key>name</key>
 			<string>keyword.control.glu</string>
+		</dict>
+		<dict>
+			<key>match</key>
+			<string>(?:,|{)\s*(\?)\s*}</string>
+			<key>captures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.implicit-operator.glu</string>
+				</dict>
+			</dict>
+		</dict>
+		<dict>
+			<key>match</key>
+			<string>\b(True|False)\b</string>
+			<key>name</key>
+			<string>constant.language.boolean.glu</string>
 		</dict>
 		<dict>
 			<key>match</key>
@@ -145,11 +163,152 @@
 		</dict>
 		<dict>
 			<key>match</key>
-			<string>\+|-|\*|\/|\^|==?|\/=|&amp;|&lt;=?|&gt;=?</string>
+			<string>\b[A-Za-z_]*\!\s</string>
+			<key>name</key>
+			<string>entity.name.function.macro.glu</string>
+		</dict>
+		<dict>
+			<key>begin</key>
+			<string>#\[</string>
+			<key>end</key>
+			<string>\]</string>
+			<key>name</key>
+			<string>meta.attribute.glu</string>
+		</dict>
+		<dict>
+			<key>match</key>
+			<string>\+|-|\*|\/|\^|==?|\/=|&amp;|&lt;=?|&gt;=?|\||\?</string>
 			<key>name</key>
 			<string>keyword.operator.glu</string>
 		</dict>
+
+		<!-- let bindings -->
+		<dict>
+			<key>match</key>
+			<string>(let)\s+([a-zA-Z0-9_]+)(\s+(\?)?[a-zA-Z0-9_]+)+|(let)[\s+(\?)?[a-zA-Z0-9_]+]+</string>
+			<key>captures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.glu</string>
+				</dict>
+				<key>2</key>
+				<dict>
+					<key>name</key>
+					<string>entity.name.function.glu</string>
+				</dict>
+				<key>4</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.implicit-operator.glu</string>
+				</dict>
+				<key>5</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.glu</string>
+				</dict>
+				<key>6</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.implicit-operator.glu</string>
+				</dict>
+			</dict>
+		</dict>
+
+		<!-- type annotations/definitions -->
+		<dict>
+			<key>begin</key>
+			<string>:|\b(type)\b</string>
+			<key>beginCaptures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.control.glu</string>
+				</dict>
+			</dict>
+
+			<key>end</key>
+			<string>(=)|}|,</string>
+			<key>endCaptures</key>
+			<dict>
+				<key>1</key>
+				<dict>
+					<key>name</key>
+					<string>keyword.operator.glu</string>
+				</dict>
+			</dict>
+
+			<key>patterns</key>
+			<array>
+				<dict>
+					<key>include</key>
+					<string>#types-atom</string>
+				</dict>
+				<dict>
+					<key>include</key>
+					<string>#types-parens</string>
+				</dict>
+			</array>
+		</dict>
 	</array>
+
+	<key>repository</key>
+	<dict>
+		<!-- type annotations body, recursive tuples only -->
+		<key>types-parens</key>
+		<dict>
+			<key>begin</key>
+			<string>\(</string>
+			<key>end</key>
+			<string>\)</string>
+			<key>patterns</key>
+			<array>
+				<dict>
+					<key>include</key>
+					<string>#types-atom</string>
+				</dict>
+				<dict>
+					<key>include</key>
+					<string>#types-parens</string>
+				</dict>
+			</array>
+		</dict>
+
+		<!-- type annotations body, excluding tuples -->
+		<key>types-atom</key>
+		<dict>
+			<key>patterns</key>
+			<array>
+				<dict>
+					<key>match</key>
+					<string>-></string>
+					<key>name</key>
+					<string>keyword.operator.glu</string>
+				</dict>
+				<dict>
+					<key>match</key>
+					<string>forall</string>
+					<key>name</key>
+					<string>keyword.glu</string>
+				</dict>
+				<dict>
+					<key>match</key>
+					<string>\b[A-Z][a-zA-Z0-9_]*\b</string>
+					<key>name</key>
+					<string>entity.name.type.glu</string>
+				</dict>
+				<dict>
+					<key>match</key>
+					<string>\b[a-z][a-z0-9_]*\b</string>
+					<key>name</key>
+					<string>entity.name.type.parameter.glu</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+
 	<key>scopeName</key>
 	<string>source.glu</string>
 	<key>uuid</key>
