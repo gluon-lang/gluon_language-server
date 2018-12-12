@@ -34,7 +34,7 @@
       {
         "language": "gluon",
         "scopeName": "source.glu",
-        "path": "./syntaxes/gluon.tmLanguage"
+        "path": "./syntaxes/gluon.tmLanguage.json"
       }
     ],
     "configuration": {
