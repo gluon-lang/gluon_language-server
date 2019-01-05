@@ -1,4 +1,4 @@
-use languageserver_types::DocumentSymbolParams;
+use languageserver_types::{DocumentSymbolParams, DocumentSymbolResponse};
 
 use completion;
 
@@ -24,7 +24,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                     )
                 })
                 .collect::<Result<_, _>>()
-                .map(Some)
+                .map(|x| Some(DocumentSymbolResponse::Flat(x)))
         })
     };
     io.add_async_method(request!("textDocument/documentSymbol"), f);

@@ -5,7 +5,8 @@ use futures::{future::Either, prelude::*};
 use either;
 
 use completion::CompletionSymbol;
-use gluon::{self,
+use gluon::{
+    self,
     base::{
         ast::{Expr, SpannedExpr},
         filename_to_module,
@@ -115,6 +116,7 @@ fn completion_symbol_to_symbol_information(
         },
         name: name.declared_name().to_string(),
         container_name: None,
+        deprecated: Default::default(),
     })
 }
 

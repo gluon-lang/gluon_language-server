@@ -10,8 +10,8 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
     let thread = thread.clone();
     let format = move |params: DocumentFormattingParams| {
         retrieve_expr(&thread, &params.text_document.uri, |module| {
-            let formatted = gluon_format::format_expr(
-                &mut Compiler::new(),
+            let formatted = Compiler::new().format_expr(
+                &mut gluon_format::Formatter::default(),
                 &thread,
                 &module.source.name().to_string(),
                 module.source.src(),
