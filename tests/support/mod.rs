@@ -286,10 +286,11 @@ where
     F: FnOnce(&mut Write, &mut BufRead) + Send + ::std::panic::UnwindSafe + 'static,
 {
     run_no_panic_catch(future::lazy(move || {
-        let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_REMOTE_SERVER").is_ok() {
-            start_remote()
-        } else {
+        let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
+            // FIXME Local  testing may deadlock atm
             start_local()
+        } else {
+            start_remote()
         };
 
         {
