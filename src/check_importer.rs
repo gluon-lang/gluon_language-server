@@ -107,7 +107,7 @@ impl Importer for CheckImporter {
         }
         // Insert a global to ensure the globals type can be looked up
         vm.global_env()
-            .set_dummy_global(module_name, typ.clone(), metadata)
+            .set_dummy_global(module_name, typ.clone(), (*metadata).clone())
             .map_err(|err| (None, err.into()))?;
 
         result.map(|_| ()).map_err(|err| (Some(typ), err.into()))

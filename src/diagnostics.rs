@@ -4,7 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use gluon::{self,
+use gluon::{
+    self,
     base::{
         ast::{Expr, SpannedExpr, Typed},
         error::Errors,
@@ -41,8 +42,7 @@ use {
     cancelable,
     check_importer::{CheckImporter, Module},
     name::{
-        codespan_name_to_file,
-        module_name_to_file, strip_file_prefix,
+        codespan_name_to_file, module_name_to_file, strip_file_prefix,
         strip_file_prefix_with_thread,
     },
     rpc::{self, send_response, Entry, ServerError},
@@ -169,7 +169,7 @@ impl DiagnosticsWorker {
 
                 let result = create_diagnostics(
                     &mut diagnostics,
-                    self.compiler.code_map(),
+                    &self.compiler.code_map(),
                     &import.importer,
                     uri_filename,
                     err,
@@ -479,4 +479,3 @@ pub fn register(
         io.add_notification(notification!("textDocument/didChange"), f);
     }
 }
-
