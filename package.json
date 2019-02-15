@@ -7,7 +7,7 @@
   "publisher": "Marwes",
   "repository": "https://github.com/gluon-lang/gluon_language-server",
   "engines": {
-    "vscode": "^1.15.0"
+    "vscode": "^1.30.0"
   },
   "categories": [
     "Other"
@@ -116,6 +116,6 @@
   },
   "dependencies": {
     "vscode-debugadapter": "^1.25.0",
-    "vscode-languageclient": "^3.5.0"
+    "vscode-languageclient": "^5.2.0"
   }
 }
