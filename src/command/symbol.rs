@@ -21,12 +21,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
             symbols.extend(
                 completion::all_symbols(module.source.span(), &module.expr)
                     .into_iter()
-                    .filter(|symbol| match symbol.value {
-                        CompletionSymbol::Value { ref name, .. }
-                        | CompletionSymbol::Type { ref name, .. } => {
-                            name.declared_name().contains(&params.query)
-                        }
-                    })
+                    .filter(|symbol| symbol.value.name.declared_name().contains(&params.query))
                     .map(|symbol| {
                         completion_symbol_to_symbol_information(&source, symbol, module.uri.clone())
                     })
