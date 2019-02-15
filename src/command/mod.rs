@@ -40,6 +40,7 @@ use {
 };
 
 pub mod completion;
+pub mod definition;
 pub mod document_highlight;
 pub mod document_symbols;
 pub mod formatting;
@@ -112,7 +113,7 @@ fn completion_symbol_to_document_symbol(
         name: symbol.value.name.declared_name().to_string(),
         detail: Some(match &symbol.value.content {
             CompletionSymbolContent::Type { alias } => alias.unresolved_type().to_string(),
-            CompletionSymbolContent::Value { typ, expr } => typ.to_string(),
+            CompletionSymbolContent::Value { typ, .. } => typ.to_string(),
         }),
         deprecated: Default::default(),
         children: if symbol.value.children.is_empty() {

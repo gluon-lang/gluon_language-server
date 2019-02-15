@@ -176,6 +176,7 @@ impl Server {
         ::command::document_highlight::register(&mut io, thread);
         ::command::document_symbols::register(&mut io, thread);
         ::command::formatting::register(&mut io, thread);
+        ::command::definition::register(&mut io, thread);
 
         io.add_async_method(request!("shutdown"), |_| Ok::<(), ServerError<()>>(()));
 
