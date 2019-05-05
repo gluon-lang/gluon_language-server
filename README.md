@@ -1,6 +1,10 @@
-# vscode-gluon
+# gluon-language-server
 
-An extension for for [Visual Studio Code][] which provides syntax hightlighting and completion for the programming language [gluon][].
+This implements the [language server protocol](https://microsoft.github.io/language-server-protocol/) and offers gluon support for the LSP clients, like [VSCode](https://code.visualstudio.com/), [Atom](https://atom.io/) and many others.  
+
+## vscode-gluon
+
+Also part of this repo is the extension for [Visual Studio Code][] which is based on the LSP implementation.  
 
 ## Installing the language server
 
