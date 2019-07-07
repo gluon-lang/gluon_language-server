@@ -26,6 +26,7 @@ failure = "0.1"
 
 codespan = "0.3"
 codespan-lsp = "0.3"
+codespan-reporting = "0.3"
 
 url = "1.2.0"
 url_serde = "0.2.0"
@@ -46,11 +47,9 @@ serde_derive = "1.0.0"
 languageserver-types = "0.54.0"
 debugserver-types = "0.4.0"
 
-gluon = { version = "0.11.2", features = ["serialization", "regex", "rand", "web"] }
-gluon_completion = "0.11.2"
-gluon_format = "0.11.2"
-
-codespan-reporting = "0.2"
+gluon = { version = "0.12", features = ["serialization", "regex", "rand", "web"] }
+gluon_completion = "0.12"
+gluon_format = "0.12"
 
 [dev-dependencies]
 pretty_assertions = "0.2.0"
@@ -60,11 +59,11 @@ quickcheck = "0.6.0"
 [profile.release]
 debug = true
 
-[patch.crates-io]
-gluon_base = { path = "../gluon/base" }
-gluon_parser = { path = "../gluon/parser" }
-gluon_check = { path = "../gluon/check" }
-gluon_format = { path = "../gluon/format" }
-gluon_completion = { path = "../gluon/completion" }
-gluon_vm = { path = "../gluon/vm" }
-gluon = { path = "../gluon" }
+#[patch.crates-io]
+#gluon_base = { path = "../gluon/base" }
+#gluon_parser = { path = "../gluon/parser" }
+#gluon_check = { path = "../gluon/check" }
+#gluon_format = { path = "../gluon/format" }
+#gluon_completion = { path = "../gluon/completion" }
+#gluon_vm = { path = "../gluon/vm" }
+#gluon = { path = "../gluon" }

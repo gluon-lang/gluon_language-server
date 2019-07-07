@@ -13,7 +13,6 @@ use codespan;
 use failure;
 use url::{self, Url};
 
-
 pub(crate) fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, failure::Error> {
     match *name {
         codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
@@ -81,8 +80,6 @@ pub(crate) fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> Strin
 }
 
 pub(crate) fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, failure::Error> {
-    use std::env;
-
     let path = url
         .to_file_path()
         .map_err(|_| failure::err_msg("Expected a file uri"))?;

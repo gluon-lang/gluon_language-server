@@ -70,7 +70,7 @@ use futures::{future, prelude::*};
 
 pub use {command::completion::CompletionData, server::Server};
 
-pub type BoxFuture<I, E> = Box<Future<Item = I, Error = E> + Send + 'static>;
+pub type BoxFuture<I, E> = Box<dyn Future<Item = I, Error = E> + Send + 'static>;
 
 pub fn run() {
     ::env_logger::init();

@@ -254,7 +254,7 @@ where
     }
 }
 
-fn start_local() -> (Box<Write>, Box<BufRead>) {
+fn start_local() -> (Box<dyn Write>, Box<dyn BufRead>) {
     let (stdin_read, mut stdin_write) = pipe();
     let (stdout_read, stdout_write) = pipe();
     let stdout_read = BufReader::new(SyncReadPipe(stdout_read));
@@ -267,7 +267,7 @@ fn start_local() -> (Box<Write>, Box<BufRead>) {
     (Box::new(stdin_write), Box::new(stdout_read))
 }
 
-fn start_remote() -> (Box<Write>, Box<BufRead>) {
+fn start_remote() -> (Box<dyn Write>, Box<dyn BufRead>) {
     use std::process::{Command, Stdio};
 
     let mut child = Command::new("target/debug/gluon_language-server")
@@ -283,7 +283,7 @@ fn start_remote() -> (Box<Write>, Box<BufRead>) {
 
 pub fn send_rpc<F>(f: F)
 where
-    F: FnOnce(&mut Write, &mut BufRead) + Send + ::std::panic::UnwindSafe + 'static,
+    F: FnOnce(&mut dyn Write, &mut dyn BufRead) + Send + ::std::panic::UnwindSafe + 'static,
 {
     run_no_panic_catch(future::lazy(move || {
         let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
