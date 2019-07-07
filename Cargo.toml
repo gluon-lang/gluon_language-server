@@ -5,6 +5,7 @@ authors = ["Markus Westerlind <marwes91@gmail.com>"]
 description = "Language server providing completion for gluon"
 license = "MIT"
 repository = "https://github.com/gluon-lang/gluon_language-server"
+edition = "2018"
 
 [workspace]
 

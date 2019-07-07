@@ -6,8 +6,8 @@ use languageserver_types::TextDocumentContentChangeEvent;
 
 use gluon::base::pos::Span;
 
-use codespan_lsp::range_to_byte_span;
 use crate::rpc::ServerError;
+use codespan_lsp::range_to_byte_span;
 
 #[derive(Debug)]
 struct VersionedChange {
@@ -142,7 +142,8 @@ mod tests {
                 range_length: None,
                 text: "test".to_string(),
             }],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(source, "test");
 
@@ -162,7 +163,8 @@ mod tests {
                 range_length: Some(1),
                 text: "".to_string(),
             }],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(source, "tet");
 
@@ -182,7 +184,8 @@ mod tests {
                 range_length: Some(1),
                 text: "ab".to_string(),
             }],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(source, "teab");
     }

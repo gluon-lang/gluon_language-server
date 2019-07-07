@@ -93,7 +93,7 @@ where
     })
 }
 
-fn completion_symbol_kind(symbol: &CompletionSymbol) -> SymbolKind {
+fn completion_symbol_kind(symbol: &CompletionSymbol<'_>) -> SymbolKind {
     match symbol.content {
         CompletionSymbolContent::Type { .. } => SymbolKind::Class,
         CompletionSymbolContent::Value { typ, expr } => expr_to_kind(expr, typ),
@@ -102,7 +102,7 @@ fn completion_symbol_kind(symbol: &CompletionSymbol) -> SymbolKind {
 
 fn completion_symbol_to_document_symbol(
     source: &codespan::FileMap,
-    symbol: &Spanned<CompletionSymbol, BytePos>,
+    symbol: &Spanned<CompletionSymbol<'_>, BytePos>,
 ) -> Result<DocumentSymbol, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);
     let range = byte_span_to_range(source, symbol.span)?;
@@ -133,7 +133,7 @@ fn completion_symbol_to_document_symbol(
 
 fn completion_symbol_to_symbol_information(
     source: &codespan::FileMap,
-    symbol: Spanned<CompletionSymbol, BytePos>,
+    symbol: Spanned<CompletionSymbol<'_>, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);

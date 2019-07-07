@@ -1,14 +1,7 @@
-extern crate gluon_language_server;
-extern crate languageserver_types;
-
-extern crate jsonrpc_core;
 #[macro_use]
 extern crate pretty_assertions;
-extern crate serde;
-extern crate serde_json;
-extern crate url;
 
-extern crate gluon;
+use serde_json;
 
 mod support;
 
