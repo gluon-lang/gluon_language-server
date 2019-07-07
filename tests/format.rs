@@ -15,7 +15,7 @@ use std::io::Write;
 
 use languageserver_types::*;
 
-use support::{did_change_event, expect_notification, expect_response, hover};
+use crate::support::{did_change_event, expect_notification, expect_response, hover};
 
 fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
 where

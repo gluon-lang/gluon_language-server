@@ -16,7 +16,7 @@ use std::io::Write;
 
 use languageserver_types::{request::*, *};
 
-use support::*;
+use crate::support::*;
 
 fn text_document_definition<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where

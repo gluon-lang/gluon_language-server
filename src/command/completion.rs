@@ -2,11 +2,11 @@ use futures::sync::{mpsc, oneshot};
 
 use languageserver_types::CompletionItem;
 
-use completion;
+use crate::completion;
 
 use languageserver_types::{CompletionParams, CompletionResponse};
 
-use {
+use crate::{
 check_importer::Module,
     name::with_import, rpc::LanguageServerCommand, BoxFuture};
 

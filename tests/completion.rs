@@ -20,7 +20,7 @@ use languageserver_types::*;
 
 use gluon_language_server::CompletionData;
 
-use support::{did_change, expect_notification, expect_response};
+use crate::support::{did_change, expect_notification, expect_response};
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where

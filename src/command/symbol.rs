@@ -2,7 +2,7 @@ use super::*;
 
 use languageserver_types::WorkspaceSymbolParams;
 
-use completion;
+use crate::completion;
 
 pub fn register(io: &mut IoHandler, thread: &RootedThread) {
     let thread = thread.clone();

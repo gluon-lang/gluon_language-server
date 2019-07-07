@@ -1,10 +1,10 @@
 use jsonrpc_core::IoHandler;
 
-use completion;
+use crate::completion;
 
 use languageserver_types::{Hover, HoverContents, MarkedString, TextDocumentPositionParams};
 
-use {rpc::LanguageServerCommand, BoxFuture};
+use crate::{rpc::LanguageServerCommand, BoxFuture};
 
 use super::*;
 

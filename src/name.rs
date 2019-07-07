@@ -7,7 +7,7 @@ use std::{
 
 use gluon::{base::filename_to_module, import::Import, Thread};
 
-use check_importer::CheckImporter;
+use crate::check_importer::CheckImporter;
 
 use codespan;
 use failure;

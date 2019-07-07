@@ -21,7 +21,7 @@ use serde;
 
 use failure;
 
-use {
+use crate::{
     cancelable,
     check_importer::CheckImporter,
     rpc::{self, *},
@@ -166,17 +166,17 @@ impl Server {
 
         let mut io = IoHandler::new();
 
-        ::diagnostics::register(&mut io, thread, &message_log, exit_receiver.clone());
+        crate::diagnostics::register(&mut io, thread, &message_log, exit_receiver.clone());
 
-        ::command::initialize::register(&mut io, thread);
-        ::command::completion::register(&mut io, thread, &message_log);
-        ::command::hover::register(&mut io, thread);
-        ::command::signature_help::register(&mut io, thread);
-        ::command::symbol::register(&mut io, thread);
-        ::command::document_highlight::register(&mut io, thread);
-        ::command::document_symbols::register(&mut io, thread);
-        ::command::formatting::register(&mut io, thread);
-        ::command::definition::register(&mut io, thread);
+        crate::command::initialize::register(&mut io, thread);
+        crate::command::completion::register(&mut io, thread, &message_log);
+        crate::command::hover::register(&mut io, thread);
+        crate::command::signature_help::register(&mut io, thread);
+        crate::command::symbol::register(&mut io, thread);
+        crate::command::document_highlight::register(&mut io, thread);
+        crate::command::document_symbols::register(&mut io, thread);
+        crate::command::formatting::register(&mut io, thread);
+        crate::command::definition::register(&mut io, thread);
 
         io.add_async_method(request!("shutdown"), |_| Ok::<(), ServerError<()>>(()));
 

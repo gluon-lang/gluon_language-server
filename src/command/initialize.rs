@@ -5,7 +5,7 @@ use languageserver_types::{
     SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 
-use {rpc::LanguageServerCommand, BoxFuture};
+use crate::{rpc::LanguageServerCommand, BoxFuture};
 
 use super::*;
 

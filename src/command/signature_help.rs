@@ -9,7 +9,7 @@ use languageserver_types::{
 
 use super::*;
 
-use completion;
+use crate::completion;
 
 pub fn register(io: &mut IoHandler, thread: &RootedThread) {
     let thread = thread.clone();

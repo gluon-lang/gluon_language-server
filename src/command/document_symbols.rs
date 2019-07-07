@@ -1,6 +1,6 @@
 use languageserver_types::{DocumentSymbolParams, DocumentSymbolResponse};
 
-use completion;
+use crate::completion;
 
 use super::*;
 

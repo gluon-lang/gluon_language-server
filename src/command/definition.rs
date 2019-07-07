@@ -1,7 +1,7 @@
 use codespan_lsp::position_to_byte_index;
 use languageserver_types::{request::GotoDefinitionResponse, Location, TextDocumentPositionParams};
 
-use completion;
+use crate::completion;
 
 use super::*;
 

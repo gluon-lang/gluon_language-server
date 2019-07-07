@@ -68,7 +68,7 @@ use gluon::{either, new_vm};
 use futures::future::Either;
 use futures::{future, prelude::*};
 
-pub use {command::completion::CompletionData, server::Server};
+pub use crate::{command::completion::CompletionData, server::Server};
 
 pub type BoxFuture<I, E> = Box<dyn Future<Item = I, Error = E> + Send + 'static>;
 

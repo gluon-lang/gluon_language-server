@@ -10,7 +10,7 @@ mod support;
 
 use languageserver_types::*;
 
-use support::{expect_notification, expect_response, hover};
+use crate::support::{expect_notification, expect_response, hover};
 
 const STREAM_SOURCE: &'static str = r#"
 let prelude = import! "std/prelude.glu"

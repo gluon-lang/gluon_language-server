@@ -2,9 +2,9 @@ use std::fmt;
 
 use futures::{future::Either, prelude::*};
 
-use either;
+use crate::either;
 
-use completion::{CompletionSymbol, CompletionSymbolContent};
+use crate::completion::{CompletionSymbol, CompletionSymbolContent};
 use gluon::{
     self,
     base::{
@@ -32,7 +32,7 @@ use languageserver_types::{
 
 use codespan_lsp::{byte_span_to_range, position_to_byte_index};
 
-use {
+use crate::{
     check_importer::{CheckImporter, Module},
     name::strip_file_prefix_with_thread,
     rpc::ServerError,
