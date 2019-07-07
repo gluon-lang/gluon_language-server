@@ -1,5 +1,5 @@
-extern crate bytes;
-extern crate combine;
+use bytes;
+use combine;
 
 use std::{
     collections::VecDeque,
@@ -36,7 +36,7 @@ use languageserver_types::{notification, LogMessageParams, MessageType};
 use serde;
 use serde_json::{self, from_value, to_string, to_value};
 
-use BoxFuture;
+use crate::BoxFuture;
 
 #[derive(Debug, PartialEq)]
 pub struct ServerError<E> {
@@ -204,7 +204,7 @@ pub(crate) fn log_message(
 macro_rules! log_message {
     ($sender: expr, $($ts: tt)+) => {
         if log_enabled!(::log::Level::Debug) {
-            $crate::Either::A(::rpc::log_message($sender, format!( $($ts)+ )))
+            $crate::Either::A(crate::rpc::log_message($sender, format!( $($ts)+ )))
         } else {
             $crate::Either::B(Ok(()).into_future())
         }
@@ -242,13 +242,13 @@ where
     W: Write,
 {
     debug!("Respond: {}", response);
-    try!(write!(
+    r#try!(write!(
         output,
         "Content-Length: {}\r\n\r\n{}",
         response.len(),
         response
     ));
-    try!(output.flush());
+    r#try!(output.flush());
     Ok(())
 }
 
@@ -345,7 +345,7 @@ impl Encoder for LanguageServerEncoder {
     type Item = String;
     type Error = failure::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        dst.reserve(item.len() + 60);// Ensure Content-Length fits
+        dst.reserve(item.len() + 60); // Ensure Content-Length fits
         write_message_str(dst.writer(), &item)?;
         Ok(())
     }

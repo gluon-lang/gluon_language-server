@@ -5,7 +5,7 @@ use languageserver_types::{
     SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 
-use {rpc::LanguageServerCommand, BoxFuture};
+use crate::{rpc::LanguageServerCommand, BoxFuture};
 
 use super::*;
 
@@ -43,6 +43,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     document_highlight_provider: Some(true),
                     document_symbol_provider: Some(true),
                     workspace_symbol_provider: Some(true),
+                    definition_provider: Some(true),
                     ..ServerCapabilities::default()
                 },
             })

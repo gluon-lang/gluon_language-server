@@ -1,12 +1,5 @@
-extern crate gluon_language_server;
-extern crate languageserver_types;
-
-extern crate jsonrpc_core;
 #[macro_use]
 extern crate pretty_assertions;
-extern crate serde;
-extern crate serde_json;
-extern crate url;
 
 #[allow(unused)]
 mod support;
@@ -15,7 +8,7 @@ use std::io::Write;
 
 use languageserver_types::*;
 
-use support::{did_change_event, expect_notification, expect_response, hover};
+use crate::support::{did_change_event, expect_notification, expect_response, hover};
 
 fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
 where

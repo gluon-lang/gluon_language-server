@@ -3,12 +3,13 @@ use gluon::RootedThread;
 use jsonrpc_core::IoHandler;
 
 use languageserver_types::{
-    ParameterInformation, SignatureHelp, SignatureInformation, TextDocumentPositionParams,
+    ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation,
+    TextDocumentPositionParams,
 };
 
 use super::*;
 
-use completion;
+use crate::completion;
 
 pub fn register(io: &mut IoHandler, thread: &RootedThread) {
     let thread = thread.clone();
@@ -52,7 +53,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                                     parameters: Some(
                                         ::gluon::base::types::arg_iter(&help.typ)
                                             .map(|typ| ParameterInformation {
-                                                label: "".to_string(),
+                                                label: ParameterLabel::Simple("".to_string()),
                                                 documentation: Some(make_documentation(
                                                     Some(typ),
                                                     "",

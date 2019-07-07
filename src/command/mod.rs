@@ -2,9 +2,9 @@ use std::fmt;
 
 use futures::{future::Either, prelude::*};
 
-use either;
+use crate::either;
 
-use completion::CompletionSymbol;
+use crate::completion::{CompletionSymbol, CompletionSymbolContent};
 use gluon::{
     self,
     base::{
@@ -26,13 +26,13 @@ use codespan;
 use url::Url;
 
 use languageserver_types::{
-    CompletionItemKind, Documentation, Location, MarkupContent, MarkupKind, Position,
-    SymbolInformation, SymbolKind,
+    CompletionItemKind, DocumentSymbol, Documentation, Location, MarkupContent, MarkupKind,
+    Position, SymbolInformation, SymbolKind,
 };
 
 use codespan_lsp::{byte_span_to_range, position_to_byte_index};
 
-use {
+use crate::{
     check_importer::{CheckImporter, Module},
     name::strip_file_prefix_with_thread,
     rpc::ServerError,
@@ -40,6 +40,7 @@ use {
 };
 
 pub mod completion;
+pub mod definition;
 pub mod document_highlight;
 pub mod document_symbols;
 pub mod formatting;
@@ -92,29 +93,57 @@ where
     })
 }
 
+fn completion_symbol_kind(symbol: &CompletionSymbol<'_>) -> SymbolKind {
+    match symbol.content {
+        CompletionSymbolContent::Type { .. } => SymbolKind::Class,
+        CompletionSymbolContent::Value { typ, expr } => expr_to_kind(expr, typ),
+    }
+}
+
+fn completion_symbol_to_document_symbol(
+    source: &codespan::FileMap,
+    symbol: &Spanned<CompletionSymbol<'_>, BytePos>,
+) -> Result<DocumentSymbol, ServerError<()>> {
+    let kind = completion_symbol_kind(&symbol.value);
+    let range = byte_span_to_range(source, symbol.span)?;
+    Ok(DocumentSymbol {
+        kind,
+        range,
+        selection_range: range,
+        name: symbol.value.name.declared_name().to_string(),
+        detail: Some(match &symbol.value.content {
+            CompletionSymbolContent::Type { alias } => alias.unresolved_type().to_string(),
+            CompletionSymbolContent::Value { typ, .. } => typ.to_string(),
+        }),
+        deprecated: Default::default(),
+        children: if symbol.value.children.is_empty() {
+            None
+        } else {
+            Some(
+                symbol
+                    .value
+                    .children
+                    .iter()
+                    .map(|child| completion_symbol_to_document_symbol(source, child))
+                    .collect::<Result<_, _>>()?,
+            )
+        },
+    })
+}
+
 fn completion_symbol_to_symbol_information(
     source: &codespan::FileMap,
-    symbol: Spanned<CompletionSymbol, BytePos>,
+    symbol: Spanned<CompletionSymbol<'_>, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
-    let (kind, name) = match symbol.value {
-        CompletionSymbol::Type { ref name, .. } => (SymbolKind::Class, name),
-        CompletionSymbol::Value {
-            ref name,
-            ref typ,
-            ref expr,
-        } => {
-            let kind = expr_to_kind(expr, typ);
-            (kind, name)
-        }
-    };
+    let kind = completion_symbol_kind(&symbol.value);
     Ok(SymbolInformation {
         kind,
         location: Location {
             uri,
             range: byte_span_to_range(source, symbol.span)?,
         },
-        name: name.declared_name().to_string(),
+        name: symbol.value.name.declared_name().to_string(),
         container_name: None,
         deprecated: Default::default(),
     })

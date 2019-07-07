@@ -38,7 +38,7 @@ use jsonrpc_core::IoHandler;
 
 use languageserver_types::*;
 
-use {
+use crate::{
     cancelable,
     check_importer::{CheckImporter, Module},
     name::{

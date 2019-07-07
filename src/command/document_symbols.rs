@@ -1,6 +1,6 @@
 use languageserver_types::{DocumentSymbolParams, DocumentSymbolResponse};
 
-use completion;
+use crate::completion;
 
 use super::*;
 
@@ -15,16 +15,10 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
             let source = &module.source;
 
             symbols
-                .into_iter()
-                .map(|symbol| {
-                    completion_symbol_to_symbol_information(
-                        &source,
-                        symbol,
-                        params.text_document.uri.clone(),
-                    )
-                })
+                .iter()
+                .map(|symbol| completion_symbol_to_document_symbol(&source, symbol))
                 .collect::<Result<_, _>>()
-                .map(|x| Some(DocumentSymbolResponse::Flat(x)))
+                .map(|x| Some(DocumentSymbolResponse::Nested(x)))
         })
     };
     io.add_async_method(request!("textDocument/documentSymbol"), f);

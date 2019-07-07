@@ -2,7 +2,7 @@ use languageserver_types::{DocumentHighlight, TextDocumentPositionParams};
 
 use super::*;
 
-use completion;
+use crate::completion;
 
 pub fn register(io: &mut IoHandler, thread: &RootedThread) {
     let thread = thread.clone();

@@ -1,16 +1,8 @@
-extern crate gluon_language_server;
-extern crate languageserver_types;
-
-extern crate jsonrpc_core;
-extern crate serde;
-extern crate serde_json;
-extern crate url;
-
 mod support;
 
 use languageserver_types::*;
 
-use support::{expect_notification, expect_response, hover};
+use crate::support::{expect_notification, expect_response, hover};
 
 const STREAM_SOURCE: &'static str = r#"
 let prelude = import! "std/prelude.glu"

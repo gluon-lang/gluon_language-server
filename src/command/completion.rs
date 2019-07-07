@@ -2,18 +2,16 @@ use futures::sync::{mpsc, oneshot};
 
 use languageserver_types::CompletionItem;
 
-use completion;
+use crate::completion;
 
 use languageserver_types::{CompletionParams, CompletionResponse};
 
-use {
-check_importer::Module,
-    name::with_import, rpc::LanguageServerCommand, BoxFuture};
+use crate::{check_importer::Module, name::with_import, rpc::LanguageServerCommand, BoxFuture};
 
 use url_serde;
 
+use serde::Deserialize;
 use serde_json;
-use serde::{ Deserialize};
 
 use super::*;
 
@@ -46,15 +44,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             if dirty {
                 let (sender, receiver) = oneshot::channel();
                 waiters.push(sender);
-                return box_future!(
-                    receiver
-                        .map_err(|_| {
-                            let msg = "Completion sender was unexpectedly dropped";
-                            error!("{}", msg);
-                            ServerError::from(msg.to_string())
-                        })
-                        .and_then(move |_| self_.clone().execute(change))
-                );
+                return box_future!(receiver
+                    .map_err(|_| {
+                        let msg = "Completion sender was unexpectedly dropped";
+                        error!("{}", msg);
+                        ServerError::from(msg.to_string())
+                    })
+                    .and_then(move |_| self_.clone().execute(change)));
             }
 
             let byte_index = try_future!(position_to_byte_index(&source, &change.position));

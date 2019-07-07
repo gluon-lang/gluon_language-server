@@ -1,14 +1,7 @@
-extern crate gluon_language_server;
-extern crate languageserver_types;
-
-extern crate jsonrpc_core;
 #[macro_use]
 extern crate pretty_assertions;
-extern crate serde;
-extern crate serde_json;
-extern crate url;
 
-extern crate gluon;
+use serde_json;
 
 mod support;
 
@@ -20,7 +13,7 @@ use languageserver_types::*;
 
 use gluon_language_server::CompletionData;
 
-use support::{did_change, expect_notification, expect_response};
+use crate::support::{did_change, expect_notification, expect_response};
 
 fn completion<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where

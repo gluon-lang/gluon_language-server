@@ -23,7 +23,7 @@ use codespan;
 
 use url::Url;
 
-use {name::module_name_to_file_, text_edit::TextChanges};
+use crate::{name::module_name_to_file_, text_edit::TextChanges};
 
 pub(crate) struct Module {
     pub source: Arc<codespan::FileMap>,
