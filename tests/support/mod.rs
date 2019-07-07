@@ -78,7 +78,7 @@ where
         jsonrpc: Some(Version::V2),
         method: method.into(),
         id: Id::Num(id),
-        params: Some(params),
+        params,
     })
 }
 
@@ -95,7 +95,7 @@ where
     Call::Notification(Notification {
         jsonrpc: Some(Version::V2),
         method: method.into(),
-        params: Some(params),
+        params,
     })
 }
 
@@ -214,10 +214,7 @@ where
 {
     read_until(output, |json| {
         Some(match from_str(&json) {
-            Ok(Notification {
-                params: Some(params),
-                ..
-            }) => {
+            Ok(Notification { params, .. }) => {
                 let json_value = match params {
                     Params::Map(map) => Value::Object(map),
                     Params::Array(array) => Value::Array(array),
@@ -303,7 +300,7 @@ where
             let exit = Call::Notification(Notification {
                 jsonrpc: Some(Version::V2),
                 method: "exit".into(),
-                params: None,
+                params: Params::None,
             });
             write_message(&mut stdin_write, exit).unwrap();
             drop(stdin_write);
