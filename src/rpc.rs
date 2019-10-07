@@ -242,13 +242,13 @@ where
     W: Write,
 {
     debug!("Respond: {}", response);
-    r#try!(write!(
+    write!(
         output,
         "Content-Length: {}\r\n\r\n{}",
         response.len(),
         response
-    ));
-    r#try!(output.flush());
+    )?;
+    output.flush()?;
     Ok(())
 }
 
