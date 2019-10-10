@@ -26,15 +26,15 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                 let env = thread.get_env();
 
                 Ok(
-                    completion::signature_help(&*env, module.source.span(), expr, byte_pos).map(
+                    completion::signature_help(&env, module.source.span(), expr, byte_pos).map(
                         |help| {
-                            let (_, metadata_map) = gluon::check::metadata::metadata(&*env, expr);
+                            let (_, metadata_map) = gluon::check::metadata::metadata(&env, expr);
                             let comment = if help.name.is_empty() {
                                 None
                             } else {
                                 completion::suggest_metadata(
                                     &metadata_map,
-                                    &*env,
+                                    &env,
                                     module.source.span(),
                                     expr,
                                     byte_pos,

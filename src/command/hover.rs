@@ -27,10 +27,10 @@ impl LanguageServerCommand<TextDocumentPositionParams> for HoverCommand {
                     let byte_index = position_to_byte_index(&source, &change.position)?;
 
                     let env = thread.get_env();
-                    let (_, metadata_map) = gluon::check::metadata::metadata(&*env, &expr);
+                    let (_, metadata_map) = gluon::check::metadata::metadata(&env, &expr);
                     let opt_metadata =
                         completion::get_metadata(&metadata_map, source.span(), expr, byte_index);
-                    let extract = (completion::TypeAt { env: &*env }, completion::SpanAt);
+                    let extract = (completion::TypeAt { env: &env }, completion::SpanAt);
                     Ok(
                         completion::completion(extract, source.span(), expr, byte_index)
                             .map(|(typ, span)| {

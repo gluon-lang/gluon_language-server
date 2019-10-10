@@ -61,7 +61,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             };
 
             let suggestions = query
-                .suggest(&*thread.get_env(), source.span(), expr, byte_index)
+                .suggest(&thread.get_env(), source.span(), expr, byte_index)
                 .into_iter()
                 .filter(|suggestion| !suggestion.name.starts_with("__"))
                 .collect::<Vec<_>>();
@@ -133,12 +133,12 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread, message_log: &mpsc::S
                     &data.text_document_uri,
                     &data.position,
                     |module, byte_index| {
-                        let type_env = thread.global_env().get_env();
+                        let type_env = thread.get_database();
                         let (_, metadata_map) =
-                            gluon::check::metadata::metadata(&*type_env, &module.expr);
+                            gluon::check::metadata::metadata(&type_env, &module.expr);
                         Ok(completion::suggest_metadata(
                             &metadata_map,
-                            &*type_env,
+                            &type_env,
                             module.source.span(),
                             &module.expr,
                             byte_index,

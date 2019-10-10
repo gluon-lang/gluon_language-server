@@ -16,7 +16,7 @@ use gluon::{
         types::{ArcType, BuiltinType, Type},
     },
     import::Import,
-    RootedThread, Thread,
+    RootedThread, Thread, ThreadExt,
 };
 
 use jsonrpc_core::IoHandler;

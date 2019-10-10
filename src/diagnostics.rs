@@ -7,17 +7,13 @@ use std::{
 use gluon::{
     self,
     base::{
-        ast::{Expr, SpannedExpr, Typed},
-        error::Errors,
-        filename_to_module,
-        metadata::Metadata,
-        pos,
+        ast::{Expr, SpannedExpr},
+        filename_to_module, pos,
         symbol::Symbol,
-        types::{Type, TypeCache},
     },
-    compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable},
     import::Import,
-    Compiler, Error as GluonError, Result as GluonResult, RootedThread, Thread,
+    query::{Compilation, CompilationBase},
+    Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 
 use futures::{
@@ -127,14 +123,12 @@ fn create_diagnostics(
 struct DiagnosticsWorker {
     thread: RootedThread,
     message_log: mpsc::Sender<String>,
-    compiler: Compiler,
 }
 
 impl DiagnosticsWorker {
     pub fn new(thread: RootedThread, message_log: mpsc::Sender<String>) -> Self {
         DiagnosticsWorker {
             thread,
-            compiler: Compiler::new(),
             message_log,
         }
     }
@@ -150,7 +144,7 @@ impl DiagnosticsWorker {
         let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
         let name = filename_to_module(&filename);
 
-        self.compiler.update_filemap(&name, fileinput);
+        self.thread.get_database().update_filemap(&name, fileinput);
 
         let diagnostics = match self.typecheck(uri_filename, &name, version, fileinput) {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
@@ -169,7 +163,7 @@ impl DiagnosticsWorker {
 
                 let result = create_diagnostics(
                     &mut diagnostics,
-                    &self.compiler.code_map(),
+                    &self.thread.get_database().code_map(),
                     &import.importer,
                     uri_filename,
                     err,
@@ -205,7 +199,7 @@ impl DiagnosticsWorker {
         version: Option<u64>,
         fileinput: &str,
     ) -> GluonResult<()> {
-        let (expr_opt, errors) = self.typecheck_(&name, fileinput);
+        let (expr_opt, error) = self.typecheck_(&name, fileinput);
 
         let import = self
             .thread
@@ -230,7 +224,12 @@ impl DiagnosticsWorker {
                     module.version = version;
                 }
 
-                module.source = self.compiler.get_filemap(&name).expect("FileMap").clone();
+                module.source = self
+                    .thread
+                    .get_database()
+                    .get_filemap(&name)
+                    .unwrap_or_else(|| panic!("FileMap for diagnostics is missing: {}", name))
+                    .clone();
 
                 module.dirty = false;
 
@@ -243,9 +242,15 @@ impl DiagnosticsWorker {
             }
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(self::Module {
-                    expr: expr_opt
-                        .unwrap_or_else(|| pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
-                    source: self.compiler.get_filemap(&name).unwrap().clone(),
+                    expr: expr_opt.unwrap_or_else(|| {
+                        Arc::new(pos::spanned2(0.into(), 0.into(), Expr::Error(None)))
+                    }),
+                    source: self
+                        .thread
+                        .get_database()
+                        .get_filemap(&name)
+                        .unwrap_or_else(|| panic!("FileMap for diagnostics is missing: {}", name))
+                        .clone(),
                     uri: uri_filename.clone(),
                     dirty: false,
                     waiters: Vec::new(),
@@ -254,10 +259,10 @@ impl DiagnosticsWorker {
                 });
             }
         }
-        if errors.is_empty() {
-            Ok(())
+        if let Some(error) = error {
+            Err(error)
         } else {
-            Err(errors.into())
+            Ok(())
         }
     }
 
@@ -265,53 +270,19 @@ impl DiagnosticsWorker {
         &mut self,
         name: &str,
         fileinput: &str,
-    ) -> (Option<SpannedExpr<Symbol>>, Errors<GluonError>) {
+    ) -> (Option<Arc<SpannedExpr<Symbol>>>, Option<GluonError>) {
         debug!("Loading: `{}`", name);
-        let mut errors = Errors::new();
-        // The parser may find parse errors but still produce an expression
-        // For that case still typecheck the expression but return the parse error afterwards
-        let mut expr = match self
-            .compiler
-            .parse_partial_expr(&TypeCache::new(), &name, fileinput)
-        {
-            Ok(expr) => expr,
-            Err((None, err)) => {
-                errors.push(err.into());
-                return (None, errors);
-            }
-            Err((Some(expr), err)) => {
-                errors.push(err.into());
-                expr
-            }
-        };
-
-        if let Err((_, err)) =
-            (&mut expr).expand_macro(&mut self.compiler, &self.thread, &name, fileinput)
-        {
-            errors.push(err);
-        }
-
-        let check_result = (MacroValue { expr: &mut expr })
-            .typecheck(&mut self.compiler, &self.thread, &name, fileinput)
-            .map(|value| value.typ);
-        let typ = match check_result {
-            Ok(typ) => typ,
-            Err(err) => {
-                errors.push(err);
-                expr.try_type_of(&*self.thread.global_env().get_env())
-                    .unwrap_or_else(|_| Type::hole())
-            }
-        };
-        let metadata = Metadata::default();
-        if let Err(err) = self
+        self.thread
+            .get_database_mut()
+            .add_module(name.into(), fileinput.into());
+        match self
             .thread
-            .global_env()
-            .set_dummy_global(name, typ, metadata)
+            .get_database()
+            .typechecked_module(name.into(), None)
         {
-            errors.push(err.into());
+            Ok(value) => (Some(value.expr), None),
+            Err((opt, err)) => (opt.map(|v| v.expr), Some(err)),
         }
-
-        (Some(expr), errors)
     }
 }
 
@@ -394,7 +365,7 @@ pub fn register(
             .unwrap_or_else(|err| panic!("{}", err));
         let module_name = filename_to_module(&module_name);
         let module = modules
-            .entry(module_name)
+            .entry(module_name.clone())
             .or_insert_with(|| Module::empty(change.text_document.uri.clone()));
 
         module.text_changes.add(
