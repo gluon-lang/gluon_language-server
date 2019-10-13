@@ -52,12 +52,12 @@ fn create_diagnostics(
     code_map: &codespan::CodeMap,
     importer: &CheckImporter,
     filename: &Url,
-    err: GluonError,
+    err: &GluonError,
 ) -> Result<(), ServerError<()>> {
     use gluon::base::error::AsDiagnostic;
     fn into_diagnostic<T>(
         code_map: &codespan::CodeMap,
-        err: pos::Spanned<T, pos::BytePos>,
+        err: &pos::Spanned<T, pos::BytePos>,
     ) -> Result<Diagnostic, ServerError<()>>
     where
         T: fmt::Display + AsDiagnostic,
@@ -76,21 +76,17 @@ fn create_diagnostics(
         diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
         code_map: &codespan::CodeMap,
         importer: &CheckImporter,
-        in_file_error: gluon::base::error::InFile<T>,
+        in_file_error: &gluon::base::error::InFile<T>,
     ) -> Result<(), ServerError<()>>
     where
         T: fmt::Display + AsDiagnostic,
     {
-        diagnostics
+        let errors = diagnostics
             .entry(module_name_to_file(importer, &in_file_error.source_name()))
-            .or_insert(Vec::new())
-            .extend(
-                in_file_error
-                    .errors()
-                    .into_iter()
-                    .map(|err| into_diagnostic(code_map, err))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            .or_default();
+        for err in in_file_error.errors() {
+            errors.push(into_diagnostic(code_map, &err)?);
+        }
         Ok(())
     }
 
@@ -109,7 +105,7 @@ fn create_diagnostics(
 
         err => diagnostics
             .entry(filename.clone())
-            .or_insert(Vec::new())
+            .or_default()
             .push(Diagnostic {
                 message: format!("{}", err),
                 severity: Some(DiagnosticSeverity::Error),
@@ -166,7 +162,7 @@ impl DiagnosticsWorker {
                     &self.thread.get_database().code_map(),
                     &import.importer,
                     uri_filename,
-                    err,
+                    &err,
                 );
                 if let Err(err) = result {
                     error!("Unable to create diagnostics: {}", err.message);
