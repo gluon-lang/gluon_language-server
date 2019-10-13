@@ -1,4 +1,4 @@
-use futures::sync::{mpsc, oneshot};
+use futures::sync::mpsc;
 
 use languageserver_types::CompletionItem;
 
@@ -30,28 +30,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
     type Error = ();
     fn execute(&self, change: CompletionParams) -> BoxFuture<Self::Output, ServerError<()>> {
         let thread = self.0.clone();
-        let self_ = self.clone();
         let text_document_uri = change.text_document.uri.clone();
         let result = retrieve_expr_future(&self.0, &text_document_uri, move |module| {
             let Module {
                 ref expr,
                 ref source,
-                dirty,
-                ref mut waiters,
                 ..
             } = *module;
-
-            if dirty {
-                let (sender, receiver) = oneshot::channel();
-                waiters.push(sender);
-                return box_future!(receiver
-                    .map_err(|_| {
-                        let msg = "Completion sender was unexpectedly dropped";
-                        error!("{}", msg);
-                        ServerError::from(msg.to_string())
-                    })
-                    .and_then(move |_| self_.clone().execute(change)));
-            }
 
             let byte_index = try_future!(position_to_byte_index(&source, &change.position));
 

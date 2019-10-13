@@ -178,7 +178,7 @@ fn retrieve_expr_future<'a, 'b, F, Q, R>(
     f: F,
 ) -> impl Future<Item = R, Error = ServerError<()>> + 'static
 where
-    F: FnOnce(&mut Module) -> Q,
+    F: FnOnce(&Module) -> Q,
     Q: IntoFuture<Item = R, Error = ServerError<()>>,
     Q::Future: Send + 'static,
     R: Send + 'static,
@@ -189,18 +189,20 @@ where
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    let mut importer = import.importer.0.lock().unwrap();
-    match importer.get_mut(&module) {
-        Some(source_module) => return Either::A(f(source_module).into_future()),
+    match import.importer.module(thread, &module) {
+        Some(ref source_module) => return Either::A(f(source_module).into_future()),
         None => (),
     }
     Either::B(
         Err(ServerError {
-            message: format!(
-                "Module `{}` is not defined\n{:?}",
-                module,
-                importer.keys().collect::<Vec<_>>()
-            ),
+            message: {
+                let m = import.importer.0.lock().unwrap();
+                format!(
+                    "Module `{}` is not defined\n{:?}",
+                    module,
+                    m.keys().collect::<Vec<_>>()
+                )
+            },
             data: None,
         })
         .into_future(),
@@ -209,7 +211,7 @@ where
 
 fn retrieve_expr<F, R>(thread: &Thread, text_document_uri: &Url, f: F) -> Result<R, ServerError<()>>
 where
-    F: FnOnce(&mut Module) -> Result<R, ServerError<()>>,
+    F: FnOnce(&Module) -> Result<R, ServerError<()>>,
 {
     let filename = strip_file_prefix_with_thread(thread, text_document_uri);
     let module = filename_to_module(&filename);
@@ -217,17 +219,19 @@ where
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    let mut importer = import.importer.0.lock().unwrap();
-    match importer.get_mut(&module) {
-        Some(source_module) => return f(source_module),
+    match import.importer.module(thread, &module) {
+        Some(ref source_module) => return f(source_module),
         None => (),
     }
     Err(ServerError {
-        message: format!(
-            "Module `{}` is not defined\n{:?}",
-            module,
-            importer.keys().collect::<Vec<_>>()
-        ),
+        message: {
+            let m = import.importer.0.lock().unwrap();
+            format!(
+                "Module `{}` is not defined\n{:?}",
+                module,
+                m.keys().collect::<Vec<_>>()
+            )
+        },
         data: None,
     })
 }
