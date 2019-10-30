@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "gluon_language-server"
-version = "0.13.0"
+version = "0.13.1-alpha.0"
 dependencies = [
  "bytes 0.4.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
