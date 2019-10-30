@@ -11,11 +11,10 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
         let import = import
             .downcast_ref::<Import<CheckImporter>>()
             .expect("Check importer");
-        let modules = import.importer.0.lock().unwrap();
 
         let mut symbols = Vec::<SymbolInformation>::new();
 
-        for module in modules.values() {
+        for module in import.importer.modules(&thread) {
             let source = &module.source;
 
             symbols.extend(

@@ -1,4 +1,4 @@
-use futures::sync::{mpsc, oneshot};
+use futures::sync::mpsc;
 
 use languageserver_types::CompletionItem;
 
@@ -30,28 +30,13 @@ impl LanguageServerCommand<CompletionParams> for Completion {
     type Error = ();
     fn execute(&self, change: CompletionParams) -> BoxFuture<Self::Output, ServerError<()>> {
         let thread = self.0.clone();
-        let self_ = self.clone();
         let text_document_uri = change.text_document.uri.clone();
         let result = retrieve_expr_future(&self.0, &text_document_uri, move |module| {
             let Module {
                 ref expr,
                 ref source,
-                dirty,
-                ref mut waiters,
                 ..
             } = *module;
-
-            if dirty {
-                let (sender, receiver) = oneshot::channel();
-                waiters.push(sender);
-                return box_future!(receiver
-                    .map_err(|_| {
-                        let msg = "Completion sender was unexpectedly dropped";
-                        error!("{}", msg);
-                        ServerError::from(msg.to_string())
-                    })
-                    .and_then(move |_| self_.clone().execute(change)));
-            }
 
             let byte_index = try_future!(position_to_byte_index(&source, &change.position));
 
@@ -61,7 +46,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
             };
 
             let suggestions = query
-                .suggest(&*thread.get_env(), source.span(), expr, byte_index)
+                .suggest(&thread.get_env(), source.span(), expr, byte_index)
                 .into_iter()
                 .filter(|suggestion| !suggestion.name.starts_with("__"))
                 .collect::<Vec<_>>();
@@ -133,12 +118,12 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread, message_log: &mpsc::S
                     &data.text_document_uri,
                     &data.position,
                     |module, byte_index| {
-                        let type_env = thread.global_env().get_env();
+                        let type_env = thread.get_database();
                         let (_, metadata_map) =
-                            gluon::check::metadata::metadata(&*type_env, &module.expr);
+                            gluon::check::metadata::metadata(&type_env, &module.expr);
                         Ok(completion::suggest_metadata(
                             &metadata_map,
-                            &*type_env,
+                            &type_env,
                             module.source.span(),
                             &module.expr,
                             byte_index,

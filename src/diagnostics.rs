@@ -1,23 +1,14 @@
 use std::{
     collections::{hash_map, BTreeMap},
-    fmt, mem,
-    sync::Arc,
+    fmt,
 };
 
 use gluon::{
     self,
-    base::{
-        ast::{Expr, SpannedExpr, Typed},
-        error::Errors,
-        filename_to_module,
-        metadata::Metadata,
-        pos,
-        symbol::Symbol,
-        types::{Type, TypeCache},
-    },
-    compiler_pipeline::{MacroExpandable, MacroValue, Typecheckable},
+    base::{filename_to_module, pos},
     import::Import,
-    Compiler, Error as GluonError, Result as GluonResult, RootedThread, Thread,
+    query::{Compilation, CompilationBase},
+    Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 
 use futures::{
@@ -40,7 +31,7 @@ use languageserver_types::*;
 
 use crate::{
     cancelable,
-    check_importer::{CheckImporter, Module},
+    check_importer::{CheckImporter, State},
     name::{
         codespan_name_to_file, module_name_to_file, strip_file_prefix,
         strip_file_prefix_with_thread,
@@ -56,12 +47,12 @@ fn create_diagnostics(
     code_map: &codespan::CodeMap,
     importer: &CheckImporter,
     filename: &Url,
-    err: GluonError,
+    err: &GluonError,
 ) -> Result<(), ServerError<()>> {
     use gluon::base::error::AsDiagnostic;
     fn into_diagnostic<T>(
         code_map: &codespan::CodeMap,
-        err: pos::Spanned<T, pos::BytePos>,
+        err: &pos::Spanned<T, pos::BytePos>,
     ) -> Result<Diagnostic, ServerError<()>>
     where
         T: fmt::Display + AsDiagnostic,
@@ -80,21 +71,17 @@ fn create_diagnostics(
         diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
         code_map: &codespan::CodeMap,
         importer: &CheckImporter,
-        in_file_error: gluon::base::error::InFile<T>,
+        in_file_error: &gluon::base::error::InFile<T>,
     ) -> Result<(), ServerError<()>>
     where
         T: fmt::Display + AsDiagnostic,
     {
-        diagnostics
+        let errors = diagnostics
             .entry(module_name_to_file(importer, &in_file_error.source_name()))
-            .or_insert(Vec::new())
-            .extend(
-                in_file_error
-                    .errors()
-                    .into_iter()
-                    .map(|err| into_diagnostic(code_map, err))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            .or_default();
+        for err in in_file_error.errors() {
+            errors.push(into_diagnostic(code_map, &err)?);
+        }
         Ok(())
     }
 
@@ -113,7 +100,7 @@ fn create_diagnostics(
 
         err => diagnostics
             .entry(filename.clone())
-            .or_insert(Vec::new())
+            .or_default()
             .push(Diagnostic {
                 message: format!("{}", err),
                 severity: Some(DiagnosticSeverity::Error),
@@ -127,14 +114,12 @@ fn create_diagnostics(
 struct DiagnosticsWorker {
     thread: RootedThread,
     message_log: mpsc::Sender<String>,
-    compiler: Compiler,
 }
 
 impl DiagnosticsWorker {
     pub fn new(thread: RootedThread, message_log: mpsc::Sender<String>) -> Self {
         DiagnosticsWorker {
             thread,
-            compiler: Compiler::new(),
             message_log,
         }
     }
@@ -150,9 +135,9 @@ impl DiagnosticsWorker {
         let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
         let name = filename_to_module(&filename);
 
-        self.compiler.update_filemap(&name, fileinput);
+        self.thread.get_database().update_filemap(&name, fileinput);
 
-        let diagnostics = match self.typecheck(uri_filename, &name, version, fileinput) {
+        let diagnostics = match self.typecheck(uri_filename, &name, version) {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
             Err(err) => {
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
@@ -169,10 +154,10 @@ impl DiagnosticsWorker {
 
                 let result = create_diagnostics(
                     &mut diagnostics,
-                    &self.compiler.code_map(),
+                    &self.thread.get_database().code_map(),
                     &import.importer,
                     uri_filename,
-                    err,
+                    &err,
                 );
                 if let Err(err) = result {
                     error!("Unable to create diagnostics: {}", err.message);
@@ -203,9 +188,12 @@ impl DiagnosticsWorker {
         uri_filename: &Url,
         name: &str,
         version: Option<u64>,
-        fileinput: &str,
     ) -> GluonResult<()> {
-        let (expr_opt, errors) = self.typecheck_(&name, fileinput);
+        let result = self
+            .thread
+            .get_database()
+            .typechecked_module(name.into(), None)
+            .map_err(|(_, err)| err);
 
         let import = self
             .thread
@@ -221,97 +209,22 @@ impl DiagnosticsWorker {
             hash_map::Entry::Occupied(mut entry) => {
                 let module = entry.get_mut();
 
-                if let Some(expr) = expr_opt {
-                    module.expr = expr;
-                }
-                module.uri = uri_filename.clone();
-
                 if version.is_some() {
                     module.version = version;
                 }
 
-                module.source = self.compiler.get_filemap(&name).expect("FileMap").clone();
-
-                module.dirty = false;
-
-                let waiters = mem::replace(&mut module.waiters, Vec::new());
-                tokio::spawn({
-                    future::join_all(waiters.into_iter().map(|sender| sender.send(())))
-                        .map(|_| ())
-                        .map_err(|_| ())
-                });
+                module.uri = uri_filename.clone();
             }
             hash_map::Entry::Vacant(entry) => {
-                entry.insert(self::Module {
-                    expr: expr_opt
-                        .unwrap_or_else(|| pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
-                    source: self.compiler.get_filemap(&name).unwrap().clone(),
+                entry.insert(self::State {
                     uri: uri_filename.clone(),
-                    dirty: false,
-                    waiters: Vec::new(),
                     version: version,
                     text_changes: TextChanges::new(),
                 });
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.into())
-        }
-    }
-
-    fn typecheck_(
-        &mut self,
-        name: &str,
-        fileinput: &str,
-    ) -> (Option<SpannedExpr<Symbol>>, Errors<GluonError>) {
-        debug!("Loading: `{}`", name);
-        let mut errors = Errors::new();
-        // The parser may find parse errors but still produce an expression
-        // For that case still typecheck the expression but return the parse error afterwards
-        let mut expr = match self
-            .compiler
-            .parse_partial_expr(&TypeCache::new(), &name, fileinput)
-        {
-            Ok(expr) => expr,
-            Err((None, err)) => {
-                errors.push(err.into());
-                return (None, errors);
-            }
-            Err((Some(expr), err)) => {
-                errors.push(err.into());
-                expr
-            }
-        };
-
-        if let Err((_, err)) =
-            (&mut expr).expand_macro(&mut self.compiler, &self.thread, &name, fileinput)
-        {
-            errors.push(err);
-        }
-
-        let check_result = (MacroValue { expr: &mut expr })
-            .typecheck(&mut self.compiler, &self.thread, &name, fileinput)
-            .map(|value| value.typ);
-        let typ = match check_result {
-            Ok(typ) => typ,
-            Err(err) => {
-                errors.push(err);
-                expr.try_type_of(&*self.thread.global_env().get_env())
-                    .unwrap_or_else(|_| Type::hole())
-            }
-        };
-        let metadata = Metadata::default();
-        if let Err(err) = self
-            .thread
-            .global_env()
-            .set_dummy_global(name, typ, metadata)
-        {
-            errors.push(err.into());
-        }
-
-        (Some(expr), errors)
+        result?;
+        Ok(())
     }
 }
 
@@ -329,11 +242,11 @@ pub fn register(
         tokio::spawn(cancelable(
             shutdown,
             future::lazy(move || {
-                diagnostic_stream.for_each(move |entry: Entry<Url, Arc<codespan::FileMap>, _>| {
+                diagnostic_stream.for_each(move |entry: Entry<Url, String, _>| {
                     diagnostics_runner.run_diagnostics(
                         &entry.key,
                         Some(entry.version),
-                        &entry.value.src(),
+                        &entry.value,
                     )
                 })
             }),
@@ -352,13 +265,14 @@ pub fn register(
             tokio::spawn({
                 let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
                 let module = filename_to_module(&filename);
+                thread
+                    .get_database_mut()
+                    .add_module(module.into(), &change.text_document.text);
                 work_queue
                     .send(Entry {
                         key: change.text_document.uri,
-                        value: Arc::new(codespan::FileMap::new(
-                            module.into(),
-                            change.text_document.text,
-                        )),
+                        value: change.text_document.text,
+
                         version: change.text_document.version,
                     })
                     .map(|_| ())
@@ -379,9 +293,7 @@ pub fn register(
         change: DidChangeTextDocumentParams,
     ) -> impl Future<Item = (), Error = ()> + Send + 'static
     where
-        S: Sink<SinkItem = Entry<Url, Arc<codespan::FileMap>, u64>, SinkError = ()>
-            + Send
-            + 'static,
+        S: Sink<SinkItem = Entry<Url, String, u64>, SinkError = ()> + Send + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -393,55 +305,57 @@ pub fn register(
         let module_name = strip_file_prefix(&paths, &change.text_document.uri)
             .unwrap_or_else(|err| panic!("{}", err));
         let module_name = filename_to_module(&module_name);
-        let module = modules
-            .entry(module_name)
-            .or_insert_with(|| Module::empty(change.text_document.uri.clone()));
+        let module_state = modules
+            .entry(module_name.clone())
+            .or_insert_with(|| State::empty(change.text_document.uri.clone()));
 
-        module.text_changes.add(
+        module_state.text_changes.add(
             change.text_document.version.expect("version"),
             change.content_changes,
         );
-
-        module.dirty = true;
 
         let uri = change.text_document.uri;
         // If the module was loaded via `import!` before we open it in the editor
         // `module.uri` has been set by looking at the current working directory which is
         // not necessarily correct (works in VS code but not with (neo)vim) so update the
         // uri to match the one supplied by the client to ensure errors show up.
-        if module.uri != uri {
-            module.uri.clone_from(&uri);
+        if module_state.uri != uri {
+            module_state.uri.clone_from(&uri);
         }
         let result = {
-            let mut source = module.source.src().to_string();
+            let mut source = module_state
+                .module(thread, &module_name)
+                .map(|m| m.source.src().to_string())
+                .unwrap_or_default();
             debug!("Change source {}:\n{}", uri, source);
 
-            match module.version {
-                Some(current_version) => match module
+            match module_state.version {
+                Some(current_version) => match module_state
                     .text_changes
                     .apply_changes(&mut source, current_version)
                 {
                     Ok(version) if version == current_version => return Either::A(future::ok(())),
-                    Ok(version) => {
-                        module.source =
-                            Arc::new(codespan::FileMap::new(module.source.name().clone(), source));
-                        Ok(version)
-                    }
+                    Ok(version) => Ok((version, source)),
                     Err(err) => Err(err),
                 },
-                None => return Either::A(future::ok(())),
+                None => {
+                    return Either::A(future::ok(()));
+                }
             }
         };
         match result {
-            Ok(new_version) => {
-                module.version = Some(new_version);
-                let arc_source = module.source.clone();
-                debug!("Changed to\n{}", arc_source.src());
+            Ok((new_version, source)) => {
+                module_state.version = Some(new_version);
+                eprintln!("ADD 2 {}", module_name);
+                thread
+                    .get_database_mut()
+                    .add_module(module_name.into(), &source);
+                debug!("Changed to\n{}", source);
                 Either::B(Either::A(
                     work_queue
                         .send(Entry {
                             key: uri,
-                            value: arc_source,
+                            value: source,
                             version: new_version,
                         })
                         .map(|_| ()),
