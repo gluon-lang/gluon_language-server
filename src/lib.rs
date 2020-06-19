@@ -3,10 +3,6 @@ use clap;
 #[macro_use]
 extern crate serde_derive;
 
-use futures;
-
-use tokio;
-
 #[macro_use]
 extern crate log;
 
@@ -45,10 +41,7 @@ mod text_edit;
 
 use gluon::{either, new_vm};
 
-use futures::{
-    future::{self, Either},
-    prelude::*,
-};
+use futures_01::{future::Either, prelude::*};
 
 pub use crate::{command::completion::CompletionData, server::Server};
 
@@ -63,10 +56,16 @@ pub fn run() {
 
     let thread = new_vm();
 
-    tokio::run(future::lazy(move || {
-        Server::start(thread, tokio::io::stdin(), tokio::io::stdout())
-            .map_err(|err| panic!("{}", err))
-    }))
+    tokio_compat::run_std(async {
+        if let Err(err) = tokio_02::spawn(async {
+            Server::start(thread, tokio_02::io::stdin(), tokio_02::io::stdout()).await
+        })
+        .await
+        .unwrap()
+        {
+            panic!("{}", err)
+        }
+    })
 }
 
 fn cancelable<F, G>(f: F, g: G) -> impl Future<Item = (), Error = G::Error>

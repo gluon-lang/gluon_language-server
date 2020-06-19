@@ -11,7 +11,7 @@ use gluon::{
     Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 
-use futures::{
+use futures_01::{
     future::{self, Either},
     prelude::*,
     stream,

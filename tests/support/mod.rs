@@ -1,14 +1,10 @@
 #![allow(unused)]
 
-extern crate futures;
-extern crate languageserver_types;
-extern crate tokio;
-extern crate tokio_io;
-
 use std::{
     collections::VecDeque,
     env,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, Write},
+    marker::Unpin,
     str,
     sync::{
         mpsc::{sync_channel, Receiver, SyncSender, TryRecvError},
@@ -27,13 +23,12 @@ use jsonrpc_core::{
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{from_str, from_value, ser::Serializer, to_value, Value};
 
-use self::{
-    futures::{future, Future, Poll, Stream},
-    tokio::{
-        codec::{Decoder, FramedRead},
-        prelude::task,
-    },
-    tokio_io::io::AllowStdIo,
+use {
+    futures::{compat::*, prelude::*, Future},
+    futures_01::{future, Poll, Stream},
+    tokio::prelude::task,
+    tokio_02::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader},
+    tokio_util::codec::{Decoder, FramedRead},
 };
 
 use url::Url;
@@ -42,26 +37,29 @@ use languageserver_types::*;
 
 use gluon_language_server::rpc::LanguageServerDecoder;
 
-extern crate gluon;
-use self::gluon::new_vm;
+use gluon::new_vm;
 
 pub fn test_url(uri: &str) -> Url {
     Url::from_file_path(&env::current_dir().unwrap().join(uri)).unwrap()
 }
 
-pub fn write_message<W, V>(writer: &mut W, value: V) -> io::Result<()>
+pub async fn write_message<W, V>(writer: &mut W, value: V) -> io::Result<()>
 where
-    W: ?Sized + Write,
+    W: ?Sized + AsyncWrite + Unpin,
     V: Serialize,
 {
     let mut vec = Vec::new();
     value.serialize(&mut Serializer::new(&mut vec)).unwrap();
-    write!(
-        writer,
-        "Content-Length: {}\r\n\r\n{}",
-        vec.len(),
-        str::from_utf8(&vec).unwrap()
-    )
+    writer
+        .write_all(
+            format!(
+                "Content-Length: {}\r\n\r\n{}",
+                vec.len(),
+                str::from_utf8(&vec).unwrap()
+            )
+            .as_bytes(),
+        )
+        .await
 }
 
 pub fn method_call<T>(method: &str, id: u64, value: T) -> Call
@@ -99,9 +97,9 @@ where
     })
 }
 
-pub fn did_open_uri<W: ?Sized>(stdin: &mut W, uri: Url, text: &str)
+pub async fn did_open_uri<W: ?Sized>(stdin: &mut W, uri: Url, text: &str)
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     let did_open = notification(
         "textDocument/didOpen",
@@ -115,19 +113,19 @@ where
         },
     );
 
-    write_message(stdin, did_open).unwrap();
+    write_message(stdin, did_open).await.unwrap();
 }
 
-pub fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
+pub async fn did_open<W: ?Sized>(stdin: &mut W, uri: &str, text: &str)
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
-    did_open_uri(stdin, test_url(uri), text)
+    did_open_uri(stdin, test_url(uri), text).await
 }
 
-pub fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
+pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     did_change_event(
         stdin,
@@ -139,15 +137,16 @@ where
             text: text.to_string(),
         }],
     )
+    .await
 }
 
-pub fn did_change_event<W: ?Sized>(
+pub async fn did_change_event<W: ?Sized>(
     stdin: &mut W,
     uri: &str,
     version: u64,
     content_changes: Vec<TextDocumentContentChangeEvent>,
 ) where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     let hover = notification(
         "textDocument/didChange",
@@ -160,24 +159,29 @@ pub fn did_change_event<W: ?Sized>(
         },
     );
 
-    write_message(stdin, hover).unwrap();
+    write_message(stdin, hover).await.unwrap();
 }
 
-fn read_until<T>(output: impl BufRead, f: impl FnMut(String) -> Option<T>) -> T {
-    FramedRead::new(AllowStdIo::new(output), LanguageServerDecoder::new())
-        .filter_map(f)
-        .into_future()
-        .map_err(|(err, _)| err)
-        .wait()
-        .expect("Success")
-        .0
+async fn read_until<T>(
+    output: impl AsyncBufRead + Unpin,
+    mut f: impl FnMut(String) -> Option<T>,
+) -> T {
+    let stream = FramedRead::new(output, LanguageServerDecoder::new()).try_filter_map(|s| {
+        let x = f(s);
+        async { Ok(x) }
+    });
+    futures::pin_mut!(stream);
+    stream
+        .next()
+        .await
         .expect("Expected a response")
+        .expect("Success")
 }
 
-pub fn expect_response<R, T>(output: R) -> T
+pub async fn expect_response<R, T>(output: R) -> T
 where
     T: DeserializeOwned,
-    R: BufRead,
+    R: AsyncBufRead + Unpin,
 {
     read_until(output, |json| {
         // Skip all notifications
@@ -189,11 +193,12 @@ where
             panic!("Expected response, got `{}`", json)
         }
     })
+    .await
 }
 
-pub fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
+pub async fn hover<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     let hover = method_call(
         "textDocument/hover",
@@ -204,13 +209,13 @@ where
         },
     );
 
-    write_message(stdin, hover).unwrap();
+    write_message(stdin, hover).await.unwrap();
 }
 
-pub fn expect_notification<R, T>(output: R) -> T
+pub async fn expect_notification<R, T>(output: R) -> T
 where
     T: DeserializeOwned,
-    R: BufRead,
+    R: AsyncBufRead + Unpin,
 {
     read_until(output, |json| {
         Some(match from_str(&json) {
@@ -226,24 +231,26 @@ where
             Err(err) => panic!("Expected notification, got `{}`\n{}", err, json),
         })
     })
+    .await
 }
 
 pub fn run_no_panic_catch<F>(fut: F)
 where
-    F: Future<Item = (), Error = ()> + Send + ::std::panic::UnwindSafe + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     use std::sync::{Arc, Mutex};
 
     let error_result = Arc::new(Mutex::new(None));
     {
         let error_result = error_result.clone();
-        tokio::run(
-            fut.catch_unwind()
-                .map_err(move |err| {
-                    *error_result.lock().unwrap() = Some(err);
-                })
-                .and_then(|result| result),
-        );
+        tokio_compat::run_std(async move {
+            if let Err(err) = tokio_02::spawn(::std::panic::AssertUnwindSafe(fut).catch_unwind())
+                .await
+                .unwrap()
+            {
+                *error_result.lock().unwrap() = Some(err);
+            }
+        });
     }
 
     if let Some(err) = Arc::try_unwrap(error_result).unwrap().into_inner().unwrap() {
@@ -251,21 +258,31 @@ where
     }
 }
 
-fn start_local() -> (Box<dyn Write>, Box<dyn BufRead>) {
-    let (stdin_read, mut stdin_write) = pipe();
-    let (stdout_read, stdout_write) = pipe();
-    let stdout_read = BufReader::new(SyncReadPipe(stdout_read));
+fn start_local() -> (
+    Box<dyn AsyncWrite + Send + Unpin>,
+    Box<dyn AsyncBufRead + Send + Unpin>,
+) {
+    let (mut stdin_write, stdin_read) = async_pipe::pipe();
+    let (stdout_write, stdout_read) = async_pipe::pipe();
+    let stdout_read = BufReader::new(stdout_read);
 
     let thread = new_vm();
-    tokio::spawn(
-        ::gluon_language_server::Server::start(thread, stdin_read, stdout_write)
-            .map_err(|err| panic!("{}", err)),
-    );
+    tokio_02::spawn(async {
+        if let Err(err) =
+            ::gluon_language_server::Server::start(thread, stdin_read, stdout_write).await
+        {
+            panic!("{}", err)
+        }
+    });
     (Box::new(stdin_write), Box::new(stdout_read))
 }
 
-fn start_remote() -> (Box<dyn Write>, Box<dyn BufRead>) {
-    use std::process::{Command, Stdio};
+fn start_remote() -> (
+    Box<dyn AsyncWrite + Send + Unpin>,
+    Box<dyn AsyncBufRead + Send + Unpin>,
+) {
+    use std::process::Stdio;
+    use tokio_02::process::Command;
 
     let mut child = Command::new("target/debug/gluon_language-server")
         .stdin(Stdio::piped())
@@ -280,9 +297,15 @@ fn start_remote() -> (Box<dyn Write>, Box<dyn BufRead>) {
 
 pub fn send_rpc<F>(f: F)
 where
-    F: FnOnce(&mut dyn Write, &mut dyn BufRead) + Send + ::std::panic::UnwindSafe + 'static,
+    F: for<'a> FnOnce(
+            &'a mut (dyn AsyncWrite + Send + Unpin),
+            &'a mut (dyn AsyncBufRead + Send + Unpin),
+        ) -> futures::future::BoxFuture<'a, ()>
+        + Send
+        + ::std::panic::UnwindSafe
+        + 'static,
 {
-    run_no_panic_catch(future::lazy(move || {
+    run_no_panic_catch(async move {
         let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
             // FIXME Local  testing may deadlock atm
             start_local()
@@ -293,132 +316,19 @@ where
         {
             f(&mut stdin_write, &mut stdout_read);
 
-            write_message(&mut stdin_write, method_call("shutdown", 1_000_000, ())).unwrap();
+            write_message(&mut stdin_write, method_call("shutdown", 1_000_000, ()))
+                .await
+                .unwrap();
 
-            let () = expect_response(&mut stdout_read);
+            let () = expect_response(&mut stdout_read).await;
 
             let exit = Call::Notification(Notification {
                 jsonrpc: Some(Version::V2),
                 method: "exit".into(),
                 params: Params::None,
             });
-            write_message(&mut stdin_write, exit).unwrap();
+            write_message(&mut stdin_write, exit).await.unwrap();
             drop(stdin_write);
         }
-        Ok(())
-    }))
-}
-
-pub struct ReadPipe {
-    task: Arc<task::AtomicTask>,
-    recv: Receiver<Vec<u8>>,
-    buffer: VecDeque<u8>,
-}
-
-impl io::Read for ReadPipe {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let l = buffer.len().min(self.buffer.len());
-        for (to, from) in buffer.iter_mut().zip(self.buffer.drain(..l)) {
-            *to = from;
-        }
-        self.task.register();
-        match self.recv.try_recv() {
-            Ok(buf) => {
-                self.buffer.extend(buf);
-                let extra = self.read(&mut buffer[l..]).unwrap_or(0);
-                Ok(l + extra)
-            }
-            Err(TryRecvError::Disconnected) => Ok(0),
-            Err(TryRecvError::Empty) => {
-                if l == 0 {
-                    Err(io::ErrorKind::WouldBlock.into())
-                } else {
-                    Ok(l)
-                }
-            }
-        }
-    }
-
-    fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> io::Result<usize> {
-        let len = buffer.len();
-        buffer.extend(self.buffer.drain(..));
-        while let Ok(buf) = self.recv.recv() {
-            buffer.extend(buf);
-        }
-        Ok(buffer.len() - len)
-    }
-}
-
-impl tokio::io::AsyncRead for ReadPipe {}
-
-pub struct SyncReadPipe(pub ReadPipe);
-
-impl io::Read for SyncReadPipe {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        match self.0.read(buffer) {
-            Ok(x) => Ok(x),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => match self.0.recv.recv() {
-                Ok(buf) => {
-                    let l = buffer.len().min(buf.len());
-                    buffer[..l].copy_from_slice(&buf[..l]);
-                    self.0.buffer.extend(buf[l..].iter().cloned());
-                    Ok(l)
-                }
-                Err(_) => Ok(0),
-            },
-            Err(err) => Err(err),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct WritePipe {
-    task: Arc<task::AtomicTask>,
-    sender: SyncSender<Vec<u8>>,
-}
-
-impl<'a> io::Write for &'a WritePipe {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        if data.is_empty() {
-            return Ok(0);
-        }
-        self.sender
-            .send(data.to_owned())
-            .map_err(|_| io::Error::from(io::ErrorKind::NotConnected))?;
-        self.task.notify();
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl io::Write for WritePipe {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        (&*self).write(data)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        (&*self).flush()
-    }
-}
-
-impl tokio::io::AsyncWrite for WritePipe {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        Ok(().into())
-    }
-}
-
-pub fn pipe() -> (ReadPipe, WritePipe) {
-    let task = Arc::new(task::AtomicTask::new());
-    let (sender, receiver) = sync_channel(10);
-    (
-        ReadPipe {
-            task: task.clone(),
-            recv: receiver,
-            buffer: VecDeque::new(),
-        },
-        WritePipe { task, sender },
-    )
+    })
 }

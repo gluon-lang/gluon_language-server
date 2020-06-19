@@ -1,4 +1,4 @@
-use futures::sync::mpsc;
+use futures_01::sync::mpsc;
 
 use languageserver_types::CompletionItem;
 

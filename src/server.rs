@@ -1,19 +1,18 @@
-use std::{
-    io::BufReader,
-    sync::{Mutex, RwLock},
-};
+use std::sync::{Mutex, RwLock};
 
 use gluon::{import::Import, RootedThread};
 
-use futures::{
+use futures_01::{
     future::{self, Either},
     prelude::*,
     sync::{mpsc, oneshot},
 };
 
-use tokio;
+use tokio_02::io::BufReader;
 
-use tokio_codec::{FramedRead, FramedWrite};
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+use futures::{compat::*, prelude::*};
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
@@ -84,14 +83,14 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn start<R, W>(
+    pub async fn start<R, W>(
         thread: RootedThread,
         input: R,
         output: W,
-    ) -> impl Future<Item = (), Error = failure::Error>
+    ) -> Result<(), failure::Error>
     where
-        R: tokio::io::AsyncRead + Send + 'static,
-        W: tokio::io::AsyncWrite + Send + 'static,
+        R: tokio_02::io::AsyncRead + Send + 'static,
+        W: tokio_02::io::AsyncWrite + Send + 'static,
     {
         let _ = ::env_logger::try_init();
 
@@ -115,47 +114,61 @@ impl Server {
             message_receiver,
             message_sender,
         } = Server::initialize(&thread);
+        let handlers = &handlers;
 
         let input = BufReader::new(input);
 
         let request_handler_future = FramedRead::new(input, rpc::LanguageServerDecoder::new())
             .map_err(|err| panic!("{}", err))
-            .for_each(move |json| {
-                debug!("Handle: {}", json);
+            .try_for_each(move |json| {
                 let message_sender = message_sender.clone();
-                handlers.handle_request(&json).then(move |result| {
-                    if let Ok(Some(response)) = result {
-                        debug!("Response: {}", response);
-                        Either::A(
-                            message_sender
-                                .send(response)
-                                .map(|_| ())
-                                .map_err(|_| failure::err_msg("Unable to send")),
-                        )
-                    } else {
-                        Either::B(Ok(()).into_future())
-                    }
-                })
+                async move {
+                    debug!("Handle: {}", json);
+                    handlers
+                        .handle_request(&json)
+                        .then(move |result| {
+                            if let Ok(Some(response)) = result {
+                                debug!("Response: {}", response);
+                                Either::A(
+                                    message_sender
+                                        .send(response)
+                                        .map(|_| ())
+                                        .map_err(|_| failure::err_msg("Unable to send")),
+                                )
+                            } else {
+                                Either::B(Ok(()).into_future())
+                            }
+                        })
+                        .compat()
+                        .await
+                }
             });
 
-        tokio::spawn(
+        tokio_02::spawn(
             message_receiver
+                .compat()
                 .map_err(|_| failure::err_msg("Unable to log message"))
                 .forward(FramedWrite::new(output, LanguageServerEncoder))
-                .map(|_| ())
-                .map_err(|err| {
-                    error!("{}", err);
+                .map(|result| {
+                    if let Err(err) = result {
+                        error!("{}", err);
+                    }
                 }),
         );
 
         cancelable(
             shutdown,
-            request_handler_future.map_err(|t: failure::Error| panic!("{}", t)),
+            request_handler_future
+                .map_err(|t: failure::Error| panic!("{}", t))
+                .boxed()
+                .compat(),
         )
         .map(|t| {
             info!("Server shutdown");
             t
         })
+        .compat()
+        .await
     }
 
     fn initialize(thread: &RootedThread) -> Server {

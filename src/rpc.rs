@@ -1,4 +1,3 @@
-use bytes;
 use combine;
 
 use std::{
@@ -23,11 +22,14 @@ use self::combine::{
     Parser,
 };
 
-use self::bytes::{BufMut, BytesMut};
+use bytes::{
+    buf::{ext::BufMutExt, Buf},
+    BytesMut,
+};
 
-use tokio_io::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
-use futures::{self, sync::mpsc, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+use futures_01::{self, sync::mpsc, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
@@ -158,7 +160,7 @@ where
             Err(err) => err,
         };
         let data = self.0.invalid_params();
-        Box::new(futures::failed(Error {
+        Box::new(futures_01::failed(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {}", err),
             data: data
@@ -325,7 +327,7 @@ impl Decoder for LanguageServerDecoder {
             ))
         })?;
 
-        src.split_to(removed_len);
+        src.advance(removed_len);
 
         match opt {
             None => Ok(None),
@@ -341,10 +343,9 @@ impl Decoder for LanguageServerDecoder {
 #[derive(Debug)]
 pub struct LanguageServerEncoder;
 
-impl Encoder for LanguageServerEncoder {
-    type Item = String;
+impl Encoder<String> for LanguageServerEncoder {
     type Error = failure::Error;
-    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: String, dst: &mut BytesMut) -> Result<(), Self::Error> {
         dst.reserve(item.len() + 60); // Ensure Content-Length fits
         write_message_str(dst.writer(), &item)?;
         Ok(())

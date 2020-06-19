@@ -1,6 +1,6 @@
 use std::fmt;
 
-use futures::{future::Either, prelude::*};
+use futures_01::{future::Either, prelude::*};
 
 use crate::either;
 

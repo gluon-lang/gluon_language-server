@@ -6,34 +6,36 @@ use languageserver_types::{DiagnosticSeverity, Position, PublishDiagnosticsParam
 #[test]
 fn type_error() {
     support::send_rpc(|stdin, stdout| {
-        let text = r#"
+        Box::pin(async move {
+            let text = r#"
 not ""
 "#;
-        support::did_open(stdin, "test.glu", text);
+            support::did_open(stdin, "test.glu", text).await;
 
-        let diagnostic: PublishDiagnosticsParams = support::expect_notification(stdout);
+            let diagnostic: PublishDiagnosticsParams = support::expect_notification(stdout).await;
 
-        assert_eq!(diagnostic.uri, support::test_url("test.glu"));
-        assert_eq!(
-            diagnostic.diagnostics.len(),
-            1,
-            "{:?}",
-            diagnostic.diagnostics
-        );
-        let error = &diagnostic.diagnostics[0];
-        assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
-        assert_eq!(
-            error.range,
-            Range {
-                start: Position {
-                    line: 1,
-                    character: 4,
-                },
-                end: Position {
-                    line: 1,
-                    character: 6,
-                },
-            }
-        );
+            assert_eq!(diagnostic.uri, support::test_url("test.glu"));
+            assert_eq!(
+                diagnostic.diagnostics.len(),
+                1,
+                "{:?}",
+                diagnostic.diagnostics
+            );
+            let error = &diagnostic.diagnostics[0];
+            assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
+            assert_eq!(
+                error.range,
+                Range {
+                    start: Position {
+                        line: 1,
+                        character: 4,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 6,
+                    },
+                }
+            );
+        })
     });
 }

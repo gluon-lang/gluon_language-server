@@ -3,15 +3,15 @@ extern crate pretty_assertions;
 
 mod support;
 
-use std::io::Write;
+use tokio_02::io::AsyncWrite;
 
 use languageserver_types::{request::*, *};
 
 use crate::support::*;
 
-fn text_document_definition<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
+async fn text_document_definition<W: ?Sized>(stdin: &mut W, id: u64, uri: &str, position: Position)
 where
-    W: Write,
+    W: AsyncWrite + std::marker::Unpin,
 {
     let hover = support::method_call(
         "textDocument/definition",
@@ -24,89 +24,95 @@ where
         },
     );
 
-    support::write_message(stdin, hover).unwrap();
+    support::write_message(stdin, hover).await.unwrap();
 }
 
 #[test]
 fn goto_definition() {
     support::send_rpc(|stdin, stdout| {
-        let text = r#"
+        Box::pin(async move {
+            let text = r#"
 let test = 1
 let test2 = 1
 test
 "#;
-        support::did_open(stdin, "test", text);
+            support::did_open(stdin, "test", text).await;
 
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
 
-        text_document_definition(
-            stdin,
-            1,
-            "test",
-            Position {
-                line: 3,
-                character: 2,
-            },
-        );
+            text_document_definition(
+                stdin,
+                1,
+                "test",
+                Position {
+                    line: 3,
+                    character: 2,
+                },
+            )
+            .await;
 
-        let def: GotoDefinitionResponse = expect_response(stdout);
-        assert_eq!(
-            def,
-            GotoDefinitionResponse::Scalar(Location {
-                uri: test_url("test"),
-                range: Range {
-                    start: Position {
-                        line: 1,
-                        character: 4
-                    },
-                    end: Position {
-                        line: 1,
-                        character: 8
-                    },
-                }
-            })
-        );
+            let def: GotoDefinitionResponse = expect_response(stdout).await;
+            assert_eq!(
+                def,
+                GotoDefinitionResponse::Scalar(Location {
+                    uri: test_url("test"),
+                    range: Range {
+                        start: Position {
+                            line: 1,
+                            character: 4
+                        },
+                        end: Position {
+                            line: 1,
+                            character: 8
+                        },
+                    }
+                })
+            );
+        })
     });
 }
 
 #[test]
 fn goto_definition_of_type() {
     support::send_rpc(|stdin, stdout| {
-        let text = r#"
+        Box::pin(async move {
+            let text = r#"
 type Test = Int
 let test2 : Test = 1
 test
 "#;
-        support::did_open(stdin, "test", text);
+            support::did_open(stdin, "test", text).await;
 
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
 
-        text_document_definition(
-            stdin,
-            1,
-            "test",
-            Position {
-                line: 2,
-                character: 14,
-            },
-        );
+            text_document_definition(
+                stdin,
+                1,
+                "test",
+                Position {
+                    line: 2,
+                    character: 14,
+                },
+            )
+            .await;
 
-        let def: GotoDefinitionResponse = expect_response(stdout);
-        assert_eq!(
-            def,
-            GotoDefinitionResponse::Scalar(Location {
-                uri: test_url("test"),
-                range: Range {
-                    start: Position {
-                        line: 1,
-                        character: 5
-                    },
-                    end: Position {
-                        line: 1,
-                        character: 9
-                    },
-                }
-            })
-        );
+            let def: GotoDefinitionResponse = expect_response(stdout).await;
+            assert_eq!(
+                def,
+                GotoDefinitionResponse::Scalar(Location {
+                    uri: test_url("test"),
+                    range: Range {
+                        start: Position {
+                            line: 1,
+                            character: 5
+                        },
+                        end: Position {
+                            line: 1,
+                            character: 9
+                        },
+                    }
+                })
+            );
+        })
     });
 }

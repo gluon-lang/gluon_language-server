@@ -4,15 +4,15 @@ extern crate pretty_assertions;
 #[allow(unused)]
 mod support;
 
-use std::io::Write;
+use tokio_02::io::AsyncWrite;
 
 use languageserver_types::*;
 
 use crate::support::{did_change_event, expect_notification, expect_response, hover};
 
-fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
+async fn format<W: ?Sized>(stdin: &mut W, id: u64, uri: &str)
 where
-    W: Write,
+    W: AsyncWrite + std::marker::Unpin,
 {
     let hover = support::method_call(
         "textDocument/formatting",
@@ -29,7 +29,7 @@ where
         },
     );
 
-    support::write_message(stdin, hover).unwrap();
+    support::write_message(stdin, hover).await.unwrap();
 }
 
 #[test]
@@ -44,30 +44,32 @@ let x = 1
 x + 2
 "#;
     support::send_rpc(move |stdin, stdout| {
-        support::did_open(stdin, "test", text);
+        Box::pin(async move {
+            support::did_open(stdin, "test", text).await;
 
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
 
-        format(stdin, 2, "test");
+            format(stdin, 2, "test").await;
 
-        let edits: Vec<TextEdit> = expect_response(stdout);
+            let edits: Vec<TextEdit> = expect_response(stdout).await;
 
-        assert_eq!(
-            edits,
-            vec![TextEdit {
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
+            assert_eq!(
+                edits,
+                vec![TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 4,
+                            character: 0,
+                        },
                     },
-                    end: Position {
-                        line: 4,
-                        character: 0,
-                    },
-                },
-                new_text: expected.to_string(),
-            }]
-        );
+                    new_text: expected.to_string(),
+                }]
+            );
+        })
     });
 }
 
@@ -78,42 +80,45 @@ let x = 1
 x + "abc"
 "#;
     support::send_rpc(move |stdin, stdout| {
-        // Insert a dummy file so that test is not the first file
-        support::did_open(stdin, "dummy", r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#);
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
-        support::did_open(stdin, "test", text);
+        Box::pin(async move {
+            // Insert a dummy file so that test is not the first file
+            support::did_open(stdin, "dummy", r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#).await;
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
+            support::did_open(stdin, "test", text).await;
 
-        let _: PublishDiagnosticsParams = expect_notification(&mut *stdout);
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
 
-        // Since nothing changed we don't update the version
-        did_change_event(stdin, "test", 1, vec![]);
+            // Since nothing changed we don't update the version
+            did_change_event(stdin, "test", 1, vec![]).await;
 
-        hover(
-            stdin,
-            4,
-            "test",
-            Position {
-                line: 2,
-                character: 7,
-            },
-        );
-        let hover: Hover = expect_response(&mut *stdout);
+            hover(
+                stdin,
+                4,
+                "test",
+                Position {
+                    line: 2,
+                    character: 7,
+                },
+            )
+            .await;
+            let hover: Hover = expect_response(&mut *stdout).await;
 
-        assert_eq!(
-            hover,
-            Hover {
-                contents: HoverContents::Scalar(MarkedString::String("String".into())),
-                range: Some(Range {
-                    start: Position {
-                        line: 2,
-                        character: 4,
-                    },
-                    end: Position {
-                        line: 2,
-                        character: 9,
-                    },
-                }),
-            }
-        );
+            assert_eq!(
+                hover,
+                Hover {
+                    contents: HoverContents::Scalar(MarkedString::String("String".into())),
+                    range: Some(Range {
+                        start: Position {
+                            line: 2,
+                            character: 4,
+                        },
+                        end: Position {
+                            line: 2,
+                            character: 9,
+                        },
+                    }),
+                }
+            );
+        })
     });
 }
