@@ -29,7 +29,8 @@ use bytes::{
 
 use tokio_util::codec::{Decoder, Encoder};
 
-use futures_01::{self, sync::mpsc, Async, Future, IntoFuture, Poll, Sink, StartSend, Stream};
+use futures::{compat::*, prelude::*, Future};
+use futures_01::{self, sync::mpsc, Async, Poll, Sink, StartSend, Stream};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
@@ -62,7 +63,7 @@ pub trait LanguageServerCommand<P>: Send + Sync + 'static
 where
     Self::Future: Send + 'static,
 {
-    type Future: IntoFuture<Item = Self::Output, Error = ServerError<Self::Error>> + Send + 'static;
+    type Future: Future<Output = Result<Self::Output, ServerError<Self::Error>>> + Send + 'static;
     type Output: serde::Serialize;
     type Error: serde::Serialize;
     fn execute(&self, param: P) -> Self::Future;
@@ -75,8 +76,7 @@ where
 impl<'de, F, R, P, O, E> LanguageServerCommand<P> for F
 where
     F: Fn(P) -> R + Send + Sync + 'static,
-    R: IntoFuture<Item = O, Error = ServerError<E>> + Send + 'static,
-    R::Future: Send + 'static,
+    R: Future<Output = Result<O, ServerError<E>>> + Send + 'static,
     P: serde::Deserialize<'de>,
     O: serde::Serialize,
     E: serde::Serialize,
@@ -109,7 +109,6 @@ impl<T, P> ServerCommand<T, P> {
     pub fn method(command: T) -> ServerCommand<T, P>
     where
         T: LanguageServerCommand<P>,
-        <T::Future as IntoFuture>::Future: Send + 'static,
         P: for<'de> serde::Deserialize<'de> + 'static,
     {
         ServerCommand(command, PhantomData)
@@ -127,11 +126,10 @@ impl<T, P> ServerCommand<T, P> {
 impl<P, T> RpcMethodSimple for ServerCommand<T, P>
 where
     T: LanguageServerCommand<P>,
-    <T::Future as IntoFuture>::Future: Send + 'static,
     P: for<'de> serde::Deserialize<'de> + 'static,
 {
-    type Out = BoxFuture<Value, Error>;
-    fn call(&self, param: Params) -> BoxFuture<Value, Error> {
+    type Out = futures::compat::Compat<BoxFuture<Value, Error>>;
+    fn call(&self, param: Params) -> Self::Out {
         let value = match param {
             Params::Map(map) => Value::Object(map),
             Params::Array(arr) => Value::Array(arr),
@@ -139,11 +137,12 @@ where
         };
         let err = match from_value(value) {
             Ok(value) => {
-                return Box::new(self.0.execute(value).into_future().then(|result| {
-                    match result {
+                return self
+                    .0
+                    .execute(value)
+                    .map(|result| match result {
                         Ok(value) => {
                             Ok(to_value(&value).expect("result data could not be serialized"))
-                                .into_future()
                         }
                         Err(error) => Err(Error {
                             code: ErrorCode::InternalError,
@@ -152,21 +151,23 @@ where
                                 .data
                                 .as_ref()
                                 .map(|v| to_value(v).expect("error data could not be serialized")),
-                        })
-                        .into_future(),
-                    }
-                }))
+                        }),
+                    })
+                    .boxed()
+                    .compat()
             }
             Err(err) => err,
         };
         let data = self.0.invalid_params();
-        Box::new(futures_01::failed(Error {
+        futures::future::err(Error {
             code: ErrorCode::InvalidParams,
             message: format!("Invalid params: {}", err),
             data: data
                 .as_ref()
                 .map(|v| to_value(v).expect("error data could not be serialized")),
-        }))
+        })
+        .boxed()
+        .compat()
     }
 }
 
@@ -188,36 +189,29 @@ where
     }
 }
 
-pub(crate) fn log_message(
-    sender: mpsc::Sender<String>,
-    message: String,
-) -> impl Future<Item = (), Error = ()> {
+pub(crate) async fn log_message(sender: mpsc::Sender<String>, message: String) {
     debug!("{}", message);
     send_response(
         sender,
         notification!("window/logMessage"),
         LogMessageParams {
             typ: MessageType::Log,
-            message: message,
+            message,
         },
     )
+    .await
 }
 
 macro_rules! log_message {
-    ($sender: expr, $($ts: tt)+) => {
+    ($sender: expr, $($ts: tt)+) => { async {
         if log_enabled!(::log::Level::Debug) {
-            $crate::Either::A(crate::rpc::log_message($sender, format!( $($ts)+ )))
-        } else {
-            $crate::Either::B(Ok(()).into_future())
+            let msg = format!( $($ts)+ );
+            crate::rpc::log_message($sender, msg).await
         }
-    }
+    } }
 }
 
-pub fn send_response<T>(
-    sender: mpsc::Sender<String>,
-    _: Option<T>,
-    value: T::Params,
-) -> impl Future<Item = (), Error = ()>
+pub async fn send_response<T>(sender: mpsc::Sender<String>, _: Option<T>, value: T::Params)
 where
     T: notification::Notification,
     T::Params: serde::Serialize,
@@ -227,7 +221,7 @@ where
         T::METHOD,
         serde_json::to_value(value).unwrap()
     );
-    sender.send(r).map(|_| ()).map_err(|_| ())
+    let _ = sender.send(r).compat().await;
 }
 
 pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>

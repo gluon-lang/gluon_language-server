@@ -1,10 +1,8 @@
 use std::fmt;
 
-use futures_01::{future::Either, prelude::*};
-
+use crate::completion::{CompletionSymbol, CompletionSymbolContent};
 use crate::either;
 
-use crate::completion::{CompletionSymbol, CompletionSymbolContent};
 use gluon::{
     self,
     base::{
@@ -19,18 +17,16 @@ use gluon::{
     RootedThread, Thread, ThreadExt,
 };
 
-use jsonrpc_core::IoHandler;
-
-use codespan;
-
-use url::Url;
-
-use languageserver_types::{
-    CompletionItemKind, DocumentSymbol, Documentation, Location, MarkupContent, MarkupKind,
-    Position, SymbolInformation, SymbolKind,
+use {
+    codespan_lsp::{byte_span_to_range, position_to_byte_index},
+    futures::prelude::*,
+    jsonrpc_core::IoHandler,
+    languageserver_types::{
+        CompletionItemKind, DocumentSymbol, Documentation, Location, MarkupContent, MarkupKind,
+        Position, SymbolInformation, SymbolKind,
+    },
+    url::Url,
 };
-
-use codespan_lsp::{byte_span_to_range, position_to_byte_index};
 
 use crate::{
     check_importer::{CheckImporter, Module},
@@ -93,7 +89,7 @@ where
     })
 }
 
-fn completion_symbol_kind(symbol: &CompletionSymbol<'_>) -> SymbolKind {
+fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
         CompletionSymbolContent::Type { .. } => SymbolKind::Class,
         CompletionSymbolContent::Value { typ, expr } => expr_to_kind(expr, typ),
@@ -102,7 +98,7 @@ fn completion_symbol_kind(symbol: &CompletionSymbol<'_>) -> SymbolKind {
 
 fn completion_symbol_to_document_symbol(
     source: &codespan::FileMap,
-    symbol: &Spanned<CompletionSymbol<'_>, BytePos>,
+    symbol: &Spanned<CompletionSymbol<'_, '_>, BytePos>,
 ) -> Result<DocumentSymbol, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);
     let range = byte_span_to_range(source, symbol.span)?;
@@ -133,7 +129,7 @@ fn completion_symbol_to_document_symbol(
 
 fn completion_symbol_to_symbol_information(
     source: &codespan::FileMap,
-    symbol: Spanned<CompletionSymbol<'_>, BytePos>,
+    symbol: Spanned<CompletionSymbol<'_, '_>, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);
@@ -160,7 +156,7 @@ fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
 fn type_to_kind(typ: &ArcType) -> SymbolKind {
     match **typ {
         _ if typ.as_function().is_some() => SymbolKind::Function,
-        Type::Ident(ref id) if id.declared_name() == "Bool" => SymbolKind::Boolean,
+        Type::Ident(ref id) if id.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Builtin(builtin) => match builtin {
             BuiltinType::Char | BuiltinType::String => SymbolKind::String,
@@ -172,60 +168,27 @@ fn type_to_kind(typ: &ArcType) -> SymbolKind {
     }
 }
 
-fn retrieve_expr_future<'a, 'b, F, Q, R>(
-    thread: &'a Thread,
-    text_document_uri: &'b Url,
+async fn retrieve_expr<F, R>(
+    thread: &Thread,
+    text_document_uri: &Url,
     f: F,
-) -> impl Future<Item = R, Error = ServerError<()>> + 'static
-where
-    F: FnOnce(&Module) -> Q,
-    Q: IntoFuture<Item = R, Error = ServerError<()>>,
-    Q::Future: Send + 'static,
-    R: Send + 'static,
-{
-    let filename = strip_file_prefix_with_thread(thread, text_document_uri);
-    let module = filename_to_module(&filename);
-    let import = thread.get_macros().get("import").expect("Import macro");
-    let import = import
-        .downcast_ref::<Import<CheckImporter>>()
-        .expect("Check importer");
-    match import.importer.module(thread, &module) {
-        Some(ref source_module) => return Either::A(f(source_module).into_future()),
-        None => (),
-    }
-    Either::B(
-        Err(ServerError {
-            message: {
-                let m = import.importer.0.lock().unwrap();
-                format!(
-                    "Module `{}` is not defined\n{:?}",
-                    module,
-                    m.keys().collect::<Vec<_>>()
-                )
-            },
-            data: None,
-        })
-        .into_future(),
-    )
-}
-
-fn retrieve_expr<F, R>(thread: &Thread, text_document_uri: &Url, f: F) -> Result<R, ServerError<()>>
+) -> Result<R, ServerError<()>>
 where
     F: FnOnce(&Module) -> Result<R, ServerError<()>>,
 {
-    let filename = strip_file_prefix_with_thread(thread, text_document_uri);
+    let filename = strip_file_prefix_with_thread(&thread, &text_document_uri);
     let module = filename_to_module(&filename);
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    match import.importer.module(thread, &module) {
+    match import.importer.module(&thread, &module).await {
         Some(ref source_module) => return f(source_module),
         None => (),
     }
     Err(ServerError {
         message: {
-            let m = import.importer.0.lock().unwrap();
+            let m = import.importer.0.lock().await;
             format!(
                 "Module `{}` is not defined\n{:?}",
                 module,
@@ -236,7 +199,7 @@ where
     })
 }
 
-fn retrieve_expr_with_pos<F, R>(
+async fn retrieve_expr_with_pos<F, R>(
     thread: &Thread,
     text_document_uri: &Url,
     position: &Position,
@@ -245,9 +208,10 @@ fn retrieve_expr_with_pos<F, R>(
 where
     F: FnOnce(&Module, BytePos) -> Result<R, ServerError<()>>,
 {
-    retrieve_expr(thread, text_document_uri, |module| {
+    retrieve_expr(thread, text_document_uri, move |module| {
         let byte_index = position_to_byte_index(&module.source, position)?;
 
         f(module, byte_index)
     })
+    .await
 }

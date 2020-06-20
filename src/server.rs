@@ -31,7 +31,6 @@ pub trait Handler {
     where
         T: ::languageserver_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
-        <U::Future as IntoFuture>::Future: Send + 'static,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize;
     fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
@@ -46,7 +45,6 @@ impl Handler for IoHandler {
     where
         T: ::languageserver_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
-        <U::Future as IntoFuture>::Future: Send + 'static,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize,
     {
@@ -102,8 +100,10 @@ impl Server {
                 let import = import.downcast_ref::<Import>().expect("Importer");
                 check_import.paths = RwLock::new((*import.paths.read().unwrap()).clone());
 
-                let mut loaders = import.loaders.write().unwrap();
-                check_import.loaders = RwLock::new(loaders.drain().collect());
+                std::mem::swap(
+                    check_import.compiler.get_mut().unwrap(),
+                    &mut import.compiler.lock().unwrap(),
+                );
             }
             macros.insert("import".into(), check_import);
         }
@@ -191,7 +191,9 @@ impl Server {
         crate::command::formatting::register(&mut io, thread);
         crate::command::definition::register(&mut io, thread);
 
-        io.add_async_method(request!("shutdown"), |_| Ok::<(), ServerError<()>>(()));
+        io.add_async_method(request!("shutdown"), |_| async {
+            Ok::<(), ServerError<()>>(())
+        });
 
         let exit_sender = Mutex::new(Some(exit_sender));
         io.add_notification(notification!("exit"), move |_| {

@@ -25,7 +25,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         if let Some(ref path) = change.root_path {
             import.add_path(path);
         }
-        Box::new(
+        async move {
             Ok(InitializeResult {
                 capabilities: ServerCapabilities {
                     text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -47,8 +47,8 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     ..ServerCapabilities::default()
                 },
             })
-            .into_future(),
-        )
+        }
+        .boxed()
     }
 
     fn invalid_params(&self) -> Option<Self::Error> {

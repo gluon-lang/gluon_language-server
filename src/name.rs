@@ -50,12 +50,15 @@ pub(crate) fn filename_to_url(result: &Path) -> Result<Url, failure::Error> {
     })?)
 }
 
-pub(crate) fn module_name_to_file(importer: &CheckImporter, name: &codespan::FileName) -> Url {
+pub(crate) async fn module_name_to_file(
+    importer: &CheckImporter,
+    name: &codespan::FileName,
+) -> Url {
     let s = codspan_name_to_module(name);
     importer
         .0
         .lock()
-        .unwrap()
+        .await
         .get(&s)
         .map(|source| source.uri.clone())
         .unwrap_or_else(|| module_name_to_file_(&s).unwrap())

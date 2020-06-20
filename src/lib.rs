@@ -1,5 +1,3 @@
-use clap;
-
 #[macro_use]
 extern crate serde_derive;
 
@@ -9,24 +7,7 @@ extern crate log;
 #[macro_use]
 extern crate languageserver_types;
 
-use gluon;
 extern crate gluon_completion as completion;
-
-macro_rules! box_future {
-    ($e:expr) => {{
-        let fut: $crate::BoxFuture<_, _> = Box::new($e.into_future());
-        fut
-    }};
-}
-
-macro_rules! try_future {
-    ($e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(err) => return box_future!(Err(err.into())),
-        }
-    };
-}
 
 #[macro_use]
 mod server;
@@ -41,11 +22,12 @@ mod text_edit;
 
 use gluon::{either, new_vm};
 
-use futures_01::{future::Either, prelude::*};
+use futures_01::prelude::*;
 
 pub use crate::{command::completion::CompletionData, server::Server};
 
-pub type BoxFuture<I, E> = Box<dyn Future<Item = I, Error = E> + Send + 'static>;
+pub type BoxFuture<I, E> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<I, E>> + Send + 'static>>;
 
 pub fn run() {
     ::env_logger::init();

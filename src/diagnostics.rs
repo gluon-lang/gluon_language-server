@@ -11,23 +11,13 @@ use gluon::{
     Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 
-use futures_01::{
-    future::{self, Either},
-    prelude::*,
-    stream,
-    sync::mpsc,
+use {
+    futures::{compat::*, prelude::*},
+    futures_01::{sync::mpsc, Future, Sink},
+    jsonrpc_core::IoHandler,
+    languageserver_types::*,
+    url::Url,
 };
-
-use tokio;
-
-use codespan;
-use codespan_lsp;
-
-use url::Url;
-
-use jsonrpc_core::IoHandler;
-
-use languageserver_types::*;
 
 use crate::{
     cancelable,
@@ -39,10 +29,18 @@ use crate::{
     rpc::{self, send_response, Entry, ServerError},
     server::{Handler, ShutdownReceiver},
     text_edit::TextChanges,
-    BoxFuture,
 };
 
-fn create_diagnostics(
+fn create_diagnostics<'a>(
+    diagnostics: &'a mut BTreeMap<Url, Vec<Diagnostic>>,
+    code_map: &'a codespan::CodeMap,
+    importer: &'a CheckImporter,
+    filename: &'a Url,
+    err: &'a GluonError,
+) -> futures::future::BoxFuture<'a, Result<(), ServerError<()>>> {
+    create_diagnostics_(diagnostics, code_map, importer, filename, err).boxed()
+}
+async fn create_diagnostics_(
     diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
     code_map: &codespan::CodeMap,
     importer: &CheckImporter,
@@ -67,7 +65,7 @@ fn create_diagnostics(
         })
     }
 
-    fn insert_in_file_error<T>(
+    async fn insert_in_file_error<T>(
         diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
         code_map: &codespan::CodeMap,
         importer: &CheckImporter,
@@ -77,7 +75,7 @@ fn create_diagnostics(
         T: fmt::Display + AsDiagnostic,
     {
         let errors = diagnostics
-            .entry(module_name_to_file(importer, &in_file_error.source_name()))
+            .entry(module_name_to_file(importer, &in_file_error.source_name()).await)
             .or_default();
         for err in in_file_error.errors() {
             errors.push(into_diagnostic(code_map, &err)?);
@@ -86,15 +84,21 @@ fn create_diagnostics(
     }
 
     match err {
-        GluonError::Typecheck(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
+        GluonError::Typecheck(err) => {
+            insert_in_file_error(diagnostics, code_map, importer, err).await?
+        }
 
-        GluonError::Parse(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
+        GluonError::Parse(err) => {
+            insert_in_file_error(diagnostics, code_map, importer, err).await?
+        }
 
-        GluonError::Macro(err) => insert_in_file_error(diagnostics, code_map, importer, err)?,
+        GluonError::Macro(err) => {
+            insert_in_file_error(diagnostics, code_map, importer, err).await?
+        }
 
         GluonError::Multiple(errors) => {
             for err in errors {
-                create_diagnostics(diagnostics, code_map, importer, filename, err)?;
+                create_diagnostics(diagnostics, code_map, importer, filename, err).await?;
             }
         }
 
@@ -124,12 +128,12 @@ impl DiagnosticsWorker {
         }
     }
 
-    pub fn run_diagnostics(
+    pub async fn run_diagnostics(
         &mut self,
         uri_filename: &Url,
         version: Option<u64>,
         fileinput: &str,
-    ) -> BoxFuture<(), ()> {
+    ) {
         info!("Running diagnostics on {}", uri_filename);
 
         let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
@@ -137,7 +141,7 @@ impl DiagnosticsWorker {
 
         self.thread.get_database().update_filemap(&name, fileinput);
 
-        let diagnostics = match self.typecheck(uri_filename, &name, version) {
+        let diagnostics = match self.typecheck(uri_filename, &name, version).await {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
             Err(err) => {
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
@@ -158,32 +162,32 @@ impl DiagnosticsWorker {
                     &import.importer,
                     uri_filename,
                     &err,
-                );
+                )
+                .await;
                 if let Err(err) = result {
                     error!("Unable to create diagnostics: {}", err.message);
-                    return Box::new(Err(()).into_future());
+                    return;
                 }
                 diagnostics
             }
         };
 
         let message_log = self.message_log.clone();
-        Box::new(
-            stream::futures_ordered(diagnostics.into_iter().map(|(source_name, diagnostic)| {
-                send_response(
-                    message_log.clone(),
-                    notification!("textDocument/publishDiagnostics"),
-                    PublishDiagnosticsParams {
-                        uri: source_name,
-                        diagnostics: diagnostic,
-                    },
-                )
-            }))
-            .for_each(|_| Ok(())),
-        )
+
+        for (source_name, diagnostic) in diagnostics {
+            send_response(
+                message_log.clone(),
+                notification!("textDocument/publishDiagnostics"),
+                PublishDiagnosticsParams {
+                    uri: source_name,
+                    diagnostics: diagnostic,
+                },
+            )
+            .await;
+        }
     }
 
-    fn typecheck(
+    async fn typecheck(
         &mut self,
         uri_filename: &Url,
         name: &str,
@@ -192,7 +196,8 @@ impl DiagnosticsWorker {
         let result = self
             .thread
             .get_database()
-            .typechecked_module(name.into(), None)
+            .typechecked_source_module(name.into(), None)
+            .await
             .map_err(|(_, err)| err);
 
         let import = self
@@ -203,7 +208,7 @@ impl DiagnosticsWorker {
         let import = import
             .downcast_ref::<Import<CheckImporter>>()
             .expect("Check importer");
-        let mut importer = import.importer.0.lock().unwrap();
+        let mut importer = import.importer.0.lock().await;
 
         match importer.entry(name.into()) {
             hash_map::Entry::Occupied(mut entry) => {
@@ -241,15 +246,19 @@ pub fn register(
 
         tokio::spawn(cancelable(
             shutdown,
-            future::lazy(move || {
-                diagnostic_stream.for_each(move |entry: Entry<Url, String, _>| {
-                    diagnostics_runner.run_diagnostics(
-                        &entry.key,
-                        Some(entry.version),
-                        &entry.value,
-                    )
-                })
-            }),
+            async move {
+                let diagnostic_stream = diagnostic_stream.compat();
+                futures::pin_mut!(diagnostic_stream);
+                while let Some(entry) = diagnostic_stream.next().await {
+                    let entry: Entry<Url, String, _> = entry.unwrap();
+                    diagnostics_runner
+                        .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
+                        .await;
+                }
+                Ok(())
+            }
+            .boxed()
+            .compat(),
         ));
 
         diagnostic_sink
@@ -286,13 +295,12 @@ pub fn register(
         io.add_notification(notification!("textDocument/didSave"), f);
     }
 
-    fn did_change<S>(
+    async fn did_change<S>(
         thread: &Thread,
         message_log: mpsc::Sender<String>,
         work_queue: S,
         change: DidChangeTextDocumentParams,
-    ) -> impl Future<Item = (), Error = ()> + Send + 'static
-    where
+    ) where
         S: Sink<SinkItem = Entry<Url, String, u64>, SinkError = ()> + Send + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
@@ -300,10 +308,12 @@ pub fn register(
         let import = import
             .downcast_ref::<Import<CheckImporter>>()
             .expect("Check importer");
-        let mut modules = import.importer.0.lock().unwrap();
-        let paths = import.paths.read().unwrap();
-        let module_name = strip_file_prefix(&paths, &change.text_document.uri)
-            .unwrap_or_else(|err| panic!("{}", err));
+        let mut modules = import.importer.0.lock().await;
+        let module_name = {
+            let paths = import.paths.read().unwrap();
+            strip_file_prefix(&paths, &change.text_document.uri)
+                .unwrap_or_else(|err| panic!("{}", err))
+        };
         let module_name = filename_to_module(&module_name);
         let module_state = modules
             .entry(module_name.clone())
@@ -325,6 +335,7 @@ pub fn register(
         let result = {
             let mut source = module_state
                 .module(thread, &module_name)
+                .await
                 .map(|m| m.source.src().to_string())
                 .unwrap_or_default();
             debug!("Change source {}:\n{}", uri, source);
@@ -334,38 +345,35 @@ pub fn register(
                     .text_changes
                     .apply_changes(&mut source, current_version)
                 {
-                    Ok(version) if version == current_version => return Either::A(future::ok(())),
+                    Ok(version) if version == current_version => return,
                     Ok(version) => Ok((version, source)),
                     Err(err) => Err(err),
                 },
-                None => {
-                    return Either::A(future::ok(()));
-                }
+                None => return,
             }
         };
         match result {
             Ok((new_version, source)) => {
                 module_state.version = Some(new_version);
-                eprintln!("ADD 2 {}", module_name);
                 thread
                     .get_database_mut()
                     .add_module(module_name.into(), &source);
                 debug!("Changed to\n{}", source);
-                Either::B(Either::A(
-                    work_queue
-                        .send(Entry {
-                            key: uri,
-                            value: source,
-                            version: new_version,
-                        })
-                        .map(|_| ()),
-                ))
+                work_queue
+                    .send(Entry {
+                        key: uri,
+                        value: source,
+                        version: new_version,
+                    })
+                    .map(|_| ())
+                    .compat()
+                    .await
+                    .unwrap()
             }
-            Err(err) => Either::B(Either::B(
-                log_message!(message_log.clone(), "{}", err.message).then(|_| Err(())),
-            )),
+            Err(err) => log_message!(message_log.clone(), "{}", err.message).await,
         }
     }
+
     {
         let thread = thread.clone();
         let message_log = message_log.clone();
@@ -374,19 +382,18 @@ pub fn register(
             let work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
-            tokio::spawn({
-                let work_queue = work_queue.clone();
-                ::std::panic::AssertUnwindSafe(did_change(
+            tokio_02::spawn(async move {
+                if let Err(err) = ::std::panic::AssertUnwindSafe(did_change(
                     &thread,
                     message_log.clone(),
                     work_queue.clone().sink_map_err(|_| ()),
                     change,
                 ))
                 .catch_unwind()
-                .map_err(|err| {
+                .await
+                {
                     error!("{:?}", err);
-                })
-                .and_then(|result| result)
+                }
             });
         };
 

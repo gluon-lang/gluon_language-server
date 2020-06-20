@@ -1,28 +1,20 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use gluon::{
     self,
-    base::{
-        ast::{Expr, SpannedExpr},
-        fnv::FnvMap,
-        pos,
-        symbol::Symbol,
-        types::ArcType,
-    },
+    base::{ast::OwnedExpr, fnv::FnvMap, symbol::Symbol, types::ArcType},
     import::Importer,
     query::Compilation,
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
 };
 
-use codespan;
-
-use url::Url;
+use {futures::prelude::*, tokio_02::sync::Mutex, url::Url};
 
 use crate::{name::module_name_to_file_, text_edit::TextChanges};
 
 pub(crate) struct Module {
     pub source: Arc<codespan::FileMap>,
-    pub expr: Arc<SpannedExpr<Symbol>>,
+    pub expr: Arc<OwnedExpr<Symbol>>,
     pub uri: Url,
 }
 
@@ -30,7 +22,7 @@ impl Module {
     pub(crate) fn empty(uri: Url) -> Module {
         Module {
             source: Arc::new(codespan::FileMap::new("".into(), "".into())),
-            expr: Arc::new(pos::spanned2(0.into(), 0.into(), Expr::Error(None))),
+            expr: Default::default(),
             uri,
         }
     }
@@ -51,10 +43,11 @@ impl State {
         }
     }
 
-    pub(crate) fn module(&self, thread: &Thread, module: &str) -> gluon::Result<Module> {
-        let db = thread.get_database();
+    pub(crate) async fn module(&self, thread: &Thread, module: &str) -> gluon::Result<Module> {
+        let mut db = thread.get_database();
         let m = db
-            .typechecked_module(module.into(), None)
+            .typechecked_source_module(module.into(), None)
+            .await
             .or_else(|(partial_value, err)| partial_value.ok_or(err))?;
         Ok(Module {
             source: db.get_filemap(module).expect("Filemap"),
@@ -71,44 +64,43 @@ impl CheckImporter {
         CheckImporter(Arc::new(Mutex::new(FnvMap::default())))
     }
 
-    pub(crate) fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        self.0
-            .lock()
-            .unwrap()
-            .get(module)
-            .and_then(|s| s.module(thread, module).ok())
+    pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
+        let map = self.0.lock().await;
+        let s = map.get(module)?;
+        s.module(thread, module).await.ok()
     }
 
-    pub(crate) fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(module, s)| s.module(thread, module).ok())
+    pub(crate) async fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
+        let map = self.0.lock().await;
+
+        futures::stream::iter(map.iter())
+            .filter_map(|(module, s)| async move { s.module(thread, module).await.ok() })
             .collect::<Vec<_>>()
+            .await
             .into_iter()
     }
 }
+
+#[async_trait::async_trait]
 impl Importer for CheckImporter {
-    fn import(
+    async fn import(
         &self,
-        compiler: &mut ModuleCompiler,
-        vm: &Thread,
+        compiler: &mut ModuleCompiler<'_>,
+        _: &Thread,
         module_name: &str,
     ) -> Result<ArcType, (Option<ArcType>, GluonError)> {
-        let result = compiler
+        let typ = compiler
             .database
-            .typechecked_module(module_name.into(), None);
-
-        let value = result
-            .or_else(|(opt, err)| opt.ok_or_else(|| err))
+            .module_type(module_name.into(), None)
+            .await
             .map_err(|err| (None, err))?;
-        let expr = value.expr;
-        let typ = value.typ;
+        compiler
+            .database
+            .module_metadata(module_name.into(), None)
+            .await
+            .map_err(|err| (None, err))?;
 
-        let (metadata, _) = gluon::check::metadata::metadata(compiler.database, &expr);
-
-        self.0.lock().unwrap().insert(
+        self.0.lock().await.insert(
             module_name.into(),
             State {
                 uri: module_name_to_file_(module_name)
@@ -117,10 +109,6 @@ impl Importer for CheckImporter {
                 text_changes: TextChanges::new(),
             },
         );
-        // Insert a global to ensure the globals type can be looked up
-        vm.global_env()
-            .set_dummy_global(module_name, typ.clone(), (*metadata).clone())
-            .map_err(|err| (None, GluonError::from(err).into()))?;
 
         Ok(typ)
     }
