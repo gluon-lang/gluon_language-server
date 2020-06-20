@@ -12,32 +12,24 @@ use std::{
     },
 };
 
-use jsonrpc_core::{
-    id::Id,
-    params::Params,
-    request::{Call, MethodCall, Notification},
-    response::{Output, Response},
-    version::Version,
-};
-
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{from_str, from_value, ser::Serializer, to_value, Value};
-
 use {
-    futures::{compat::*, prelude::*, Future},
-    futures_01::{future, Poll, Stream},
-    tokio::prelude::task,
-    tokio_02::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader},
+    futures::{compat::*, prelude::*},
+    jsonrpc_core::{
+        id::Id,
+        params::Params,
+        request::{Call, MethodCall, Notification},
+        response::{Output, Response},
+        version::Version,
+    },
+    languageserver_types::*,
+    serde::{de::DeserializeOwned, Serialize},
+    serde_json::{from_str, from_value, ser::Serializer, to_value, Value},
+    tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader},
     tokio_util::codec::{Decoder, FramedRead},
+    url::Url,
 };
-
-use url::Url;
-
-use languageserver_types::*;
 
 use gluon_language_server::rpc::LanguageServerDecoder;
-
-use gluon::new_vm;
 
 pub fn test_url(uri: &str) -> Url {
     Url::from_file_path(&env::current_dir().unwrap().join(uri)).unwrap()
@@ -238,61 +230,46 @@ pub fn run_no_panic_catch<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    use std::sync::{Arc, Mutex};
-
-    let error_result = Arc::new(Mutex::new(None));
-    {
-        let error_result = error_result.clone();
-        tokio_compat::run_std(async move {
-            if let Err(err) = tokio_02::spawn(::std::panic::AssertUnwindSafe(fut).catch_unwind())
-                .await
-                .unwrap()
-            {
-                *error_result.lock().unwrap() = Some(err);
-            }
-        });
-    }
-
-    if let Some(err) = Arc::try_unwrap(error_result).unwrap().into_inner().unwrap() {
-        panic!(err)
-    }
+    tokio::runtime::Runtime::new().unwrap().block_on(fut)
 }
 
-fn start_local() -> (
-    Box<dyn AsyncWrite + Send + Unpin>,
-    Box<dyn AsyncBufRead + Send + Unpin>,
-) {
+struct ServerHandle {
+    stdin: Box<dyn AsyncWrite + Send + Unpin>,
+    stdout: Box<dyn AsyncBufRead + Send + Unpin>,
+}
+
+fn start_local() -> ServerHandle {
     let (mut stdin_write, stdin_read) = async_pipe::pipe();
     let (stdout_write, stdout_read) = async_pipe::pipe();
     let stdout_read = BufReader::new(stdout_read);
 
-    let thread = new_vm();
-    tokio_02::spawn(async {
+    tokio::spawn(async move {
+        let thread = gluon::new_vm_async().await;
         if let Err(err) =
             ::gluon_language_server::Server::start(thread, stdin_read, stdout_write).await
         {
             panic!("{}", err)
         }
     });
-    (Box::new(stdin_write), Box::new(stdout_read))
+    ServerHandle {
+        stdin: Box::new(stdin_write),
+        stdout: Box::new(stdout_read),
+    }
 }
 
-fn start_remote() -> (
-    Box<dyn AsyncWrite + Send + Unpin>,
-    Box<dyn AsyncBufRead + Send + Unpin>,
-) {
+fn start_remote() -> ServerHandle {
     use std::process::Stdio;
-    use tokio_02::process::Command;
+    use tokio::process::Command;
 
     let mut child = Command::new("target/debug/gluon_language-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    (
-        Box::new(child.stdin.expect("stdin")),
-        Box::new(BufReader::new(child.stdout.expect("stdout"))),
-    )
+    ServerHandle {
+        stdin: Box::new(child.stdin.expect("stdin")),
+        stdout: Box::new(BufReader::new(child.stdout.expect("stdout"))),
+    }
 }
 
 pub fn send_rpc<F>(f: F)
@@ -306,7 +283,10 @@ where
         + 'static,
 {
     run_no_panic_catch(async move {
-        let (mut stdin_write, mut stdout_read) = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
+        let ServerHandle {
+            mut stdin,
+            mut stdout,
+        } = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
             // FIXME Local  testing may deadlock atm
             start_local()
         } else {
@@ -314,21 +294,21 @@ where
         };
 
         {
-            f(&mut stdin_write, &mut stdout_read);
+            f(&mut stdin, &mut stdout);
 
-            write_message(&mut stdin_write, method_call("shutdown", 1_000_000, ()))
+            write_message(&mut stdin, method_call("shutdown", 1_000_000, ()))
                 .await
                 .unwrap();
 
-            let () = expect_response(&mut stdout_read).await;
+            let () = expect_response(&mut stdout).await;
 
             let exit = Call::Notification(Notification {
                 jsonrpc: Some(Version::V2),
                 method: "exit".into(),
                 params: Params::None,
             });
-            write_message(&mut stdin_write, exit).await.unwrap();
-            drop(stdin_write);
+            write_message(&mut stdin, exit).await.unwrap();
+            drop(stdin);
         }
     })
 }

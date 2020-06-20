@@ -4,7 +4,7 @@ extern crate pretty_assertions;
 #[allow(unused)]
 mod support;
 
-use tokio_02::io::AsyncWrite;
+use tokio::io::AsyncWrite;
 
 use languageserver_types::*;
 

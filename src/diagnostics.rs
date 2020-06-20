@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map, BTreeMap},
     fmt,
+    marker::Unpin,
 };
 
 use gluon::{
@@ -12,8 +13,7 @@ use gluon::{
 };
 
 use {
-    futures::{compat::*, prelude::*},
-    futures_01::{sync::mpsc, Future, Sink},
+    futures::{channel::mpsc, prelude::*},
     jsonrpc_core::IoHandler,
     languageserver_types::*,
     url::Url,
@@ -244,22 +244,15 @@ pub fn register(
 
         let mut diagnostics_runner = DiagnosticsWorker::new(thread.clone(), message_log.clone());
 
-        tokio::spawn(cancelable(
-            shutdown,
-            async move {
-                let diagnostic_stream = diagnostic_stream.compat();
-                futures::pin_mut!(diagnostic_stream);
-                while let Some(entry) = diagnostic_stream.next().await {
-                    let entry: Entry<Url, String, _> = entry.unwrap();
-                    diagnostics_runner
-                        .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
-                        .await;
-                }
-                Ok(())
+        tokio::spawn(cancelable(shutdown, async move {
+            futures::pin_mut!(diagnostic_stream);
+            while let Some(entry) = diagnostic_stream.next().await {
+                let entry: Entry<Url, String, _> = entry;
+                diagnostics_runner
+                    .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
+                    .await;
             }
-            .boxed()
-            .compat(),
-        ));
+        }));
 
         diagnostic_sink
     };
@@ -269,23 +262,22 @@ pub fn register(
         let thread = thread.clone();
 
         let f = move |change: DidOpenTextDocumentParams| {
-            let work_queue = work_queue.clone();
+            let mut work_queue = work_queue.clone();
             let thread = thread.clone();
-            tokio::spawn({
+            tokio::spawn(async move {
                 let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
                 let module = filename_to_module(&filename);
                 thread
                     .get_database_mut()
                     .add_module(module.into(), &change.text_document.text);
-                work_queue
+                let _ = work_queue
                     .send(Entry {
                         key: change.text_document.uri,
                         value: change.text_document.text,
 
                         version: change.text_document.version,
                     })
-                    .map(|_| ())
-                    .map_err(|_| ())
+                    .await;
             });
         };
         io.add_notification(notification!("textDocument/didOpen"), f);
@@ -298,10 +290,10 @@ pub fn register(
     async fn did_change<S>(
         thread: &Thread,
         message_log: mpsc::Sender<String>,
-        work_queue: S,
+        mut work_queue: S,
         change: DidChangeTextDocumentParams,
     ) where
-        S: Sink<SinkItem = Entry<Url, String, u64>, SinkError = ()> + Send + 'static,
+        S: Sink<Entry<Url, String, u64>, Error = ()> + Send + Unpin + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -365,8 +357,6 @@ pub fn register(
                         value: source,
                         version: new_version,
                     })
-                    .map(|_| ())
-                    .compat()
                     .await
                     .unwrap()
             }
@@ -382,7 +372,7 @@ pub fn register(
             let work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
-            tokio_02::spawn(async move {
+            tokio::spawn(async move {
                 if let Err(err) = ::std::panic::AssertUnwindSafe(did_change(
                     &thread,
                     message_log.clone(),

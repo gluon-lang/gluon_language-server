@@ -22,14 +22,13 @@ mod text_edit;
 
 use gluon::{either, new_vm};
 
-use futures_01::prelude::*;
+use futures::prelude::*;
 
 pub use crate::{command::completion::CompletionData, server::Server};
 
-pub type BoxFuture<I, E> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<I, E>> + Send + 'static>>;
+pub type BoxFuture<I, E> = std::pin::Pin<Box<dyn Future<Output = Result<I, E>> + Send + 'static>>;
 
-pub fn run() {
+pub async fn run() {
     ::env_logger::init();
 
     let _matches = clap::App::new("debugger")
@@ -38,26 +37,22 @@ pub fn run() {
 
     let thread = new_vm();
 
-    tokio_compat::run_std(async {
-        if let Err(err) = tokio_02::spawn(async {
-            Server::start(thread, tokio_02::io::stdin(), tokio_02::io::stdout()).await
-        })
-        .await
-        .unwrap()
-        {
-            panic!("{}", err)
-        }
+    if let Err(err) = tokio::spawn(async {
+        Server::start(thread, tokio::io::stdin(), tokio::io::stdout()).await
     })
+    .await
+    .unwrap()
+    {
+        panic!("{}", err)
+    }
 }
 
-fn cancelable<F, G>(f: F, g: G) -> impl Future<Item = (), Error = G::Error>
+async fn cancelable<F, G>(f: F, g: G)
 where
-    F: IntoFuture,
-    G: IntoFuture<Item = ()>,
+    F: Future<Output = ()>,
+    G: Future<Output = ()>,
 {
-    f.into_future()
-        .then(|_| Ok(()))
-        .select(g)
-        .map(|_| ())
-        .map_err(|err| err.0)
+    futures::pin_mut!(f);
+    futures::pin_mut!(g);
+    futures::future::select(f, g).await;
 }

@@ -5,7 +5,10 @@ use std::{
     fmt,
     io::{self, Write},
     marker::PhantomData,
+    marker::Unpin,
+    pin::Pin,
     str,
+    task::{self, Poll},
 };
 
 use failure;
@@ -29,8 +32,7 @@ use bytes::{
 
 use tokio_util::codec::{Decoder, Encoder};
 
-use futures::{compat::*, prelude::*, Future};
-use futures_01::{self, sync::mpsc, Async, Poll, Sink, StartSend, Stream};
+use futures::{channel::mpsc, prelude::*, Sink, Stream};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
@@ -211,7 +213,7 @@ macro_rules! log_message {
     } }
 }
 
-pub async fn send_response<T>(sender: mpsc::Sender<String>, _: Option<T>, value: T::Params)
+pub async fn send_response<T>(mut sender: mpsc::Sender<String>, _: Option<T>, value: T::Params)
 where
     T: notification::Notification,
     T::Params: serde::Serialize,
@@ -221,7 +223,7 @@ where
         T::METHOD,
         serde_json::to_value(value).unwrap()
     );
-    let _ = sender.send(r).compat().await;
+    let _ = sender.send(r).await;
 }
 
 pub fn write_message<W, T>(output: W, value: &T) -> io::Result<()>
@@ -391,14 +393,14 @@ impl<K, V, W> Stream for UniqueStream<K, V, W>
 where
     K: PartialEq,
     W: Ord,
+    Self: Unpin,
 {
     type Item = Entry<K, V, W>;
-    type Error = ();
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
         while !self.exhausted {
-            match self.receiver.poll()? {
-                Async::Ready(Some(item)) => {
+            match self.receiver.poll_next_unpin(cx) {
+                Poll::Ready(Some(item)) => {
                     if let Some(entry) = self.queue.iter_mut().find(|entry| entry.key == item.key) {
                         if entry.version < item.version {
                             *entry = item;
@@ -407,38 +409,50 @@ where
                     }
                     self.queue.push_back(item);
                 }
-                Async::Ready(None) => {
+                Poll::Ready(None) => {
                     self.exhausted = true;
                 }
-                Async::NotReady => break,
+                Poll::Pending => break,
             }
         }
         match self.queue.pop_front() {
-            Some(item) => Ok(Async::Ready(Some(item))),
+            Some(item) => Poll::Ready(Some(item)),
             None => {
                 if self.exhausted {
-                    Ok(Async::Ready(None))
+                    Poll::Ready(None)
                 } else {
-                    Ok(Async::NotReady)
+                    Poll::Pending
                 }
             }
         }
     }
 }
 
-impl<K, V, W> Sink for UniqueSink<K, V, W> {
-    type SinkItem = Entry<K, V, W>;
-    type SinkError = mpsc::SendError<Entry<K, V, W>>;
+impl<K, V, W> Sink<Entry<K, V, W>> for UniqueSink<K, V, W> {
+    type Error = mpsc::SendError;
 
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        self.sender.start_send(item)
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sender).poll_ready(cx)
     }
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        self.sender.poll_complete()
+    fn start_send(mut self: Pin<&mut Self>, item: Entry<K, V, W>) -> Result<(), Self::Error> {
+        Pin::new(&mut self.sender).start_send(item)
     }
 
-    fn close(&mut self) -> Poll<(), Self::SinkError> {
-        self.sender.close()
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sender).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.sender).poll_close(cx)
     }
 }

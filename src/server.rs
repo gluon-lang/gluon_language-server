@@ -2,17 +2,15 @@ use std::sync::{Mutex, RwLock};
 
 use gluon::{import::Import, RootedThread};
 
-use futures_01::{
-    future::{self, Either},
-    prelude::*,
-    sync::{mpsc, oneshot},
-};
-
-use tokio_02::io::BufReader;
+use tokio::io::BufReader;
 
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use futures::{compat::*, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    compat::*,
+    prelude::*,
+};
 
 use jsonrpc_core::{IoHandler, MetaIoHandler};
 
@@ -71,7 +69,7 @@ macro_rules! notification {
     };
 }
 
-pub type ShutdownReceiver = future::Shared<oneshot::Receiver<()>>;
+pub type ShutdownReceiver = future::Shared<futures::future::BoxFuture<'static, ()>>;
 
 pub struct Server {
     handlers: IoHandler,
@@ -87,8 +85,8 @@ impl Server {
         output: W,
     ) -> Result<(), failure::Error>
     where
-        R: tokio_02::io::AsyncRead + Send + 'static,
-        W: tokio_02::io::AsyncWrite + Send + 'static,
+        R: tokio::io::AsyncRead + Send + 'static,
+        W: tokio::io::AsyncWrite + Send + 'static,
     {
         let _ = ::env_logger::try_init();
 
@@ -121,33 +119,32 @@ impl Server {
         let request_handler_future = FramedRead::new(input, rpc::LanguageServerDecoder::new())
             .map_err(|err| panic!("{}", err))
             .try_for_each(move |json| {
-                let message_sender = message_sender.clone();
+                let mut message_sender = message_sender.clone();
                 async move {
                     debug!("Handle: {}", json);
                     handlers
                         .handle_request(&json)
-                        .then(move |result| {
+                        .compat()
+                        .then(move |result| async move {
                             if let Ok(Some(response)) = result {
                                 debug!("Response: {}", response);
-                                Either::A(
-                                    message_sender
-                                        .send(response)
-                                        .map(|_| ())
-                                        .map_err(|_| failure::err_msg("Unable to send")),
-                                )
+                                message_sender
+                                    .send(response)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|_| failure::err_msg("Unable to send"))
                             } else {
-                                Either::B(Ok(()).into_future())
+                                Ok(())
                             }
                         })
-                        .compat()
                         .await
                 }
             });
 
-        tokio_02::spawn(
+        tokio::spawn(
             message_receiver
-                .compat()
-                .map_err(|_| failure::err_msg("Unable to log message"))
+                .map(Ok)
+                .map_err(|()| unreachable!())
                 .forward(FramedWrite::new(output, LanguageServerEncoder))
                 .map(|result| {
                     if let Err(err) = result {
@@ -158,24 +155,19 @@ impl Server {
 
         cancelable(
             shutdown,
-            request_handler_future
-                .map_err(|t: failure::Error| panic!("{}", t))
-                .boxed()
-                .compat(),
+            request_handler_future.unwrap_or_else(|t: failure::Error| panic!("{}", t)),
         )
-        .map(|t| {
-            info!("Server shutdown");
-            t
-        })
-        .compat()
-        .await
+        .await;
+        info!("Server shutdown");
+
+        Ok(())
     }
 
     fn initialize(thread: &RootedThread) -> Server {
         let (message_log, message_log_receiver) = mpsc::channel(1);
 
         let (exit_sender, exit_receiver) = oneshot::channel();
-        let exit_receiver = exit_receiver.shared();
+        let exit_receiver = exit_receiver.map(|_| ()).boxed().shared();
 
         let mut io = IoHandler::new();
 

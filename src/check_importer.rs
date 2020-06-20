@@ -8,7 +8,7 @@ use gluon::{
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
 };
 
-use {futures::prelude::*, tokio_02::sync::Mutex, url::Url};
+use {futures::prelude::*, tokio::sync::Mutex, url::Url};
 
 use crate::{name::module_name_to_file_, text_edit::TextChanges};
 

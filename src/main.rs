@@ -1,5 +1,6 @@
 use gluon_language_server;
 
-fn main() {
-    gluon_language_server::run();
+#[tokio::main]
+async fn main() {
+    gluon_language_server::run().await;
 }

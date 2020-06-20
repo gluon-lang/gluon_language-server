@@ -5,7 +5,7 @@ use serde_json;
 
 mod support;
 
-use tokio_02::io::AsyncWrite;
+use tokio::io::AsyncWrite;
 
 use url::Url;
 
