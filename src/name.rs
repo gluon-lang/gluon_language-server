@@ -9,11 +9,12 @@ use gluon::{base::filename_to_module, import::Import, Thread};
 
 use crate::check_importer::CheckImporter;
 
-use codespan;
-use failure;
-use url::{self, Url};
+use {
+    anyhow::anyhow,
+    url::{self, Url},
+};
 
-pub(crate) fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, failure::Error> {
+pub(crate) fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, anyhow::Error> {
     match *name {
         codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
         codespan::FileName::Real(ref p) => filename_to_url(p),
@@ -27,26 +28,24 @@ fn codspan_name_to_module(name: &codespan::FileName) -> String {
     }
 }
 
-pub(crate) fn module_name_to_file_(s: &str) -> Result<Url, failure::Error> {
+pub(crate) fn module_name_to_file_(s: &str) -> Result<Url, anyhow::Error> {
     let mut result = s.replace(".", "/");
     result.push_str(".glu");
     Ok(filename_to_url(Path::new(&result))
         .or_else(|_| url::Url::from_file_path(s))
-        .map_err(|_| {
-            failure::err_msg(format!("Unable to convert module name to a url: `{}`", s))
-        })?)
+        .map_err(|_| anyhow!("Unable to convert module name to a url: `{}`", s))?)
 }
 
-pub(crate) fn filename_to_url(result: &Path) -> Result<Url, failure::Error> {
+pub(crate) fn filename_to_url(result: &Path) -> Result<Url, anyhow::Error> {
     let path = fs::canonicalize(&*result).or_else(|err| match env::current_dir() {
         Ok(path) => Ok(path.join(result)),
         Err(_) => Err(err),
     })?;
     Ok(url::Url::from_file_path(path).map_err(|_| {
-        failure::err_msg(format!(
+        anyhow!(
             "Unable to convert module name to a url: `{}`",
             result.display()
-        ))
+        )
     })?)
 }
 
@@ -82,10 +81,10 @@ pub(crate) fn strip_file_prefix_with_thread(thread: &Thread, url: &Url) -> Strin
     })
 }
 
-pub(crate) fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, failure::Error> {
+pub(crate) fn strip_file_prefix(paths: &[PathBuf], url: &Url) -> Result<String, anyhow::Error> {
     let path = url
         .to_file_path()
-        .map_err(|_| failure::err_msg("Expected a file uri"))?;
+        .map_err(|_| anyhow!("Expected a file uri"))?;
     let name = match fs::canonicalize(&*path) {
         Ok(name) => name,
         Err(_) => env::current_dir()?.join(&*path),

@@ -16,7 +16,7 @@ use jsonrpc_core::{IoHandler, MetaIoHandler};
 
 use serde;
 
-use failure;
+use anyhow::anyhow;
 
 use crate::{
     cancelable,
@@ -79,11 +79,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn start<R, W>(
-        thread: RootedThread,
-        input: R,
-        output: W,
-    ) -> Result<(), failure::Error>
+    pub async fn start<R, W>(thread: RootedThread, input: R, output: W) -> Result<(), anyhow::Error>
     where
         R: tokio::io::AsyncRead + Send + 'static,
         W: tokio::io::AsyncWrite + Send + 'static,
@@ -132,7 +128,7 @@ impl Server {
                                     .send(response)
                                     .await
                                     .map(|_| ())
-                                    .map_err(|_| failure::err_msg("Unable to send"))
+                                    .map_err(|_| anyhow!("Unable to send"))
                             } else {
                                 Ok(())
                             }
@@ -155,7 +151,7 @@ impl Server {
 
         cancelable(
             shutdown,
-            request_handler_future.unwrap_or_else(|t: failure::Error| panic!("{}", t)),
+            request_handler_future.unwrap_or_else(|t: anyhow::Error| panic!("{}", t)),
         )
         .await;
         info!("Server shutdown");

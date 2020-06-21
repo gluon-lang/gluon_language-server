@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bb70cc08ec97ca5450e6eba421deeea5f172c0fc61f78b5357b2a8e8be195f"
+
+[[package]]
 name = "anymap"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,9 +579,9 @@ dependencies = [
 
 [[package]]
 name = "env_logger"
-version = "0.6.2"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aafcde04e90a5226a6443b7aabdb016ba2f8307c847d524724bd9b346dd1a2d3"
+checksum = "44533bbbb3bb3c1fa17d9f2e4e38bbbaf8396ba82193c4cb1b6445d711445d36"
 dependencies = [
  "atty",
  "humantime",
@@ -974,6 +980,7 @@ dependencies = [
 name = "gluon_language-server"
 version = "0.15.1-alpha.0"
 dependencies = [
+ "anyhow",
  "async-pipe",
  "async-trait",
  "bytes 0.5.5",
@@ -983,8 +990,7 @@ dependencies = [
  "codespan-reporting",
  "combine",
  "debugserver-types",
- "env_logger 0.6.2",
- "failure",
+ "env_logger 0.7.1",
  "futures 0.3.5",
  "gluon",
  "gluon_completion",

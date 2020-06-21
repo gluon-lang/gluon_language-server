@@ -13,9 +13,9 @@ edition = "2018"
 clap = "2.19.0"
 
 log = "0.4.0"
-env_logger = "0.6.0"
+env_logger = "0.7.0"
 
-failure = "0.1"
+anyhow = "1"
 
 codespan = "0.3"
 codespan-lsp = "0.3"

@@ -11,7 +11,7 @@ use std::{
     task::{self, Poll},
 };
 
-use failure;
+use anyhow::anyhow;
 
 use self::combine::{
     combinator::{any_send_partial_state, AnySendPartialState},
@@ -300,7 +300,7 @@ where
 
 impl Decoder for LanguageServerDecoder {
     type Item = String;
-    type Error = failure::Error;
+    type Error = anyhow::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let (opt, removed_len) = combine::stream::decode(
@@ -316,11 +316,7 @@ impl Decoder for LanguageServerDecoder {
                         .map_or_else(|| format!("{:?}", r), |s| s.to_string())
                 })
                 .map_position(|p| p.translate_position(&src[..]));
-            failure::err_msg(format!(
-                "{}\nIn input: `{}`",
-                err,
-                str::from_utf8(src).unwrap()
-            ))
+            anyhow!("{}\nIn input: `{}`", err, str::from_utf8(src).unwrap())
         })?;
 
         src.advance(removed_len);
@@ -340,7 +336,7 @@ impl Decoder for LanguageServerDecoder {
 pub struct LanguageServerEncoder;
 
 impl Encoder<String> for LanguageServerEncoder {
-    type Error = failure::Error;
+    type Error = anyhow::Error;
     fn encode(&mut self, item: String, dst: &mut BytesMut) -> Result<(), Self::Error> {
         dst.reserve(item.len() + 60); // Ensure Content-Length fits
         write_message_str(dst.writer(), &item)?;
