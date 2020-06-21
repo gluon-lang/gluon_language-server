@@ -1,5 +1,3 @@
-use combine;
-
 use std::{
     collections::VecDeque,
     fmt,
@@ -13,15 +11,15 @@ use std::{
 
 use anyhow::anyhow;
 
-use self::combine::{
-    combinator::{any_send_partial_state, AnySendPartialState},
-    error::{ParseError, StreamError},
+use combine::{
+    error::ParseError,
+    from_str,
     parser::{
-        byte::digit,
-        range::{range, recognize, take},
+        combinator::{any_send_partial_state, AnySendPartialState},
+        range::{range, take, take_while1},
     },
-    skip_many, skip_many1,
-    stream::{easy, PartialStream, RangeStream, StreamErrorFor},
+    skip_many,
+    stream::{easy, PartialStream, RangeStream},
     Parser,
 };
 
@@ -270,21 +268,14 @@ impl LanguageServerDecoder {
 /// { "some": "data" }
 /// ```
 fn decode_parser<'a, I>(
-) -> impl Parser<Input = I, Output = Vec<u8>, PartialState = AnySendPartialState> + 'a
+) -> impl Parser<I, Output = Vec<u8>, PartialState = AnySendPartialState> + 'a
 where
-    I: RangeStream<Item = u8, Range = &'a [u8]> + 'a,
+    I: RangeStream<Token = u8, Range = &'a [u8]> + 'a,
     // Necessary due to rust-lang/rust#24159
-    I::Error: ParseError<I::Item, I::Range, I::Position>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
 {
-    let content_length = range(&b"Content-Length: "[..]).with(
-        recognize(skip_many1(digit())).and_then(|digits: &[u8]| {
-            str::from_utf8(digits)
-                .unwrap()
-                .parse::<usize>()
-                // Convert the error from `.parse` into an error combine understands
-                .map_err(StreamErrorFor::<I>::other)
-        }),
-    );
+    let content_length =
+        range(&b"Content-Length: "[..]).with(from_str(take_while1(|b: u8| b.is_ascii_digit())));
 
     any_send_partial_state(
         (
@@ -305,7 +296,7 @@ impl Decoder for LanguageServerDecoder {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let (opt, removed_len) = combine::stream::decode(
             decode_parser(),
-            easy::Stream(PartialStream(&src[..])),
+            &mut easy::Stream(PartialStream(&src[..])),
             &mut self.state,
         )
         .map_err(|err| {

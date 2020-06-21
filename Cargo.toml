@@ -24,7 +24,7 @@ codespan-reporting = "0.3"
 url = "1.2.0"
 url_serde = "0.2.0"
 
-combine = "3.0.0"
+combine = "4"
 
 async-trait = "0.1"
 async-pipe = "0.1"
