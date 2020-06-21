@@ -1,25 +1,19 @@
 use std::sync::{Mutex, RwLock};
 
-use gluon::{import::Import, RootedThread};
-
-use tokio::io::BufReader;
-
-use tokio_util::codec::{FramedRead, FramedWrite};
-
-use futures::{
-    channel::{mpsc, oneshot},
-    compat::*,
-    prelude::*,
+use {
+    anyhow::anyhow,
+    futures::{
+        channel::{mpsc, oneshot},
+        compat::*,
+        prelude::*,
+    },
+    jsonrpc_core::{IoHandler, MetaIoHandler},
+    tokio_util::codec::{FramedRead, FramedWrite},
 };
 
-use jsonrpc_core::{IoHandler, MetaIoHandler};
-
-use serde;
-
-use anyhow::anyhow;
+use gluon::{import::Import, RootedThread};
 
 use crate::{
-    cancelable,
     check_importer::CheckImporter,
     rpc::{self, *},
 };
@@ -81,7 +75,7 @@ pub struct Server {
 impl Server {
     pub async fn start<R, W>(thread: RootedThread, input: R, output: W) -> Result<(), anyhow::Error>
     where
-        R: tokio::io::AsyncRead + Send + 'static,
+        R: tokio::io::AsyncRead,
         W: tokio::io::AsyncWrite + Send + 'static,
     {
         let _ = ::env_logger::try_init();
@@ -108,39 +102,10 @@ impl Server {
             message_receiver,
             message_sender,
         } = Server::initialize(&thread);
-        let handlers = &handlers;
 
-        let input = BufReader::new(input);
-
-        let request_handler_future = FramedRead::new(input, rpc::LanguageServerDecoder::new())
-            .map_err(|err| panic!("{}", err))
-            .try_for_each(move |json| {
-                let mut message_sender = message_sender.clone();
-                async move {
-                    debug!("Handle: {}", json);
-                    handlers
-                        .handle_request(&json)
-                        .compat()
-                        .then(move |result| async move {
-                            if let Ok(Some(response)) = result {
-                                debug!("Response: {}", response);
-                                message_sender
-                                    .send(response)
-                                    .await
-                                    .map(|_| ())
-                                    .map_err(|_| anyhow!("Unable to send"))
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        .await
-                }
-            });
-
-        tokio::spawn(
+        let message_receiver_task = tokio::spawn(
             message_receiver
                 .map(Ok)
-                .map_err(|()| unreachable!())
                 .forward(FramedWrite::new(output, LanguageServerEncoder))
                 .map(|result| {
                     if let Err(err) = result {
@@ -149,17 +114,40 @@ impl Server {
                 }),
         );
 
-        cancelable(
-            shutdown,
-            request_handler_future.unwrap_or_else(|t: anyhow::Error| panic!("{}", t)),
-        )
-        .await;
+        let handlers = &handlers;
+        FramedRead::new(input, rpc::LanguageServerDecoder::new())
+            .take_until(shutdown)
+            .try_for_each(move |json| {
+                let mut message_sender = message_sender.clone();
+                async move {
+                    debug!("Handle: {}", json);
+                    let result = handlers.handle_request(&json).compat().await;
+                    match result {
+                        Ok(Some(response)) => {
+                            debug!("Response: {}", response);
+                            message_sender
+                                .send(response)
+                                .await
+                                .map_err(|_| anyhow!("Unable to send"))?;
+                        }
+                        Ok(None) => (),
+                        Err(()) => (),
+                    }
+                    Ok(())
+                }
+            })
+            .await?;
+
+        message_receiver_task.await?;
+
         info!("Server shutdown");
 
         Ok(())
     }
 
     fn initialize(thread: &RootedThread) -> Server {
+        use crate::command;
+
         let (message_log, message_log_receiver) = mpsc::channel(1);
 
         let (exit_sender, exit_receiver) = oneshot::channel();
@@ -169,15 +157,15 @@ impl Server {
 
         crate::diagnostics::register(&mut io, thread, &message_log, exit_receiver.clone());
 
-        crate::command::initialize::register(&mut io, thread);
-        crate::command::completion::register(&mut io, thread, &message_log);
-        crate::command::hover::register(&mut io, thread);
-        crate::command::signature_help::register(&mut io, thread);
-        crate::command::symbol::register(&mut io, thread);
-        crate::command::document_highlight::register(&mut io, thread);
-        crate::command::document_symbols::register(&mut io, thread);
-        crate::command::formatting::register(&mut io, thread);
-        crate::command::definition::register(&mut io, thread);
+        command::initialize::register(&mut io, thread);
+        command::completion::register(&mut io, thread, &message_log);
+        command::hover::register(&mut io, thread);
+        command::signature_help::register(&mut io, thread);
+        command::symbol::register(&mut io, thread);
+        command::document_highlight::register(&mut io, thread);
+        command::document_symbols::register(&mut io, thread);
+        command::formatting::register(&mut io, thread);
+        command::definition::register(&mut io, thread);
 
         io.add_async_method(request!("shutdown"), |_| async {
             Ok::<(), ServerError<()>>(())
