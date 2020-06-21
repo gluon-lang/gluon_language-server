@@ -47,8 +47,6 @@ gluon_format = "0.15.1"
 
 [dev-dependencies]
 pretty_assertions = "0.6"
-partial-io = { version = "0.3.0", features = ["tokio", "quickcheck"] }
-quickcheck = "0.6.0"
 
 # [patch.crates-io]
 # gluon_base = { path = "../gluon/base" }
