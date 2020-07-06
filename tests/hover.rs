@@ -1,6 +1,6 @@
 mod support;
 
-use languageserver_types::*;
+use lsp_types::*;
 
 use crate::support::{expect_notification, expect_response, hover};
 

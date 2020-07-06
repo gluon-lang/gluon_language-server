@@ -5,7 +5,7 @@ mod support;
 
 use tokio::io::AsyncWrite;
 
-use languageserver_types::{request::*, *};
+use lsp_types::*;
 
 use crate::support::*;
 

@@ -18,10 +18,9 @@ use gluon::{
 };
 
 use {
-    codespan_lsp::{byte_span_to_range, position_to_byte_index},
     futures::prelude::*,
     jsonrpc_core::IoHandler,
-    languageserver_types::{
+    lsp_types::{
         CompletionItemKind, DocumentSymbol, Documentation, Location, MarkupContent, MarkupKind,
         Position, SymbolInformation, SymbolKind,
     },
@@ -29,8 +28,10 @@ use {
 };
 
 use crate::{
+    byte_span_to_range,
     check_importer::{CheckImporter, Module},
     name::strip_file_prefix_with_thread,
+    position_to_byte_index,
     rpc::ServerError,
     server::Handler,
 };
@@ -97,7 +98,7 @@ fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
 }
 
 fn completion_symbol_to_document_symbol(
-    source: &codespan::FileMap,
+    source: &gluon::base::source::FileMap,
     symbol: &Spanned<CompletionSymbol<'_, '_>, BytePos>,
 ) -> Result<DocumentSymbol, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);
@@ -128,7 +129,7 @@ fn completion_symbol_to_document_symbol(
 }
 
 fn completion_symbol_to_symbol_information(
-    source: &codespan::FileMap,
+    source: &gluon::base::source::FileMap,
     symbol: Spanned<CompletionSymbol<'_, '_>, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
@@ -209,7 +210,7 @@ where
     F: FnOnce(&Module, BytePos) -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, move |module| {
-        let byte_index = position_to_byte_index(&module.source, position)?;
+        let byte_index = position_to_byte_index(&*module.source, position)?;
 
         f(module, byte_index)
     })

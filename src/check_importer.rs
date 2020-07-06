@@ -13,7 +13,7 @@ use {futures::prelude::*, tokio::sync::Mutex, url::Url};
 use crate::{name::module_name_to_file_, text_edit::TextChanges};
 
 pub(crate) struct Module {
-    pub source: Arc<codespan::FileMap>,
+    pub source: Arc<gluon::base::source::FileMap>,
     pub expr: Arc<OwnedExpr<Symbol>>,
     pub uri: Url,
 }
@@ -21,7 +21,7 @@ pub(crate) struct Module {
 impl Module {
     pub(crate) fn empty(uri: Url) -> Module {
         Module {
-            source: Arc::new(codespan::FileMap::new("".into(), "".into())),
+            source: Arc::new(gluon::base::source::FileMap::new("".into(), "".into())),
             expr: Default::default(),
             uri,
         }
@@ -30,7 +30,7 @@ impl Module {
 
 pub struct State {
     pub uri: Url,
-    pub version: Option<u64>,
+    pub version: Option<i64>,
     pub text_changes: TextChanges,
 }
 

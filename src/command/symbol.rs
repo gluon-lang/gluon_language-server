@@ -1,6 +1,6 @@
 use super::*;
 
-use languageserver_types::WorkspaceSymbolParams;
+use lsp_types::WorkspaceSymbolParams;
 
 use crate::completion;
 

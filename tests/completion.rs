@@ -9,7 +9,7 @@ use tokio::io::AsyncWrite;
 
 use url::Url;
 
-use languageserver_types::*;
+use lsp_types::*;
 
 use gluon_language_server::CompletionData;
 

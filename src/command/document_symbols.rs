@@ -1,4 +1,4 @@
-use languageserver_types::{DocumentSymbolParams, DocumentSymbolResponse};
+use lsp_types::{DocumentSymbolParams, DocumentSymbolResponse};
 
 use crate::completion;
 

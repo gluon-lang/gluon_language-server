@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gluon::{base::filename_to_module, import::Import, Thread};
+use gluon::{import::Import, Thread};
 
 use crate::check_importer::CheckImporter;
 
@@ -14,18 +14,12 @@ use {
     url::{self, Url},
 };
 
-pub(crate) fn codespan_name_to_file(name: &codespan::FileName) -> Result<Url, anyhow::Error> {
-    match *name {
-        codespan::FileName::Virtual(ref s) => module_name_to_file_(s),
-        codespan::FileName::Real(ref p) => filename_to_url(p),
-    }
+pub(crate) fn codespan_name_to_file(name: &str) -> Result<Url, anyhow::Error> {
+    module_name_to_file_(name)
 }
 
-fn codspan_name_to_module(name: &codespan::FileName) -> String {
-    match *name {
-        codespan::FileName::Virtual(ref s) => s.to_string(),
-        codespan::FileName::Real(ref p) => filename_to_module(&p.display().to_string()),
-    }
+fn codspan_name_to_module(name: &str) -> String {
+    name.to_string()
 }
 
 pub(crate) fn module_name_to_file_(s: &str) -> Result<Url, anyhow::Error> {
@@ -49,10 +43,7 @@ pub(crate) fn filename_to_url(result: &Path) -> Result<Url, anyhow::Error> {
     })?)
 }
 
-pub(crate) async fn module_name_to_file(
-    importer: &CheckImporter,
-    name: &codespan::FileName,
-) -> Url {
+pub(crate) async fn module_name_to_file(importer: &CheckImporter, name: &str) -> Url {
     let s = codspan_name_to_module(name);
     importer
         .0

@@ -21,7 +21,7 @@ use {
         response::{Output, Response},
         version::Version,
     },
-    languageserver_types::*,
+    lsp_types::*,
     serde::{de::DeserializeOwned, Serialize},
     serde_json::{from_str, from_value, ser::Serializer, to_value, Value},
     tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -115,7 +115,7 @@ where
     did_open_uri(stdin, test_url(uri), text).await
 }
 
-pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
+pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: i64, range: Range, text: &str)
 where
     W: AsyncWrite + Unpin,
 {
@@ -135,7 +135,7 @@ where
 pub async fn did_change_event<W: ?Sized>(
     stdin: &mut W,
     uri: &str,
-    version: u64,
+    version: i64,
     content_changes: Vec<TextDocumentContentChangeEvent>,
 ) where
     W: AsyncWrite + Unpin,
