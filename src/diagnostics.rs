@@ -330,10 +330,10 @@ pub fn register(
             module_state.uri.clone_from(&uri);
         }
         let result = {
-            let mut source = module_state
-                .module(thread, &module_name)
-                .await
-                .map(|m| m.source.src().to_string())
+            let mut source = thread
+                .get_database()
+                .get_filemap(&module_name)
+                .map(|filemap| filemap.src().to_string())
                 .unwrap_or_default();
             debug!("Change source {}:\n{}", uri, source);
 

@@ -18,16 +18,6 @@ pub(crate) struct Module {
     pub uri: Url,
 }
 
-impl Module {
-    pub(crate) fn empty(uri: Url) -> Module {
-        Module {
-            source: Arc::new(gluon::base::source::FileMap::new("".into(), "".into())),
-            expr: Default::default(),
-            uri,
-        }
-    }
-}
-
 pub struct State {
     pub uri: Url,
     pub version: Option<i64>,
@@ -42,19 +32,19 @@ impl State {
             text_changes: TextChanges::new(),
         }
     }
+}
 
-    pub(crate) async fn module(&self, thread: &Thread, module: &str) -> gluon::Result<Module> {
-        let mut db = thread.get_database();
-        let m = db
-            .typechecked_source_module(module.into(), None)
-            .await
-            .or_else(|(partial_value, err)| partial_value.ok_or(err))?;
-        Ok(Module {
-            source: db.get_filemap(module).expect("Filemap"),
-            expr: m.expr.clone(),
-            ..Module::empty(self.uri.clone())
-        })
-    }
+pub(crate) async fn get_module(uri: Url, thread: &Thread, module: &str) -> gluon::Result<Module> {
+    let mut db = thread.get_database();
+    let m = db
+        .typechecked_source_module(module.into(), None)
+        .await
+        .or_else(|(opt, err)| opt.ok_or(err))?;
+    Ok(Module {
+        source: db.get_filemap(module).expect("Filemap"),
+        expr: m.expr.clone(),
+        uri,
+    })
 }
 
 #[derive(Clone)]
@@ -65,16 +55,24 @@ impl CheckImporter {
     }
 
     pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        let map = self.0.lock().await;
-        let s = map.get(module)?;
-        s.module(thread, module).await.ok()
+        let uri = {
+            let map = self.0.lock().await;
+            map.get(module)?.uri.clone()
+        };
+        get_module(uri, thread, module).await.ok()
     }
 
     pub(crate) async fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
-        let map = self.0.lock().await;
+        let uris = self
+            .0
+            .lock()
+            .await
+            .iter()
+            .map(|(module, s)| (module.clone(), s.uri.clone()))
+            .collect::<Vec<_>>();
 
-        futures::stream::iter(map.iter())
-            .filter_map(|(module, s)| async move { s.module(thread, module).await.ok() })
+        futures::stream::iter(uris)
+            .filter_map(|(module, uri)| async move { get_module(uri, thread, &module).await.ok() })
             .collect::<Vec<_>>()
             .await
             .into_iter()

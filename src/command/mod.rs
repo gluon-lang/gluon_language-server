@@ -183,9 +183,8 @@ where
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    match import.importer.module(&thread, &module).await {
-        Some(ref source_module) => return f(source_module),
-        None => (),
+    if let Some(ref source_module) = import.importer.module(&thread, &module).await {
+        return f(source_module);
     }
     Err(ServerError {
         message: {
