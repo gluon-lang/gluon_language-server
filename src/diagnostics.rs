@@ -37,16 +37,14 @@ use crate::{
 
 fn create_diagnostics<'a>(
     diagnostics: &'a mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
-    code_map: &'a source::CodeMap,
     importer: &'a CheckImporter,
     filename: &'a Url,
     err: &'a GluonError,
 ) -> futures::future::BoxFuture<'a, Result<(), ServerError<()>>> {
-    create_diagnostics_(diagnostics, code_map, importer, filename, err).boxed()
+    create_diagnostics_(diagnostics, importer, filename, err).boxed()
 }
 async fn create_diagnostics_(
     diagnostics: &mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
-    code_map: &source::CodeMap,
     importer: &CheckImporter,
     filename: &Url,
     err: &GluonError,
@@ -57,13 +55,13 @@ async fn create_diagnostics_(
         err: &pos::Spanned<T, pos::BytePos>,
     ) -> Result<lsp_types::Diagnostic, ServerError<()>>
     where
-        T: fmt::Display + AsDiagnostic,
+        T: fmt::Debug + fmt::Display + AsDiagnostic,
     {
         Ok(lsp_types::Diagnostic {
             source: Some("gluon".to_string()),
             ..make_lsp_diagnostic(code_map, err.as_diagnostic(&code_map), |filename| {
                 codespan_name_to_file(filename).map_err(|err| {
-                    error!("{}", err);
+                    error!("Could not find file: {}", err);
                 })
             })?
         })
@@ -71,38 +69,31 @@ async fn create_diagnostics_(
 
     async fn insert_in_file_error<T>(
         diagnostics: &mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
-        code_map: &source::CodeMap,
         importer: &CheckImporter,
         in_file_error: &gluon::base::error::InFile<T>,
     ) -> Result<(), ServerError<()>>
     where
-        T: fmt::Display + AsDiagnostic,
+        T: fmt::Debug + fmt::Display + AsDiagnostic,
     {
         let errors = diagnostics
             .entry(module_name_to_file(importer, &in_file_error.source_name()).await)
             .or_default();
         for err in in_file_error.errors() {
-            errors.push(into_diagnostic(code_map, &err)?);
+            errors.push(into_diagnostic(in_file_error.source(), &err)?);
         }
         Ok(())
     }
 
     match err {
-        GluonError::Typecheck(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Typecheck(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
-        GluonError::Parse(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Parse(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
-        GluonError::Macro(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Macro(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
         GluonError::Multiple(errors) => {
             for err in errors {
-                create_diagnostics(diagnostics, code_map, importer, filename, err).await?;
+                create_diagnostics(diagnostics, importer, filename, err).await?;
             }
         }
 
@@ -160,14 +151,9 @@ impl DiagnosticsWorker {
                     .downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
 
-                let result = create_diagnostics(
-                    &mut diagnostics,
-                    &self.thread.get_database().code_map(),
-                    &import.importer,
-                    uri_filename,
-                    &err,
-                )
-                .await;
+                let result =
+                    create_diagnostics(&mut diagnostics, &import.importer, uri_filename, &err)
+                        .await;
                 if let Err(err) = result {
                     error!("Unable to create diagnostics: {}", err.message);
                     return;
@@ -447,7 +433,7 @@ where
         match first_primary_label {
             Some(label) => {
                 let file_map = find_file(label.file_id)?;
-                let start = label.file_id;
+                let start = file_map.span().start();
                 let span = pos::Span::new(
                     start + ByteOffset::from(label.range.start as i64),
                     start + ByteOffset::from(label.range.end as i64),
@@ -470,7 +456,7 @@ where
                 }
                 Some(_) | None => {
                     let file_map = find_file(label.file_id)?;
-                    let start = label.file_id;
+                    let start = file_map.span().start();
                     let span = pos::Span::new(
                         start + ByteOffset::from(label.range.start as i64),
                         start + ByteOffset::from(label.range.end as i64),

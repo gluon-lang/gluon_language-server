@@ -294,7 +294,7 @@ where
         };
 
         {
-            f(&mut stdin, &mut stdout);
+            f(&mut stdin, &mut stdout).await;
 
             write_message(&mut stdin, method_call("shutdown", 1_000_000, ()))
                 .await

@@ -116,3 +116,48 @@ test
         })
     });
 }
+
+#[test]
+#[ignore]
+fn goto_definition_module() {
+    support::send_rpc(|stdin, stdout| {
+        Box::pin(async move {
+            let text = r#"
+let test = import! main
+test
+"#;
+            support::did_open(stdin, "test", text).await;
+
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
+
+            text_document_definition(
+                stdin,
+                1,
+                "test",
+                Position {
+                    line: 2,
+                    character: 20,
+                },
+            )
+            .await;
+
+            let def: GotoDefinitionResponse = expect_response(stdout).await;
+            assert_eq!(
+                def,
+                GotoDefinitionResponse::Scalar(Location {
+                    uri: test_url("main"),
+                    range: Range {
+                        start: Position {
+                            line: 1,
+                            character: 5
+                        },
+                        end: Position {
+                            line: 1,
+                            character: 9
+                        },
+                    }
+                })
+            );
+        })
+    });
+}
