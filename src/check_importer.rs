@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use gluon::{
     self,
-    base::{ast::OwnedExpr, fnv::FnvMap, symbol::Symbol, types::ArcType},
+    base::{ast::OwnedExpr, fnv::FnvMap, metadata::Metadata, symbol::Symbol, types::ArcType},
+    compiler_pipeline::TypecheckValue,
     import::Importer,
     query::Compilation,
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
@@ -15,6 +16,7 @@ use crate::{name::module_name_to_file_, text_edit::TextChanges};
 pub(crate) struct Module {
     pub source: Arc<gluon::base::source::FileMap>,
     pub expr: Arc<OwnedExpr<Symbol>>,
+    pub metadata: Arc<Metadata>,
     pub uri: Url,
 }
 
@@ -37,13 +39,20 @@ impl State {
 pub(crate) async fn get_module(
     thread: &Thread,
     module: &str,
-) -> gluon::Result<(Arc<gluon::base::source::FileMap>, Arc<OwnedExpr<Symbol>>)> {
+) -> gluon::Result<(
+    Arc<gluon::base::source::FileMap>,
+    TypecheckValue<Arc<OwnedExpr<Symbol>>>,
+)> {
     let mut db = thread.get_database();
     let m = db
         .typechecked_source_module(module.into(), None)
         .await
         .or_else(|(opt, err)| opt.ok_or(err))?;
-    Ok((db.get_filemap(module).expect("Filemap"), m.expr.clone()))
+
+    db.module_type(module.into(), None).await?;
+    db.module_metadata(module.into(), None).await?;
+
+    Ok((db.get_filemap(module).expect("Filemap"), m))
 }
 
 #[derive(Clone)]
@@ -54,14 +63,19 @@ impl CheckImporter {
     }
 
     pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        let (source, expr) = get_module(thread, module).await.ok()?;
+        let (source, value) = get_module(thread, module).await.ok()?;
 
         let uri = {
             let map = self.0.lock().await;
             map.get(module)?.uri.clone()
         };
 
-        Some(Module { source, expr, uri })
+        Some(Module {
+            source,
+            expr: value.expr.clone(),
+            metadata: value.metadata.clone(),
+            uri,
+        })
     }
 
     pub(crate) async fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
@@ -75,8 +89,13 @@ impl CheckImporter {
 
         futures::stream::iter(uris)
             .filter_map(|(module, uri)| async move {
-                let (source, expr) = get_module(thread, &module).await.ok()?;
-                Some(Module { source, expr, uri })
+                let (source, value) = get_module(thread, &module).await.ok()?;
+                Some(Module {
+                    source,
+                    expr: value.expr.clone(),
+                    metadata: value.metadata.clone(),
+                    uri,
+                })
             })
             .collect::<Vec<_>>()
             .await
