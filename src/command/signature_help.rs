@@ -34,7 +34,8 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                             &params.text_document_position_params.position,
                         )?;
 
-                        let env = thread.get_env();
+                        let mut db = thread.get_database();
+                        let env = db.as_env();
 
                         Ok(
                             completion::signature_help(&env, module.source.span(), expr, byte_pos)

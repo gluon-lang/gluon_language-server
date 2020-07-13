@@ -28,7 +28,8 @@ impl LanguageServerCommand<HoverParams> for HoverCommand {
                         &change.text_document_position_params.position,
                     )?;
 
-                    let env = thread.get_env();
+                    let mut db = thread.get_database();
+                    let env = db.as_env();
                     let (_, metadata_map) = gluon::check::metadata::metadata(&env, &expr);
                     let opt_metadata =
                         completion::get_metadata(&metadata_map, source.span(), expr, byte_index);

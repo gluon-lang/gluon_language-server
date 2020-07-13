@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate pretty_assertions;
+
 mod support;
 
 use lsp_types::*;
@@ -28,6 +31,13 @@ let from f : (Int -> Option a) -> Stream a =
 { from }
 "#;
 
+fn gluon_string(s: &str) -> MarkedString {
+    MarkedString::LanguageString(LanguageString {
+        language: "gluon".into(),
+        value: s.into(),
+    })
+}
+
 #[test]
 fn simple_hover() {
     support::send_rpc(move |stdin, stdout| {
@@ -52,7 +62,7 @@ fn simple_hover() {
             assert_eq!(
                 hover,
                 Hover {
-                    contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                    contents: HoverContents::Scalar(gluon_string("Int")),
                     range: Some(Range {
                         start: Position {
                             line: 0,
@@ -97,7 +107,7 @@ test
             assert_eq!(
                 hover,
                 Hover {
-                    contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                    contents: HoverContents::Scalar(gluon_string("Int")),
                     range: Some(Range {
                         start: Position {
                             line: 2,
@@ -138,7 +148,7 @@ fn stream() {
             assert_eq!(
                 hover,
                 Some(Hover {
-                    contents: HoverContents::Scalar(MarkedString::String("Int".into())),
+                    contents: HoverContents::Scalar(gluon_string("Int")),
                     range: Some(Range {
                         start: Position {
                             line: 15,
@@ -150,6 +160,44 @@ fn stream() {
                         },
                     }),
                 })
+            );
+        })
+    });
+}
+
+#[test]
+fn hover_functor() {
+    support::send_rpc(move |stdin, stdout| {
+        Box::pin(async move {
+            let src = r#"
+let { Functor } = import! std.functor
+()
+"#;
+            support::did_open(stdin, "test", src).await;
+
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
+
+            hover(
+                stdin,
+                2,
+                "test",
+                Position {
+                    line: 1,
+                    character: 9,
+                },
+            )
+            .await;
+
+            let hover: Hover = expect_response(stdout).await;
+
+            assert!(
+                match &hover.contents {
+                    HoverContents::Scalar(MarkedString::String(s)) =>
+                        s.contains("`Functor` represents"),
+                    _ => false,
+                },
+                "Did not appear to get the doc comment on hover: {:#?}",
+                hover
             );
         })
     });

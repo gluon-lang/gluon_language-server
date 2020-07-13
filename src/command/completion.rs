@@ -48,8 +48,9 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                     ..completion::SuggestionQuery::default()
                 };
 
+                let mut db = thread.get_database();
                 let suggestions = query
-                    .suggest(&thread.get_env(), source.span(), expr, byte_index)
+                    .suggest(&db.as_env(), source.span(), expr, byte_index)
                     .into_iter()
                     .filter(|suggestion| !suggestion.name.starts_with("__"))
                     .collect::<Vec<_>>();

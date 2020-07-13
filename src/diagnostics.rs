@@ -188,8 +188,7 @@ impl DiagnosticsWorker {
             .thread
             .get_database()
             .typechecked_source_module(name.into(), None)
-            .await
-            .map_err(|(_, err)| err);
+            .await;
 
         let import = self
             .thread

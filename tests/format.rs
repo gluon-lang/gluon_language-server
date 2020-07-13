@@ -107,7 +107,10 @@ x + "abc"
             assert_eq!(
                 hover,
                 Hover {
-                    contents: HoverContents::Scalar(MarkedString::String("String".into())),
+                    contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                        language: "gluon".into(),
+                        value: "String".into()
+                    })),
                     range: Some(Range {
                         start: Position {
                             line: 2,

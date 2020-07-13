@@ -47,10 +47,10 @@ pub(crate) async fn get_module(
     let m = db
         .typechecked_source_module(module.into(), None)
         .await
-        .or_else(|(opt, err)| opt.ok_or(err))?;
+        .or_else(|err| err.value.ok_or(err.error))?;
 
-    db.module_type(module.into(), None).await?;
-    db.module_metadata(module.into(), None).await?;
+    let _ = db.module_type(module.into(), None).await;
+    let _ = db.module_metadata(module.into(), None).await;
 
     Ok((db.get_filemap(module).expect("Filemap"), m))
 }
@@ -63,7 +63,13 @@ impl CheckImporter {
     }
 
     pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        let (source, value) = get_module(thread, module).await.ok()?;
+        let (source, value) = get_module(thread, module)
+            .await
+            .map_err(|err| {
+                dbg!(&err);
+                err
+            })
+            .ok()?;
 
         let uri = {
             let map = self.0.lock().await;
@@ -115,12 +121,12 @@ impl Importer for CheckImporter {
             .database
             .module_type(module_name.into(), None)
             .await
-            .map_err(|err| (None, err))?;
+            .map_err(|err| (err.value, err.error))?;
         compiler
             .database
             .module_metadata(module_name.into(), None)
             .await
-            .map_err(|err| (None, err))?;
+            .map_err(|err| (None, err.error))?;
 
         self.0.lock().await.insert(
             module_name.into(),
