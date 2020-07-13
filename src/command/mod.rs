@@ -95,7 +95,10 @@ where
 fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
         CompletionSymbolContent::Type { .. } => SymbolKind::Class,
-        CompletionSymbolContent::Value { typ, expr } => expr_to_kind(expr, typ),
+        CompletionSymbolContent::Value { typ, expr } => match expr {
+            Some(expr) => expr_to_kind(expr, typ),
+            None => SymbolKind::Variable,
+        },
     }
 }
 
