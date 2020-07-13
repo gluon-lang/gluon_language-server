@@ -1,7 +1,9 @@
 use std::fmt;
 
-use crate::completion::{CompletionSymbol, CompletionSymbolContent};
-use crate::either;
+use crate::{
+    completion::{CompletionSymbol, CompletionSymbolContent},
+    either,
+};
 
 use gluon::{
     self,
@@ -179,6 +181,7 @@ where
 {
     let filename = strip_file_prefix_with_thread(&thread, &text_document_uri);
     let module = filename_to_module(&filename);
+
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
@@ -214,4 +217,35 @@ where
         f(module, byte_index)
     })
     .await
+}
+
+async fn retrieve_module_from_url(
+    thread: &Thread,
+    text_document_uri: &Url,
+) -> Result<Module, ServerError<()>> {
+    let filename = strip_file_prefix_with_thread(&thread, &text_document_uri);
+    let module = filename_to_module(&filename);
+    retrieve_module(thread, &module).await
+}
+
+async fn retrieve_module(thread: &Thread, module: &str) -> Result<Module, ServerError<()>> {
+    let import = thread.get_macros().get("import").expect("Import macro");
+    let import = import
+        .downcast_ref::<Import<CheckImporter>>()
+        .expect("Check importer");
+    if let Some(source_module) = import.importer.module(&thread, &module).await {
+        Ok(source_module)
+    } else {
+        Err(ServerError {
+            message: {
+                let m = import.importer.0.lock().await;
+                format!(
+                    "Module `{}` is not defined\n{:?}",
+                    module,
+                    m.keys().collect::<Vec<_>>()
+                )
+            },
+            data: None,
+        })
+    }
 }

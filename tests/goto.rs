@@ -118,12 +118,11 @@ test
 }
 
 #[test]
-#[ignore]
 fn goto_definition_module() {
     support::send_rpc(|stdin, stdout| {
         Box::pin(async move {
             let text = r#"
-let test = import! main
+let test = import! tests.main
 test
 "#;
             support::did_open(stdin, "test", text).await;
@@ -135,7 +134,7 @@ test
                 1,
                 "test",
                 Position {
-                    line: 2,
+                    line: 1,
                     character: 20,
                 },
             )
@@ -145,15 +144,15 @@ test
             assert_eq!(
                 def,
                 GotoDefinitionResponse::Scalar(Location {
-                    uri: test_url("main"),
+                    uri: test_url("tests/main.glu"),
                     range: Range {
                         start: Position {
-                            line: 1,
-                            character: 5
+                            line: 0,
+                            character: 0
                         },
                         end: Position {
-                            line: 1,
-                            character: 9
+                            line: 0,
+                            character: 0
                         },
                     }
                 })

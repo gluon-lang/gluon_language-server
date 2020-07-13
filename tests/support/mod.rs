@@ -29,6 +29,7 @@ use {
     url::Url,
 };
 
+use gluon::ThreadExt;
 use gluon_language_server::rpc::LanguageServerDecoder;
 
 pub fn test_url(uri: &str) -> Url {
@@ -245,6 +246,7 @@ fn start_local() -> ServerHandle {
 
     tokio::spawn(async move {
         let thread = gluon::new_vm_async().await;
+        thread.get_database_mut().set_implicit_prelude(false);
         if let Err(err) =
             ::gluon_language_server::Server::start(thread, stdin_read, stdout_write).await
         {
