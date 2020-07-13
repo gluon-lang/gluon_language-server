@@ -37,11 +37,17 @@ impl LanguageServerCommand<HoverParams> for HoverCommand {
                         completion::completion(extract, source.span(), expr, byte_index)
                             .map(|(typ, span)| {
                                 let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                                    Some(comment) => format!("{}\n\n{}", typ, comment.content),
-                                    None => format!("{}", typ),
+                                    Some(comment) => MarkedString::String(format!(
+                                        "{}\n\n{}",
+                                        typ, comment.content
+                                    )),
+                                    None => MarkedString::from_language_code(
+                                        "gluon".into(),
+                                        format!("{}", typ),
+                                    ),
                                 };
                                 Some(Hover {
-                                    contents: HoverContents::Scalar(MarkedString::String(contents)),
+                                    contents: HoverContents::Scalar(contents),
                                     range: byte_span_to_range(&source, span).ok(),
                                 })
                             })
