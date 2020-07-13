@@ -231,7 +231,13 @@ pub fn run_no_panic_catch<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::runtime::Runtime::new().unwrap().block_on(fut)
+    tokio::runtime::Builder::new()
+        .enable_all()
+        .core_threads(1)
+        .basic_scheduler()
+        .build()
+        .unwrap()
+        .block_on(fut)
 }
 
 struct ServerHandle {
@@ -289,7 +295,6 @@ where
             mut stdin,
             mut stdout,
         } = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
-            // FIXME Local  testing may deadlock atm
             start_local()
         } else {
             start_remote()
