@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gluon::{
     self,
     base::{ast::OwnedExpr, fnv::FnvMap, metadata::Metadata, symbol::Symbol, types::ArcType},
-    compiler_pipeline::TypecheckValue,
+    compiler_pipeline::{SalvageResult, TypecheckValue},
     import::Importer,
     query::AsyncCompilation,
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
@@ -116,23 +116,23 @@ impl Importer for CheckImporter {
         compiler: &mut ModuleCompiler<'_, '_>,
         _: &Thread,
         module_name: &str,
-    ) -> Result<ArcType, (Option<ArcType>, GluonError)> {
-        let typ = compiler
-            .database
-            .module_type(module_name.into(), None)
-            .await
-            .map_err(|err| (err.value, err.error))?;
+    ) -> SalvageResult<ArcType> {
         compiler
             .database
             .module_metadata(module_name.into(), None)
             .await
-            .map_err(|err| (None, err.error))?;
+            .or_else(|err| err.get_value())?;
+        let typ = compiler
+            .database
+            .module_type(module_name.into(), None)
+            .await
+            .or_else(|err| err.get_value())?;
 
         self.0.lock().await.insert(
             module_name.into(),
             State {
                 uri: module_name_to_file_(module_name)
-                    .map_err(|err| (None, GluonError::from(err.to_string())))?,
+                    .map_err(|err| GluonError::from(err.to_string()))?,
                 version: None,
                 text_changes: TextChanges::new(),
             },
