@@ -7,7 +7,7 @@
   "publisher": "Marwes",
   "repository": "https://github.com/gluon-lang/gluon_language-server",
   "engines": {
-    "vscode": "^1.30.0"
+    "vscode": "^1.38.0"
   },
   "categories": [
     "Other"
