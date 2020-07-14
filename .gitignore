@@ -4,5 +4,6 @@ out
 server
 node_modules
 *.bk
+*.vsix
 
 .vscode
