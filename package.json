@@ -115,6 +115,6 @@
   },
   "dependencies": {
     "vscode-debugadapter": "^1.37.0",
-    "vscode-languageclient": "^5.2.0"
+    "vscode-languageclient": "^6.1.0"
   }
 }
