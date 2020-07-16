@@ -16,11 +16,8 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
 
                 let source = &module.source;
 
-                symbols
-                    .iter()
-                    .map(|symbol| completion_symbol_to_document_symbol(&source, symbol))
-                    .collect::<Result<_, _>>()
-                    .map(|x| Some(DocumentSymbolResponse::Nested(x)))
+                let x = completion_symbols_to_document_symbols(source, &symbols)?;
+                Ok(Some(DocumentSymbolResponse::Nested(x)))
             })
             .await
         }

@@ -95,11 +95,29 @@ where
 fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
         CompletionSymbolContent::Type { .. } => SymbolKind::Class,
-        CompletionSymbolContent::Value { typ, expr } => match expr {
+        CompletionSymbolContent::Value { typ, kind: _, expr } => match expr {
             Some(expr) => expr_to_kind(expr, typ),
             None => SymbolKind::Variable,
         },
     }
+}
+
+fn completion_symbols_to_document_symbols(
+    source: &gluon::base::source::FileMap,
+    symbols: &[Spanned<CompletionSymbol<'_, '_>, BytePos>],
+) -> Result<Vec<DocumentSymbol>, ServerError<()>> {
+    symbols
+        .iter()
+        .filter(|symbol| match &symbol.value.content {
+            CompletionSymbolContent::Value { kind, .. } => match kind {
+                // Skip function parameters
+                gluon_completion::CompletionValueKind::Parameter => false,
+                gluon_completion::CompletionValueKind::Binding => true,
+            },
+            CompletionSymbolContent::Type { .. } => true,
+        })
+        .map(|symbol| completion_symbol_to_document_symbol(source, symbol))
+        .collect()
 }
 
 fn completion_symbol_to_document_symbol(
@@ -114,21 +132,17 @@ fn completion_symbol_to_document_symbol(
         selection_range: range,
         name: symbol.value.name.declared_name().to_string(),
         detail: Some(match &symbol.value.content {
-            CompletionSymbolContent::Type { alias } => alias.unresolved_type().to_string(),
+            CompletionSymbolContent::Type { typ } => typ.to_string(),
             CompletionSymbolContent::Value { typ, .. } => typ.to_string(),
         }),
         deprecated: Default::default(),
-        children: if symbol.value.children.is_empty() {
-            None
-        } else {
-            Some(
-                symbol
-                    .value
-                    .children
-                    .iter()
-                    .map(|child| completion_symbol_to_document_symbol(source, child))
-                    .collect::<Result<_, _>>()?,
-            )
+        children: {
+            let children = completion_symbols_to_document_symbols(source, &symbol.value.children)?;
+            if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            }
         },
     })
 }
