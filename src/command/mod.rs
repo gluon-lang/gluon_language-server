@@ -13,7 +13,7 @@ use gluon::{
         kind::ArcKind,
         pos::{BytePos, Spanned},
         symbol::Symbol,
-        types::{ArcType, BuiltinType, Type},
+        types::{ArcType, BuiltinType, Type, TypeExt, TypePtr},
     },
     import::Import,
     RootedThread, Thread, ThreadExt,
@@ -50,7 +50,7 @@ pub mod symbol;
 
 fn type_to_completion_item_kind(typ: &ArcType) -> CompletionItemKind {
     match **typ {
-        _ if typ.as_function().is_some() => CompletionItemKind::Function,
+        _ if typ.remove_forall().as_function().is_some() => CompletionItemKind::Function,
         Type::Alias(ref alias) => type_to_completion_item_kind(alias.unresolved_type()),
         Type::App(ref f, _) => type_to_completion_item_kind(f),
         Type::Variant(_) => CompletionItemKind::Enum,
@@ -94,7 +94,10 @@ where
 
 fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
-        CompletionSymbolContent::Type { .. } => SymbolKind::Class,
+        CompletionSymbolContent::Type { typ } => match &**typ {
+            Type::Variant(_) => SymbolKind::Enum,
+            _ => SymbolKind::Class,
+        },
         CompletionSymbolContent::Value { typ, kind: _, expr } => match expr {
             Some(expr) => expr_to_kind(expr, typ),
             None => SymbolKind::Variable,
@@ -106,6 +109,14 @@ fn completion_symbols_to_document_symbols(
     source: &gluon::base::source::FileMap,
     symbols: &[Spanned<CompletionSymbol<'_, '_>, BytePos>],
 ) -> Result<Vec<DocumentSymbol>, ServerError<()>> {
+    completion_symbols_to_document_symbols_inner(source, symbols, None)
+}
+
+fn completion_symbols_to_document_symbols_inner(
+    source: &gluon::base::source::FileMap,
+    symbols: &[Spanned<CompletionSymbol<'_, '_>, BytePos>],
+    parent_kind: Option<SymbolKind>,
+) -> Result<Vec<DocumentSymbol>, ServerError<()>> {
     symbols
         .iter()
         .filter(|symbol| match &symbol.value.content {
@@ -116,28 +127,46 @@ fn completion_symbols_to_document_symbols(
             },
             CompletionSymbolContent::Type { .. } => true,
         })
-        .map(|symbol| completion_symbol_to_document_symbol(source, symbol))
+        .map(|symbol| completion_symbol_to_document_symbol(source, symbol, parent_kind))
         .collect()
 }
 
 fn completion_symbol_to_document_symbol(
     source: &gluon::base::source::FileMap,
     symbol: &Spanned<CompletionSymbol<'_, '_>, BytePos>,
+    parent_kind: Option<SymbolKind>,
 ) -> Result<DocumentSymbol, ServerError<()>> {
-    let kind = completion_symbol_kind(&symbol.value);
+    let kind = parent_kind
+        .and_then(|parent_kind| match parent_kind {
+            SymbolKind::Enum => Some(SymbolKind::EnumMember),
+            _ => None,
+        })
+        .unwrap_or_else(|| completion_symbol_kind(&symbol.value));
     let range = byte_span_to_range(source, symbol.span)?;
     Ok(DocumentSymbol {
         kind,
         range,
         selection_range: range,
         name: symbol.value.name.declared_name().to_string(),
-        detail: Some(match &symbol.value.content {
-            CompletionSymbolContent::Type { typ } => typ.to_string(),
-            CompletionSymbolContent::Value { typ, .. } => typ.to_string(),
-        }),
+        detail: {
+            let detail = match symbol.value.content {
+                CompletionSymbolContent::Type { typ } => typ.display(1000000).to_string(),
+                CompletionSymbolContent::Value { typ, .. } => typ.display(1000000).to_string(),
+            };
+            // Multiline renders badly in VS Code so skip detail if we happen to get newlines (such as for variant types)
+            if detail.contains('\n') {
+                None
+            } else {
+                Some(detail)
+            }
+        },
         deprecated: Default::default(),
         children: {
-            let children = completion_symbols_to_document_symbols(source, &symbol.value.children)?;
+            let children = completion_symbols_to_document_symbols_inner(
+                source,
+                &symbol.value.children,
+                Some(kind),
+            )?;
             if children.is_empty() {
                 None
             } else {
@@ -175,7 +204,7 @@ fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
 
 fn type_to_kind(typ: &ArcType) -> SymbolKind {
     match **typ {
-        _ if typ.as_function().is_some() => SymbolKind::Function,
+        _ if typ.remove_forall().as_function().is_some() => SymbolKind::Function,
         Type::Ident(ref id) if id.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Builtin(builtin) => match builtin {
