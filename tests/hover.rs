@@ -192,12 +192,11 @@ let { Functor } = import! std.functor
 
             assert!(
                 match &hover.contents {
-                    HoverContents::Scalar(MarkedString::String(s)) =>
-                        s.contains("`Functor` represents"),
+                    HoverContents::Markup(m) => m.value.contains("`Functor` represents"),
                     _ => false,
                 },
                 "Did not appear to get the doc comment on hover: {:#?}",
-                hover
+                hover.contents
             );
         })
     });

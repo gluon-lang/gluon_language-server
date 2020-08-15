@@ -11,7 +11,7 @@ use gluon::{
         source::{self, Source},
     },
     import::Import,
-    query::{Compilation, CompilationBase},
+    query::{AsyncCompilation, CompilationBase},
     Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 

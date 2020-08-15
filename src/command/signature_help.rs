@@ -34,7 +34,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                             &params.text_document_position_params.position,
                         )?;
 
-                        let mut db = thread.get_database();
+                        let db = thread.get_database();
                         let env = db.as_env();
 
                         Ok(

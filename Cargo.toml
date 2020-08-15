@@ -17,8 +17,7 @@ env_logger = "0.7.0"
 
 anyhow = "1"
 
-codespan = "0.9"
-codespan-lsp = "0.9"
+codespan-lsp = "0.10"
 codespan-reporting = "0.9"
 
 url = "2"
@@ -37,24 +36,21 @@ serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-lsp-types = "0.74.0"
+lsp-types = "0.77.0"
 debugserver-types = "0.5.0"
 
-gluon = { version = "0.16", features = ["serialization", "regex", "rand", "web"] }
-gluon_completion = "0.16"
-gluon_format = "0.16"
+gluon = { version = "0.17", features = ["serialization", "regex", "rand", "web"] }
+gluon_completion = "0.17"
+gluon_format = "0.17"
 
 [dev-dependencies]
 pretty_assertions = "0.6"
 
-[patch.crates-io]
-codespan-lsp = { path = "../codespan/codespan-lsp" }
-codespan-reporting = { path = "../codespan/codespan-reporting" }
-
-gluon_base = { path = "../gluon/base" }
-gluon_parser = { path = "../gluon/parser" }
-gluon_check = { path = "../gluon/check" }
-gluon_format = { path = "../gluon/format" }
-gluon_completion = { path = "../gluon/completion" }
-gluon_vm = { path = "../gluon/vm" }
-gluon = { path = "../gluon" }
+# [patch.crates-io]
+# gluon_base = { path = "../gluon/base" }
+# gluon_parser = { path = "../gluon/parser" }
+# gluon_check = { path = "../gluon/check" }
+# gluon_format = { path = "../gluon/format" }
+# gluon_completion = { path = "../gluon/completion" }
+# gluon_vm = { path = "../gluon/vm" }
+# gluon = { path = "../gluon" }

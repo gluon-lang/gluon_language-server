@@ -48,7 +48,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                     ..completion::SuggestionQuery::default()
                 };
 
-                let mut db = thread.get_database();
+                let db = thread.get_database();
                 let suggestions = query
                     .suggest(&db.as_env(), source.span(), expr, byte_index)
                     .into_iter()
@@ -132,7 +132,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread, message_log: &mpsc::S
                 &data.text_document_uri,
                 &data.position,
                 |module, byte_index| {
-                    let mut db = thread.get_database();
+                    let db = thread.get_database();
                     let type_env = db.as_env();
                     let module_expr = module.expr.expr();
                     let (_, metadata_map) =

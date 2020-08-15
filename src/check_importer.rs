@@ -5,7 +5,7 @@ use gluon::{
     base::{ast::OwnedExpr, fnv::FnvMap, metadata::Metadata, symbol::Symbol, types::ArcType},
     compiler_pipeline::TypecheckValue,
     import::Importer,
-    query::Compilation,
+    query::AsyncCompilation,
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
 };
 
@@ -113,7 +113,7 @@ impl CheckImporter {
 impl Importer for CheckImporter {
     async fn import(
         &self,
-        compiler: &mut ModuleCompiler<'_>,
+        compiler: &mut ModuleCompiler<'_, '_>,
         _: &Thread,
         module_name: &str,
     ) -> Result<ArcType, (Option<ArcType>, GluonError)> {
