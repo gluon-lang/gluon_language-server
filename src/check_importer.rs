@@ -43,7 +43,7 @@ impl State {
         }
     }
 
-    pub(crate) async fn module(&self, thread: &Thread, module: &str) -> gluon::Result<Module> {
+    pub(crate) async fn module(uri: Url, thread: &Thread, module: &str) -> gluon::Result<Module> {
         let mut db = thread.get_database();
         let m = db
             .typechecked_source_module(module.into(), None)
@@ -52,7 +52,7 @@ impl State {
         Ok(Module {
             source: db.get_filemap(module).expect("Filemap"),
             expr: m.expr.clone(),
-            ..Module::empty(self.uri.clone())
+            ..Module::empty(uri)
         })
     }
 }
@@ -65,16 +65,21 @@ impl CheckImporter {
     }
 
     pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        let map = self.0.lock().await;
-        let s = map.get(module)?;
-        s.module(thread, module).await.ok()
+        let uri = {
+            let map = self.0.lock().await;
+            map.get(module)?.uri.clone()
+        };
+
+        State::module(uri, thread, module).await.ok()
     }
 
     pub(crate) async fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
         let map = self.0.lock().await;
 
         futures::stream::iter(map.iter())
-            .filter_map(|(module, s)| async move { s.module(thread, module).await.ok() })
+            .filter_map(|(module, s)| async move {
+                State::module(s.uri.clone(), thread, module).await.ok()
+            })
             .collect::<Vec<_>>()
             .await
             .into_iter()

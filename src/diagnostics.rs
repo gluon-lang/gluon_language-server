@@ -300,37 +300,42 @@ pub fn register(
         let import = import
             .downcast_ref::<Import<CheckImporter>>()
             .expect("Check importer");
-        let mut modules = import.importer.0.lock().await;
-        let module_name = {
-            let paths = import.paths.read().unwrap();
-            strip_file_prefix(&paths, &change.text_document.uri)
-                .unwrap_or_else(|err| panic!("{}", err))
+        let (module_uri, uri, module_name) = {
+            let mut modules = import.importer.0.lock().await;
+            let module_name = {
+                let paths = import.paths.read().unwrap();
+                strip_file_prefix(&paths, &change.text_document.uri)
+                    .unwrap_or_else(|err| panic!("{}", err))
+            };
+            let module_name = filename_to_module(&module_name);
+            let module_state = modules
+                .entry(module_name.clone())
+                .or_insert_with(|| State::empty(change.text_document.uri.clone()));
+
+            module_state.text_changes.add(
+                change.text_document.version.expect("version"),
+                change.content_changes,
+            );
+            let uri = change.text_document.uri;
+            // If the module was loaded via `import!` before we open it in the editor
+            // `module.uri` has been set by looking at the current working directory which is
+            // not necessarily correct (works in VS code but not with (neo)vim) so update the
+            // uri to match the one supplied by the client to ensure errors show up.
+            if module_state.uri != uri {
+                module_state.uri.clone_from(&uri);
+            }
+
+            (module_state.uri.clone(), uri, module_name)
         };
-        let module_name = filename_to_module(&module_name);
-        let module_state = modules
-            .entry(module_name.clone())
-            .or_insert_with(|| State::empty(change.text_document.uri.clone()));
 
-        module_state.text_changes.add(
-            change.text_document.version.expect("version"),
-            change.content_changes,
-        );
-
-        let uri = change.text_document.uri;
-        // If the module was loaded via `import!` before we open it in the editor
-        // `module.uri` has been set by looking at the current working directory which is
-        // not necessarily correct (works in VS code but not with (neo)vim) so update the
-        // uri to match the one supplied by the client to ensure errors show up.
-        if module_state.uri != uri {
-            module_state.uri.clone_from(&uri);
-        }
         let result = {
-            let mut source = module_state
-                .module(thread, &module_name)
+            let mut source = State::module(module_uri, thread, &module_name)
                 .await
                 .map(|m| m.source.src().to_string())
                 .unwrap_or_default();
             debug!("Change source {}:\n{}", uri, source);
+            let mut modules = import.importer.0.lock().await;
+            let module_state = modules.get_mut(&module_name).unwrap();
 
             match module_state.version {
                 Some(current_version) => match module_state
@@ -346,7 +351,12 @@ pub fn register(
         };
         match result {
             Ok((new_version, source)) => {
-                module_state.version = Some(new_version);
+                {
+                    let mut modules = import.importer.0.lock().await;
+                    let module_state = modules.get_mut(&module_name).unwrap();
+
+                    module_state.version = Some(new_version);
+                }
                 thread
                     .get_database_mut()
                     .add_module(module_name.into(), &source);
