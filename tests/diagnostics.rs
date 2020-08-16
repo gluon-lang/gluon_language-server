@@ -1,7 +1,7 @@
 #[allow(unused)]
 mod support;
 
-use languageserver_types::{DiagnosticSeverity, Position, PublishDiagnosticsParams, Range};
+use lsp_types::{DiagnosticSeverity, Position, PublishDiagnosticsParams, Range};
 
 #[test]
 fn type_error() {

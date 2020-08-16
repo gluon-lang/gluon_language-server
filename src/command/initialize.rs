@@ -1,8 +1,9 @@
 use jsonrpc_core::IoHandler;
 
-use languageserver_types::{
+use lsp_types::{
     CompletionOptions, InitializeError, InitializeParams, InitializeResult, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    ServerInfo, SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkDoneProgressOptions,
 };
 
 use crate::{rpc::LanguageServerCommand, BoxFuture};
@@ -18,15 +19,26 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
         &self,
         change: InitializeParams,
     ) -> BoxFuture<InitializeResult, ServerError<InitializeError>> {
-        let import = self.0.get_macros().get("import").expect("Import macro");
-        let import = import
-            .downcast_ref::<Import<CheckImporter>>()
-            .expect("Check importer");
-        if let Some(ref path) = change.root_path {
-            import.add_path(path);
-        }
+        let thread = self.0.clone();
         async move {
+            let import = thread.get_macros().get("import").expect("Import macro");
+            let import = import
+                .downcast_ref::<Import<CheckImporter>>()
+                .expect("Check importer");
+            if let Some(ref uri) = change.root_uri {
+                import.add_path(
+                    uri.to_file_path()
+                        .map_err(|()| "Unable to convert root_uri to file path")?,
+                );
+            }
+
             Ok(InitializeResult {
+                server_info: Some(ServerInfo {
+                    name: "Gluon language server".into(),
+                    version: Some(
+                        concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_COMMIT")).into(),
+                    ),
+                }),
                 capabilities: ServerCapabilities {
                     text_document_sync: Some(TextDocumentSyncCapability::Kind(
                         TextDocumentSyncKind::Incremental,
@@ -34,11 +46,18 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                     completion_provider: Some(CompletionOptions {
                         resolve_provider: Some(true),
                         trigger_characters: Some(vec![".".into()]),
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
                     }),
                     signature_help_provider: Some(SignatureHelpOptions {
                         trigger_characters: None,
+                        retrigger_characters: None,
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
                     }),
-                    hover_provider: Some(true),
+                    hover_provider: Some(true.into()),
                     document_formatting_provider: Some(true),
                     document_highlight_provider: Some(true),
                     document_symbol_provider: Some(true),

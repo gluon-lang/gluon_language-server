@@ -21,13 +21,13 @@ use crate::{
 pub trait Handler {
     fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
     where
-        T: ::languageserver_types::request::Request,
+        T: ::lsp_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize;
     fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
     where
-        T: ::languageserver_types::notification::Notification,
+        T: ::lsp_types::notification::Notification,
         T::Params: serde::de::DeserializeOwned + 'static,
         U: LanguageServerNotification<T::Params>;
 }
@@ -35,7 +35,7 @@ pub trait Handler {
 impl Handler for IoHandler {
     fn add_async_method<T, U>(&mut self, _: Option<T>, method: U)
     where
-        T: ::languageserver_types::request::Request,
+        T: ::lsp_types::request::Request,
         U: LanguageServerCommand<T::Params, Output = T::Result>,
         T::Params: serde::de::DeserializeOwned + 'static,
         T::Result: serde::Serialize,
@@ -44,7 +44,7 @@ impl Handler for IoHandler {
     }
     fn add_notification<T, U>(&mut self, _: Option<T>, notification: U)
     where
-        T: ::languageserver_types::notification::Notification,
+        T: ::lsp_types::notification::Notification,
         T::Params: serde::de::DeserializeOwned + 'static,
         U: LanguageServerNotification<T::Params>,
     {
@@ -54,12 +54,12 @@ impl Handler for IoHandler {
 
 macro_rules! request {
     ($t:tt) => {
-        ::std::option::Option::None::<lsp_request!($t)>
+        ::std::option::Option::None::<lsp_types::lsp_request!($t)>
     };
 }
 macro_rules! notification {
     ($t:tt) => {
-        ::std::option::Option::None::<lsp_notification!($t)>
+        ::std::option::Option::None::<lsp_types::lsp_notification!($t)>
     };
 }
 

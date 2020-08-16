@@ -1,8 +1,6 @@
-use languageserver_types::{DocumentFormattingParams, TextEdit};
+use lsp_types::{DocumentFormattingParams, TextEdit};
 
-use gluon_format;
-
-use gluon::ThreadExt;
+use gluon::{base::source::Source, ThreadExt};
 
 use super::{byte_span_to_range, retrieve_expr, Handler, IoHandler, RootedThread};
 

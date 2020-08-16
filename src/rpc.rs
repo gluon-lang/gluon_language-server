@@ -34,7 +34,7 @@ use futures::{channel::mpsc, prelude::*, Sink, Stream};
 
 use jsonrpc_core::{Error, ErrorCode, Params, RpcMethodSimple, RpcNotificationSimple, Value};
 
-use languageserver_types::{notification, LogMessageParams, MessageType};
+use lsp_types::{notification, LogMessageParams, MessageType};
 
 use serde;
 use serde_json::{self, from_value, to_string, to_value};

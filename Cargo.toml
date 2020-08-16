@@ -17,12 +17,10 @@ env_logger = "0.7.0"
 
 anyhow = "1"
 
-codespan = "0.3"
-codespan-lsp = "0.3"
-codespan-reporting = "0.3"
+codespan-lsp = "0.10"
+codespan-reporting = "0.9"
 
-url = "1.2.0"
-url_serde = "0.2.0"
+url = "2"
 
 combine = "4"
 
@@ -38,12 +36,12 @@ serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-languageserver-types = "0.54.0"
+lsp-types = "0.77.0"
 debugserver-types = "0.5.0"
 
-gluon = { version = "0.15.1", features = ["serialization", "regex", "rand", "web"] }
-gluon_completion = "0.15.1"
-gluon_format = "0.15.1"
+gluon = { version = "0.17", features = ["serialization", "regex", "rand", "web"] }
+gluon_completion = "0.17"
+gluon_format = "0.17"
 
 [dev-dependencies]
 pretty_assertions = "0.6"

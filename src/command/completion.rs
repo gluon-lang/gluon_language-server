@@ -1,14 +1,12 @@
 use futures::channel::mpsc;
 
-use languageserver_types::CompletionItem;
+use lsp_types::CompletionItem;
 
 use crate::completion;
 
-use languageserver_types::{CompletionParams, CompletionResponse};
+use lsp_types::{CompletionParams, CompletionResponse};
 
 use crate::{check_importer::Module, name::with_import, rpc::LanguageServerCommand, BoxFuture};
-
-use url_serde;
 
 use serde::Deserialize;
 use serde_json;
@@ -17,7 +15,6 @@ use super::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct CompletionData {
-    #[serde(with = "url_serde")]
     pub text_document_uri: Url,
     pub position: Position,
 }
@@ -30,7 +27,7 @@ impl LanguageServerCommand<CompletionParams> for Completion {
     type Error = ();
     fn execute(&self, change: CompletionParams) -> BoxFuture<Self::Output, ServerError<()>> {
         let thread = self.0.clone();
-        let text_document_uri = change.text_document.uri.clone();
+        let text_document_uri = change.text_document_position.text_document.uri.clone();
         async move {
             retrieve_expr(&thread.clone(), &text_document_uri, |module| {
                 let Module {
@@ -41,7 +38,8 @@ impl LanguageServerCommand<CompletionParams> for Completion {
 
                 let expr = expr.expr();
 
-                let byte_index = position_to_byte_index(&source, &change.position)?;
+                let byte_index =
+                    position_to_byte_index(&**source, &change.text_document_position.position)?;
 
                 let query = completion::SuggestionQuery {
                     modules: with_import(&thread, |import| {
@@ -50,8 +48,9 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                     ..completion::SuggestionQuery::default()
                 };
 
+                let db = thread.get_database();
                 let suggestions = query
-                    .suggest(&thread.get_env(), source.span(), expr, byte_index)
+                    .suggest(&db.as_env(), source.span(), expr, byte_index)
                     .into_iter()
                     .filter(|suggestion| !suggestion.name.starts_with("__"))
                     .collect::<Vec<_>>();
@@ -80,8 +79,12 @@ impl LanguageServerCommand<CompletionParams> for Completion {
                             },
                             data: Some(
                                 serde_json::to_value(CompletionData {
-                                    text_document_uri: change.text_document.uri.clone(),
-                                    position: change.position,
+                                    text_document_uri: change
+                                        .text_document_position
+                                        .text_document
+                                        .uri
+                                        .clone(),
+                                    position: change.text_document_position.position,
                                 })
                                 .expect("CompletionData"),
                             ),
@@ -129,7 +132,7 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread, message_log: &mpsc::S
                 &data.text_document_uri,
                 &data.position,
                 |module, byte_index| {
-                    let mut db = thread.get_database();
+                    let db = thread.get_database();
                     let type_env = db.as_env();
                     let module_expr = module.expr.expr();
                     let (_, metadata_map) =

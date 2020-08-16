@@ -21,7 +21,7 @@ use {
         response::{Output, Response},
         version::Version,
     },
-    languageserver_types::*,
+    lsp_types::*,
     serde::{de::DeserializeOwned, Serialize},
     serde_json::{from_str, from_value, ser::Serializer, to_value, Value},
     tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -29,6 +29,7 @@ use {
     url::Url,
 };
 
+use gluon::ThreadExt;
 use gluon_language_server::rpc::LanguageServerDecoder;
 
 pub fn test_url(uri: &str) -> Url {
@@ -115,7 +116,7 @@ where
     did_open_uri(stdin, test_url(uri), text).await
 }
 
-pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: u64, range: Range, text: &str)
+pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: i64, range: Range, text: &str)
 where
     W: AsyncWrite + Unpin,
 {
@@ -135,7 +136,7 @@ where
 pub async fn did_change_event<W: ?Sized>(
     stdin: &mut W,
     uri: &str,
-    version: u64,
+    version: i64,
     content_changes: Vec<TextDocumentContentChangeEvent>,
 ) where
     W: AsyncWrite + Unpin,
@@ -230,7 +231,13 @@ pub fn run_no_panic_catch<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::runtime::Runtime::new().unwrap().block_on(fut)
+    tokio::runtime::Builder::new()
+        .enable_all()
+        .core_threads(1)
+        .basic_scheduler()
+        .build()
+        .unwrap()
+        .block_on(fut)
 }
 
 struct ServerHandle {
@@ -245,6 +252,7 @@ fn start_local() -> ServerHandle {
 
     tokio::spawn(async move {
         let thread = gluon::new_vm_async().await;
+        thread.get_database_mut().set_implicit_prelude(false);
         if let Err(err) =
             ::gluon_language_server::Server::start(thread, stdin_read, stdout_write).await
         {
@@ -287,14 +295,13 @@ where
             mut stdin,
             mut stdout,
         } = if env::var("GLUON_TEST_LOCAL_SERVER").is_ok() {
-            // FIXME Local  testing may deadlock atm
             start_local()
         } else {
             start_remote()
         };
 
         {
-            f(&mut stdin, &mut stdout);
+            f(&mut stdin, &mut stdout).await;
 
             write_message(&mut stdin, method_call("shutdown", 1_000_000, ()))
                 .await

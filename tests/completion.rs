@@ -9,7 +9,7 @@ use tokio::io::AsyncWrite;
 
 use url::Url;
 
-use languageserver_types::*;
+use lsp_types::*;
 
 use gluon_language_server::CompletionData;
 
@@ -40,6 +40,22 @@ where
     let hover = support::method_call("completionItem/resolve", id, item);
 
     support::write_message(stdin, hover).await.unwrap();
+}
+
+async fn workspace_symbol<W: ?Sized>(stdin: &mut W, id: u64, query: &str)
+where
+    W: AsyncWrite + std::marker::Unpin,
+{
+    let msg = support::method_call(
+        "workspace/symbol",
+        id,
+        WorkspaceSymbolParams {
+            query: query.into(),
+            ..Default::default()
+        },
+    );
+
+    support::write_message(stdin, msg).await.unwrap();
 }
 
 fn remove_completion_data(mut completions: Vec<CompletionItem>) -> Vec<CompletionItem> {
@@ -428,6 +444,29 @@ let test = 1
                     detail: Some("Int".into()),
                     ..CompletionItem::default()
                 }]
+            );
+        })
+    });
+}
+
+#[test]
+fn workspace_symbol_test() {
+    support::send_rpc(move |stdin, stdout| {
+        Box::pin(async move {
+            let text = r#"
+let myfunc x = x
+{ myfunc }
+"#;
+            support::did_open(stdin, "test", text).await;
+
+            let _: PublishDiagnosticsParams = expect_notification(&mut *stdout).await;
+
+            workspace_symbol(stdin, 2, "myfunc").await;
+
+            let symbols: Vec<SymbolInformation> = expect_response(stdout).await;
+            assert_eq!(
+                symbols.into_iter().map(|s| s.name).collect::<Vec<_>>(),
+                vec!["myfunc".to_string()],
             );
         })
     });

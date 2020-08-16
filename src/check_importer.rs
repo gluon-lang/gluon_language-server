@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use gluon::{
     self,
-    base::{ast::OwnedExpr, fnv::FnvMap, symbol::Symbol, types::ArcType},
+    base::{ast::OwnedExpr, fnv::FnvMap, metadata::Metadata, symbol::Symbol, types::ArcType},
+    compiler_pipeline::{SalvageResult, TypecheckValue},
     import::Importer,
-    query::Compilation,
+    query::AsyncCompilation,
     Error as GluonError, ModuleCompiler, Thread, ThreadExt,
 };
 
@@ -13,24 +14,15 @@ use {futures::prelude::*, tokio::sync::Mutex, url::Url};
 use crate::{name::module_name_to_file_, text_edit::TextChanges};
 
 pub(crate) struct Module {
-    pub source: Arc<codespan::FileMap>,
+    pub source: Arc<gluon::base::source::FileMap>,
     pub expr: Arc<OwnedExpr<Symbol>>,
+    pub metadata: Arc<Metadata>,
     pub uri: Url,
-}
-
-impl Module {
-    pub(crate) fn empty(uri: Url) -> Module {
-        Module {
-            source: Arc::new(codespan::FileMap::new("".into(), "".into())),
-            expr: Default::default(),
-            uri,
-        }
-    }
 }
 
 pub struct State {
     pub uri: Url,
-    pub version: Option<u64>,
+    pub version: Option<i64>,
     pub text_changes: TextChanges,
 }
 
@@ -42,19 +34,25 @@ impl State {
             text_changes: TextChanges::new(),
         }
     }
+}
 
-    pub(crate) async fn module(&self, thread: &Thread, module: &str) -> gluon::Result<Module> {
-        let mut db = thread.get_database();
-        let m = db
-            .typechecked_source_module(module.into(), None)
-            .await
-            .or_else(|(partial_value, err)| partial_value.ok_or(err))?;
-        Ok(Module {
-            source: db.get_filemap(module).expect("Filemap"),
-            expr: m.expr.clone(),
-            ..Module::empty(self.uri.clone())
-        })
-    }
+pub(crate) async fn get_module(
+    thread: &Thread,
+    module: &str,
+) -> gluon::Result<(
+    Arc<gluon::base::source::FileMap>,
+    TypecheckValue<Arc<OwnedExpr<Symbol>>>,
+)> {
+    let mut db = thread.get_database();
+    let m = db
+        .typechecked_source_module(module.into(), None)
+        .await
+        .or_else(|err| err.value.ok_or(err.error))?;
+
+    let _ = db.module_type(module.into(), None).await;
+    let _ = db.module_metadata(module.into(), None).await;
+
+    Ok((db.get_filemap(module).expect("Filemap"), m))
 }
 
 #[derive(Clone)]
@@ -65,16 +63,46 @@ impl CheckImporter {
     }
 
     pub(crate) async fn module(&self, thread: &Thread, module: &str) -> Option<Module> {
-        let map = self.0.lock().await;
-        let s = map.get(module)?;
-        s.module(thread, module).await.ok()
+        let (source, value) = get_module(thread, module)
+            .await
+            .map_err(|err| {
+                dbg!(&err);
+                err
+            })
+            .ok()?;
+
+        let uri = {
+            let map = self.0.lock().await;
+            map.get(module)?.uri.clone()
+        };
+
+        Some(Module {
+            source,
+            expr: value.expr.clone(),
+            metadata: value.metadata.clone(),
+            uri,
+        })
     }
 
     pub(crate) async fn modules(&self, thread: &Thread) -> impl Iterator<Item = Module> {
-        let map = self.0.lock().await;
+        let uris = self
+            .0
+            .lock()
+            .await
+            .iter()
+            .map(|(module, s)| (module.clone(), s.uri.clone()))
+            .collect::<Vec<_>>();
 
-        futures::stream::iter(map.iter())
-            .filter_map(|(module, s)| async move { s.module(thread, module).await.ok() })
+        futures::stream::iter(uris)
+            .filter_map(|(module, uri)| async move {
+                let (source, value) = get_module(thread, &module).await.ok()?;
+                Some(Module {
+                    source,
+                    expr: value.expr.clone(),
+                    metadata: value.metadata.clone(),
+                    uri,
+                })
+            })
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -85,26 +113,26 @@ impl CheckImporter {
 impl Importer for CheckImporter {
     async fn import(
         &self,
-        compiler: &mut ModuleCompiler<'_>,
+        compiler: &mut ModuleCompiler<'_, '_>,
         _: &Thread,
         module_name: &str,
-    ) -> Result<ArcType, (Option<ArcType>, GluonError)> {
-        let typ = compiler
-            .database
-            .module_type(module_name.into(), None)
-            .await
-            .map_err(|err| (None, err))?;
+    ) -> SalvageResult<ArcType> {
         compiler
             .database
             .module_metadata(module_name.into(), None)
             .await
-            .map_err(|err| (None, err))?;
+            .or_else(|err| err.get_value())?;
+        let typ = compiler
+            .database
+            .module_type(module_name.into(), None)
+            .await
+            .or_else(|err| err.get_value())?;
 
         self.0.lock().await.insert(
             module_name.into(),
             State {
                 uri: module_name_to_file_(module_name)
-                    .map_err(|err| (None, GluonError::from(err.to_string())))?,
+                    .map_err(|err| GluonError::from(err.to_string()))?,
                 version: None,
                 text_changes: TextChanges::new(),
             },

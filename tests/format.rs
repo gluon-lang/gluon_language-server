@@ -6,7 +6,7 @@ mod support;
 
 use tokio::io::AsyncWrite;
 
-use languageserver_types::*;
+use lsp_types::*;
 
 use crate::support::{did_change_event, expect_notification, expect_response, hover};
 
@@ -24,8 +24,9 @@ where
             options: FormattingOptions {
                 tab_size: 4,
                 insert_spaces: true,
-                properties: Default::default(),
+                ..Default::default()
             },
+            work_done_progress_params: Default::default(),
         },
     );
 
@@ -106,7 +107,10 @@ x + "abc"
             assert_eq!(
                 hover,
                 Hover {
-                    contents: HoverContents::Scalar(MarkedString::String("String".into())),
+                    contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                        language: "gluon".into(),
+                        value: "String".into()
+                    })),
                     range: Some(Range {
                         start: Position {
                             line: 2,

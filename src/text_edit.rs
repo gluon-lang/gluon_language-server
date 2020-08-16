@@ -1,17 +1,15 @@
 use std::collections::VecDeque;
 
-use codespan::{self, RawIndex};
-
-use languageserver_types::TextDocumentContentChangeEvent;
-
-use gluon::base::pos::Span;
+use lsp_types::TextDocumentContentChangeEvent;
 
 use crate::rpc::ServerError;
 use codespan_lsp::range_to_byte_span;
 
+pub type Version = i64;
+
 #[derive(Debug)]
 struct VersionedChange {
-    version: u64,
+    version: Version,
     content_changes: Vec<TextDocumentContentChangeEvent>,
 }
 
@@ -29,7 +27,7 @@ impl TextChanges {
         }
     }
 
-    pub fn add(&mut self, version: u64, content_changes: Vec<TextDocumentContentChangeEvent>) {
+    pub fn add(&mut self, version: Version, content_changes: Vec<TextDocumentContentChangeEvent>) {
         let i = self
             .changes
             .iter()
@@ -54,8 +52,8 @@ impl TextChanges {
     pub fn apply_changes(
         &mut self,
         source: &mut String,
-        mut version: u64,
-    ) -> Result<u64, ServerError<()>> {
+        mut version: Version,
+    ) -> Result<Version, ServerError<()>> {
         while let Some(change) = self.changes.pop_front() {
             assert!(
                 change.version >= version,
@@ -102,18 +100,16 @@ fn apply_change(
     change: &TextDocumentContentChangeEvent,
 ) -> Result<(), ServerError<()>> {
     info!("Applying change: {:?}", change);
-    let span = match (change.range, change.range_length) {
-        (None, None) => Span::new(1.into(), (source.len() as RawIndex + 1).into()),
-        (Some(range), None) | (Some(range), Some(_)) => {
-            range_to_byte_span(&codespan::FileMap::new("".into(), &**source), &range)?
-        }
+    let range = match (change.range, change.range_length) {
+        (None, None) => 0..source.len(),
+        (Some(range), None) | (Some(range), Some(_)) => range_to_byte_span(
+            &codespan_reporting::files::SimpleFile::new("", &**source),
+            (),
+            &range,
+        )?,
         (None, Some(_)) => panic!("Invalid change"),
     };
-    replace_range(
-        source,
-        (span.start().to_usize() - 1)..(span.end().to_usize() - 1),
-        &change.text,
-    );
+    replace_range(source, range, &change.text);
     Ok(())
 }
 
@@ -121,7 +117,7 @@ fn apply_change(
 mod tests {
     use super::*;
 
-    use languageserver_types::{Position, Range};
+    use lsp_types::{Position, Range};
 
     #[test]
     fn apply_changes_test() {

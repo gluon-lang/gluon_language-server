@@ -1,7 +1,9 @@
 use std::fmt;
 
-use crate::completion::{CompletionSymbol, CompletionSymbolContent};
-use crate::either;
+use crate::{
+    completion::{CompletionSymbol, CompletionSymbolContent},
+    either,
+};
 
 use gluon::{
     self,
@@ -11,17 +13,16 @@ use gluon::{
         kind::ArcKind,
         pos::{BytePos, Spanned},
         symbol::Symbol,
-        types::{ArcType, BuiltinType, Type},
+        types::{ArcType, BuiltinType, Type, TypeExt, TypePtr},
     },
     import::Import,
     RootedThread, Thread, ThreadExt,
 };
 
 use {
-    codespan_lsp::{byte_span_to_range, position_to_byte_index},
     futures::prelude::*,
     jsonrpc_core::IoHandler,
-    languageserver_types::{
+    lsp_types::{
         CompletionItemKind, DocumentSymbol, Documentation, Location, MarkupContent, MarkupKind,
         Position, SymbolInformation, SymbolKind,
     },
@@ -29,8 +30,10 @@ use {
 };
 
 use crate::{
+    byte_span_to_range,
     check_importer::{CheckImporter, Module},
     name::strip_file_prefix_with_thread,
+    position_to_byte_index,
     rpc::ServerError,
     server::Handler,
 };
@@ -47,7 +50,7 @@ pub mod symbol;
 
 fn type_to_completion_item_kind(typ: &ArcType) -> CompletionItemKind {
     match **typ {
-        _ if typ.as_function().is_some() => CompletionItemKind::Function,
+        _ if typ.remove_forall().as_function().is_some() => CompletionItemKind::Function,
         Type::Alias(ref alias) => type_to_completion_item_kind(alias.unresolved_type()),
         Type::App(ref f, _) => type_to_completion_item_kind(f),
         Type::Variant(_) => CompletionItemKind::Enum,
@@ -91,44 +94,90 @@ where
 
 fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
-        CompletionSymbolContent::Type { .. } => SymbolKind::Class,
-        CompletionSymbolContent::Value { typ, expr } => expr_to_kind(expr, typ),
+        CompletionSymbolContent::Type { typ } => match &**typ {
+            Type::Variant(_) => SymbolKind::Enum,
+            _ => SymbolKind::Class,
+        },
+        CompletionSymbolContent::Value { typ, kind: _, expr } => match expr {
+            Some(expr) => expr_to_kind(expr, typ),
+            None => SymbolKind::Variable,
+        },
     }
 }
 
+fn completion_symbols_to_document_symbols(
+    source: &gluon::base::source::FileMap,
+    symbols: &[Spanned<CompletionSymbol<'_, '_>, BytePos>],
+) -> Result<Vec<DocumentSymbol>, ServerError<()>> {
+    completion_symbols_to_document_symbols_inner(source, symbols, None)
+}
+
+fn completion_symbols_to_document_symbols_inner(
+    source: &gluon::base::source::FileMap,
+    symbols: &[Spanned<CompletionSymbol<'_, '_>, BytePos>],
+    parent_kind: Option<SymbolKind>,
+) -> Result<Vec<DocumentSymbol>, ServerError<()>> {
+    symbols
+        .iter()
+        .filter(|symbol| match &symbol.value.content {
+            CompletionSymbolContent::Value { kind, .. } => match kind {
+                // Skip function parameters
+                gluon_completion::CompletionValueKind::Parameter => false,
+                gluon_completion::CompletionValueKind::Binding => true,
+            },
+            CompletionSymbolContent::Type { .. } => true,
+        })
+        .map(|symbol| completion_symbol_to_document_symbol(source, symbol, parent_kind))
+        .collect()
+}
+
 fn completion_symbol_to_document_symbol(
-    source: &codespan::FileMap,
+    source: &gluon::base::source::FileMap,
     symbol: &Spanned<CompletionSymbol<'_, '_>, BytePos>,
+    parent_kind: Option<SymbolKind>,
 ) -> Result<DocumentSymbol, ServerError<()>> {
-    let kind = completion_symbol_kind(&symbol.value);
+    let kind = parent_kind
+        .and_then(|parent_kind| match parent_kind {
+            SymbolKind::Enum => Some(SymbolKind::EnumMember),
+            _ => None,
+        })
+        .unwrap_or_else(|| completion_symbol_kind(&symbol.value));
     let range = byte_span_to_range(source, symbol.span)?;
     Ok(DocumentSymbol {
         kind,
         range,
         selection_range: range,
         name: symbol.value.name.declared_name().to_string(),
-        detail: Some(match &symbol.value.content {
-            CompletionSymbolContent::Type { alias } => alias.unresolved_type().to_string(),
-            CompletionSymbolContent::Value { typ, .. } => typ.to_string(),
-        }),
+        detail: {
+            let detail = match symbol.value.content {
+                CompletionSymbolContent::Type { typ } => typ.display(1000000).to_string(),
+                CompletionSymbolContent::Value { typ, .. } => typ.display(1000000).to_string(),
+            };
+            // Multiline renders badly in VS Code so skip detail if we happen to get newlines (such as for variant types)
+            if detail.contains('\n') {
+                None
+            } else {
+                Some(detail)
+            }
+        },
         deprecated: Default::default(),
-        children: if symbol.value.children.is_empty() {
-            None
-        } else {
-            Some(
-                symbol
-                    .value
-                    .children
-                    .iter()
-                    .map(|child| completion_symbol_to_document_symbol(source, child))
-                    .collect::<Result<_, _>>()?,
-            )
+        children: {
+            let children = completion_symbols_to_document_symbols_inner(
+                source,
+                &symbol.value.children,
+                Some(kind),
+            )?;
+            if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            }
         },
     })
 }
 
 fn completion_symbol_to_symbol_information(
-    source: &codespan::FileMap,
+    source: &gluon::base::source::FileMap,
     symbol: Spanned<CompletionSymbol<'_, '_>, BytePos>,
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
@@ -155,7 +204,7 @@ fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
 
 fn type_to_kind(typ: &ArcType) -> SymbolKind {
     match **typ {
-        _ if typ.as_function().is_some() => SymbolKind::Function,
+        _ if typ.remove_forall().as_function().is_some() => SymbolKind::Function,
         Type::Ident(ref id) if id.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
         Type::Builtin(builtin) => match builtin {
@@ -178,13 +227,13 @@ where
 {
     let filename = strip_file_prefix_with_thread(&thread, &text_document_uri);
     let module = filename_to_module(&filename);
+
     let import = thread.get_macros().get("import").expect("Import macro");
     let import = import
         .downcast_ref::<Import<CheckImporter>>()
         .expect("Check importer");
-    match import.importer.module(&thread, &module).await {
-        Some(ref source_module) => return f(source_module),
-        None => (),
+    if let Some(ref source_module) = import.importer.module(&thread, &module).await {
+        return f(source_module);
     }
     Err(ServerError {
         message: {
@@ -209,9 +258,40 @@ where
     F: FnOnce(&Module, BytePos) -> Result<R, ServerError<()>>,
 {
     retrieve_expr(thread, text_document_uri, move |module| {
-        let byte_index = position_to_byte_index(&module.source, position)?;
+        let byte_index = position_to_byte_index(&*module.source, position)?;
 
         f(module, byte_index)
     })
     .await
+}
+
+async fn retrieve_module_from_url(
+    thread: &Thread,
+    text_document_uri: &Url,
+) -> Result<Module, ServerError<()>> {
+    let filename = strip_file_prefix_with_thread(&thread, &text_document_uri);
+    let module = filename_to_module(&filename);
+    retrieve_module(thread, &module).await
+}
+
+async fn retrieve_module(thread: &Thread, module: &str) -> Result<Module, ServerError<()>> {
+    let import = thread.get_macros().get("import").expect("Import macro");
+    let import = import
+        .downcast_ref::<Import<CheckImporter>>()
+        .expect("Check importer");
+    if let Some(source_module) = import.importer.module(&thread, &module).await {
+        Ok(source_module)
+    } else {
+        Err(ServerError {
+            message: {
+                let m = import.importer.0.lock().await;
+                format!(
+                    "Module `{}` is not defined\n{:?}",
+                    module,
+                    m.keys().collect::<Vec<_>>()
+                )
+            },
+            data: None,
+        })
+    }
 }

@@ -5,22 +5,26 @@ use std::{
 };
 
 use gluon::{
-    self,
-    base::{filename_to_module, pos},
+    base::{
+        filename_to_module,
+        pos::{self, ByteIndex, ByteOffset},
+        source::{self, Source},
+    },
     import::Import,
-    query::{Compilation, CompilationBase},
+    query::{AsyncCompilation, CompilationBase},
     Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
 };
 
 use {
+    codespan_reporting::diagnostic::{Diagnostic, Severity},
     futures::{channel::mpsc, prelude::*},
     jsonrpc_core::IoHandler,
-    languageserver_types::*,
+    lsp_types::*,
     url::Url,
 };
 
 use crate::{
-    cancelable,
+    byte_span_to_range, cancelable,
     check_importer::{CheckImporter, State},
     name::{
         codespan_name_to_file, module_name_to_file, strip_file_prefix,
@@ -32,84 +36,75 @@ use crate::{
 };
 
 fn create_diagnostics<'a>(
-    diagnostics: &'a mut BTreeMap<Url, Vec<Diagnostic>>,
-    code_map: &'a codespan::CodeMap,
+    diagnostics: &'a mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
     importer: &'a CheckImporter,
     filename: &'a Url,
     err: &'a GluonError,
 ) -> futures::future::BoxFuture<'a, Result<(), ServerError<()>>> {
-    create_diagnostics_(diagnostics, code_map, importer, filename, err).boxed()
+    create_diagnostics_(diagnostics, importer, filename, err).boxed()
 }
 async fn create_diagnostics_(
-    diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
-    code_map: &codespan::CodeMap,
+    diagnostics: &mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
     importer: &CheckImporter,
     filename: &Url,
     err: &GluonError,
 ) -> Result<(), ServerError<()>> {
     use gluon::base::error::AsDiagnostic;
     fn into_diagnostic<T>(
-        code_map: &codespan::CodeMap,
+        code_map: &source::CodeMap,
         err: &pos::Spanned<T, pos::BytePos>,
-    ) -> Result<Diagnostic, ServerError<()>>
+    ) -> Result<lsp_types::Diagnostic, ServerError<()>>
     where
-        T: fmt::Display + AsDiagnostic,
+        T: fmt::Debug + fmt::Display + AsDiagnostic,
     {
-        Ok(Diagnostic {
+        Ok(lsp_types::Diagnostic {
             source: Some("gluon".to_string()),
-            ..codespan_lsp::make_lsp_diagnostic(code_map, err.as_diagnostic(), |filename| {
+            ..make_lsp_diagnostic(code_map, err.as_diagnostic(&code_map), |filename| {
                 codespan_name_to_file(filename).map_err(|err| {
-                    error!("{}", err);
+                    error!("Could not find file: {}", err);
                 })
             })?
         })
     }
 
     async fn insert_in_file_error<T>(
-        diagnostics: &mut BTreeMap<Url, Vec<Diagnostic>>,
-        code_map: &codespan::CodeMap,
+        diagnostics: &mut BTreeMap<Url, Vec<lsp_types::Diagnostic>>,
         importer: &CheckImporter,
         in_file_error: &gluon::base::error::InFile<T>,
     ) -> Result<(), ServerError<()>>
     where
-        T: fmt::Display + AsDiagnostic,
+        T: fmt::Debug + fmt::Display + AsDiagnostic,
     {
         let errors = diagnostics
             .entry(module_name_to_file(importer, &in_file_error.source_name()).await)
             .or_default();
         for err in in_file_error.errors() {
-            errors.push(into_diagnostic(code_map, &err)?);
+            errors.push(into_diagnostic(in_file_error.source(), &err)?);
         }
         Ok(())
     }
 
     match err {
-        GluonError::Typecheck(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Typecheck(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
-        GluonError::Parse(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Parse(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
-        GluonError::Macro(err) => {
-            insert_in_file_error(diagnostics, code_map, importer, err).await?
-        }
+        GluonError::Macro(err) => insert_in_file_error(diagnostics, importer, err).await?,
 
         GluonError::Multiple(errors) => {
             for err in errors {
-                create_diagnostics(diagnostics, code_map, importer, filename, err).await?;
+                create_diagnostics(diagnostics, importer, filename, err).await?;
             }
         }
 
         err => diagnostics
             .entry(filename.clone())
             .or_default()
-            .push(Diagnostic {
+            .push(lsp_types::Diagnostic {
                 message: format!("{}", err),
                 severity: Some(DiagnosticSeverity::Error),
                 source: Some("gluon".to_string()),
-                ..Diagnostic::default()
+                ..Default::default()
             }),
     }
     Ok(())
@@ -131,7 +126,7 @@ impl DiagnosticsWorker {
     pub async fn run_diagnostics(
         &mut self,
         uri_filename: &Url,
-        version: Option<u64>,
+        version: Option<i64>,
         fileinput: &str,
     ) {
         info!("Running diagnostics on {}", uri_filename);
@@ -156,14 +151,9 @@ impl DiagnosticsWorker {
                     .downcast_ref::<Import<CheckImporter>>()
                     .expect("Check importer");
 
-                let result = create_diagnostics(
-                    &mut diagnostics,
-                    &self.thread.get_database().code_map(),
-                    &import.importer,
-                    uri_filename,
-                    &err,
-                )
-                .await;
+                let result =
+                    create_diagnostics(&mut diagnostics, &import.importer, uri_filename, &err)
+                        .await;
                 if let Err(err) = result {
                     error!("Unable to create diagnostics: {}", err.message);
                     return;
@@ -181,6 +171,7 @@ impl DiagnosticsWorker {
                 PublishDiagnosticsParams {
                     uri: source_name,
                     diagnostics: diagnostic,
+                    version,
                 },
             )
             .await;
@@ -191,14 +182,13 @@ impl DiagnosticsWorker {
         &mut self,
         uri_filename: &Url,
         name: &str,
-        version: Option<u64>,
+        version: Option<i64>,
     ) -> GluonResult<()> {
         let result = self
             .thread
             .get_database()
             .typechecked_source_module(name.into(), None)
-            .await
-            .map_err(|(_, err)| err);
+            .await;
 
         let import = self
             .thread
@@ -293,7 +283,7 @@ pub fn register(
         mut work_queue: S,
         change: DidChangeTextDocumentParams,
     ) where
-        S: Sink<Entry<Url, String, u64>, Error = ()> + Send + Unpin + 'static,
+        S: Sink<Entry<Url, String, i64>, Error = ()> + Send + Unpin + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -325,10 +315,10 @@ pub fn register(
             module_state.uri.clone_from(&uri);
         }
         let result = {
-            let mut source = module_state
-                .module(thread, &module_name)
-                .await
-                .map(|m| m.source.src().to_string())
+            let mut source = thread
+                .get_database()
+                .get_filemap(&module_name)
+                .map(|filemap| filemap.src().to_string())
                 .unwrap_or_default();
             debug!("Change source {}:\n{}", uri, source);
 
@@ -389,4 +379,113 @@ pub fn register(
 
         io.add_notification(notification!("textDocument/didChange"), f);
     }
+}
+
+pub fn make_lsp_severity(severity: Severity) -> lsp_types::DiagnosticSeverity {
+    match severity {
+        Severity::Error | Severity::Bug => lsp_types::DiagnosticSeverity::Error,
+        Severity::Warning => lsp_types::DiagnosticSeverity::Warning,
+        Severity::Note => lsp_types::DiagnosticSeverity::Information,
+        Severity::Help => lsp_types::DiagnosticSeverity::Hint,
+    }
+}
+
+const UNKNOWN_POS: lsp_types::Position = lsp_types::Position {
+    character: 0,
+    line: 0,
+};
+
+const UNKNOWN_RANGE: lsp_types::Range = lsp_types::Range {
+    start: UNKNOWN_POS,
+    end: UNKNOWN_POS,
+};
+
+/// Translates a `codespan_reporting::Diagnostic` to a `languageserver_types::Diagnostic`.
+///
+/// Since the language client requires `Url`s to locate the errors `codespan_name_to_file` is
+/// necessary to resolve codespan `FileName`s
+///
+/// `code` and `source` are left empty by this function
+pub fn make_lsp_diagnostic<F>(
+    code_map: &source::CodeMap,
+    diagnostic: Diagnostic<ByteIndex>,
+    mut codespan_name_to_file: F,
+) -> Result<lsp_types::Diagnostic, anyhow::Error>
+where
+    F: FnMut(&str) -> Result<Url, ()>,
+{
+    use codespan_reporting::diagnostic::LabelStyle;
+
+    let find_file = |index| {
+        code_map
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("Span is outside codemap {}", index))
+    };
+
+    // We need a position for the primary error so take the span from the first primary label
+    let (primary_file_map, primary_label_range) = {
+        let first_primary_label = diagnostic
+            .labels
+            .iter()
+            .find(|label| label.style == LabelStyle::Primary);
+
+        match first_primary_label {
+            Some(label) => {
+                let file_map = find_file(label.file_id)?;
+                let start = file_map.span().start();
+                let span = pos::Span::new(
+                    start + ByteOffset::from(label.range.start as i64),
+                    start + ByteOffset::from(label.range.end as i64),
+                );
+                (Some(file_map), byte_span_to_range(&file_map, span)?)
+            }
+            None => (None, UNKNOWN_RANGE),
+        }
+    };
+
+    let related_information = diagnostic
+        .labels
+        .into_iter()
+        .map(|label| {
+            let (file_map, range) = match primary_file_map {
+                // If the label's span does not point anywhere, assume it comes from the same file
+                // as the primary label
+                Some(file_map) if label.file_id == ByteIndex::default() => {
+                    (file_map, UNKNOWN_RANGE)
+                }
+                Some(_) | None => {
+                    let file_map = find_file(label.file_id)?;
+                    let start = file_map.span().start();
+                    let span = pos::Span::new(
+                        start + ByteOffset::from(label.range.start as i64),
+                        start + ByteOffset::from(label.range.end as i64),
+                    );
+                    let range = byte_span_to_range(file_map, span)?;
+
+                    (file_map, range)
+                }
+            };
+
+            let uri = codespan_name_to_file(file_map.name()).map_err(|()| {
+                anyhow::anyhow!("Unable to correlate filename: {}", file_map.name())
+            })?;
+
+            Ok(lsp_types::DiagnosticRelatedInformation {
+                location: lsp_types::Location { uri, range },
+                message: label.message,
+            })
+        })
+        .collect::<Result<Vec<_>, anyhow::Error>>()?;
+
+    Ok(lsp_types::Diagnostic {
+        message: diagnostic.message,
+        range: primary_label_range,
+        severity: Some(make_lsp_severity(diagnostic.severity)),
+        related_information: if related_information.is_empty() {
+            None
+        } else {
+            Some(related_information)
+        },
+        ..lsp_types::Diagnostic::default()
+    })
 }
