@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "gluon_language-server"
-version = "0.15.1-alpha.0"
+version = "0.16.1-alpha.0"
 dependencies = [
  "anyhow",
  "async-pipe",
