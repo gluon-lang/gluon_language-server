@@ -35,9 +35,10 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
             Ok(InitializeResult {
                 server_info: Some(ServerInfo {
                     name: "Gluon language server".into(),
-                    version: Some(
-                        concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_COMMIT")).into(),
-                    ),
+                    version: Some(match option_env!("GIT_COMMIT") {
+                        Some(git_commit) => format!("{}-{}", env!("CARGO_PKG_VERSION"), git_commit),
+                        None => env!("CARGO_PKG_VERSION").into(),
+                    }),
                 }),
                 capabilities: ServerCapabilities {
                     text_document_sync: Some(TextDocumentSyncCapability::Kind(
