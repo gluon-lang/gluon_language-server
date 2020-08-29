@@ -2,6 +2,7 @@ use std::{
     collections::{hash_map, BTreeMap},
     fmt,
     marker::Unpin,
+    sync::Arc,
 };
 
 use gluon::{
@@ -22,6 +23,8 @@ use {
     lsp_types::*,
     url::Url,
 };
+
+use tokio::sync::Mutex;
 
 use crate::{
     byte_span_to_range, cancelable,
@@ -229,14 +232,18 @@ pub fn register(
     message_log: &mpsc::Sender<String>,
     shutdown: ShutdownReceiver,
 ) {
+    let lock = Arc::new(Mutex::new(()));
+
     let work_queue = {
         let (diagnostic_sink, diagnostic_stream) = rpc::unique_queue();
 
         let mut diagnostics_runner = DiagnosticsWorker::new(thread.clone(), message_log.clone());
+        let lock = lock.clone();
 
         tokio::spawn(cancelable(shutdown, async move {
             futures::pin_mut!(diagnostic_stream);
             while let Some(entry) = diagnostic_stream.next().await {
+                let _lock = lock.lock().await;
                 let entry: Entry<Url, String, _> = entry;
                 diagnostics_runner
                     .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
@@ -357,12 +364,15 @@ pub fn register(
     {
         let thread = thread.clone();
         let message_log = message_log.clone();
-
         let f = move |change: DidChangeTextDocumentParams| {
             let work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
+            let lock = lock.clone();
+
             tokio::spawn(async move {
+                let _lock = lock.lock().await;
+
                 if let Err(err) = ::std::panic::AssertUnwindSafe(did_change(
                     &thread,
                     message_log.clone(),
