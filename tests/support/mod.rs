@@ -55,6 +55,22 @@ where
         .await
 }
 
+pub async fn run_method_call<T>(
+    writer: &mut (dyn AsyncWrite + std::marker::Unpin + Send),
+    reader: &mut (dyn AsyncBufRead + std::marker::Unpin + Send),
+    id: u64,
+    value: T::Params,
+) -> T::Result
+where
+    T: lsp_types::request::Request,
+{
+    let call = method_call(T::METHOD, id, value);
+
+    write_message(writer, call).await.unwrap();
+
+    expect_response(reader).await
+}
+
 pub fn method_call<T>(method: &str, id: u64, value: T) -> Call
 where
     T: Serialize,
