@@ -11,7 +11,7 @@ use gluon::{
     },
     import::Import,
     query::{AsyncCompilation, CompilationBase},
-    Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
+    Error as GluonError, RootedThread, Thread, ThreadExt,
 };
 
 use {
@@ -133,11 +133,16 @@ impl DiagnosticsWorker {
         let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
         let name = filename_to_module(&filename);
 
-        self.thread.get_database().update_filemap(&name, fileinput);
+        let result = {
+            let mut db = self.thread.get_database();
+            db.update_filemap(&name, fileinput);
+            db.typechecked_source_module(name.into(), None).await
+        };
 
-        let diagnostics = match self.typecheck(uri_filename, &name, version).await {
+        let diagnostics = match result {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
             Err(err) => {
+                let err = gluon::Error::from(err);
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
                 let mut diagnostics = BTreeMap::new();
 
@@ -176,50 +181,6 @@ impl DiagnosticsWorker {
             .await;
         }
     }
-
-    async fn typecheck(
-        &mut self,
-        uri_filename: &Url,
-        name: &str,
-        version: Option<i64>,
-    ) -> GluonResult<()> {
-        let result = self
-            .thread
-            .get_database()
-            .typechecked_source_module(name.into(), None)
-            .await;
-
-        let import = self
-            .thread
-            .get_macros()
-            .get("import")
-            .expect("Import macro");
-        let import = import
-            .downcast_ref::<Import<CheckImporter>>()
-            .expect("Check importer");
-        let mut importer = import.importer.0.lock().await;
-
-        match importer.entry(name.into()) {
-            hash_map::Entry::Occupied(mut entry) => {
-                let module = entry.get_mut();
-
-                if version.is_some() {
-                    module.version = version;
-                }
-
-                module.uri = uri_filename.clone();
-            }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(self::State {
-                    uri: uri_filename.clone(),
-                    version: version,
-                    text_changes: TextChanges::new(),
-                });
-            }
-        }
-        result?;
-        Ok(())
-    }
 }
 
 pub fn register(
@@ -237,6 +198,7 @@ pub fn register(
             futures::pin_mut!(diagnostic_stream);
             while let Some(entry) = diagnostic_stream.next().await {
                 let entry: Entry<Url, String, _> = entry;
+
                 diagnostics_runner
                     .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
                     .await;
@@ -256,6 +218,32 @@ pub fn register(
             tokio::spawn(async move {
                 let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
                 let module = filename_to_module(&filename);
+
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                {
+                    let mut importer = import.importer.0.lock().await;
+
+                    match importer.entry(module.clone()) {
+                        hash_map::Entry::Occupied(mut entry) => {
+                            let module = entry.get_mut();
+
+                            module.version = Some(change.text_document.version);
+
+                            module.uri = change.text_document.uri.clone();
+                        }
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(self::State {
+                                uri: change.text_document.uri.clone(),
+                                version: Some(change.text_document.version),
+                                text_changes: TextChanges::new(),
+                            });
+                        }
+                    }
+                }
+
                 thread
                     .get_database_mut()
                     .add_module(module.into(), &change.text_document.text);
