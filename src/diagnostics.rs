@@ -1,7 +1,6 @@
 use std::{
     collections::{hash_map, BTreeMap},
     fmt,
-    marker::Unpin,
 };
 
 use gluon::{
@@ -12,7 +11,7 @@ use gluon::{
     },
     import::Import,
     query::{AsyncCompilation, CompilationBase},
-    Error as GluonError, Result as GluonResult, RootedThread, Thread, ThreadExt,
+    Error as GluonError, RootedThread, Thread, ThreadExt,
 };
 
 use {
@@ -134,11 +133,16 @@ impl DiagnosticsWorker {
         let filename = strip_file_prefix_with_thread(&self.thread, uri_filename);
         let name = filename_to_module(&filename);
 
-        self.thread.get_database().update_filemap(&name, fileinput);
+        let result = {
+            let mut db = self.thread.get_database();
+            db.update_filemap(&name, fileinput);
+            db.typechecked_source_module(name.into(), None).await
+        };
 
-        let diagnostics = match self.typecheck(uri_filename, &name, version).await {
+        let diagnostics = match result {
             Ok(_) => Some((uri_filename.clone(), vec![])).into_iter().collect(),
             Err(err) => {
+                let err = gluon::Error::from(err);
                 debug!("Diagnostics result on `{}`: {}", uri_filename, err);
                 let mut diagnostics = BTreeMap::new();
 
@@ -177,50 +181,6 @@ impl DiagnosticsWorker {
             .await;
         }
     }
-
-    async fn typecheck(
-        &mut self,
-        uri_filename: &Url,
-        name: &str,
-        version: Option<i64>,
-    ) -> GluonResult<()> {
-        let result = self
-            .thread
-            .get_database()
-            .typechecked_source_module(name.into(), None)
-            .await;
-
-        let import = self
-            .thread
-            .get_macros()
-            .get("import")
-            .expect("Import macro");
-        let import = import
-            .downcast_ref::<Import<CheckImporter>>()
-            .expect("Check importer");
-        let mut importer = import.importer.0.lock().await;
-
-        match importer.entry(name.into()) {
-            hash_map::Entry::Occupied(mut entry) => {
-                let module = entry.get_mut();
-
-                if version.is_some() {
-                    module.version = version;
-                }
-
-                module.uri = uri_filename.clone();
-            }
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(self::State {
-                    uri: uri_filename.clone(),
-                    version: version,
-                    text_changes: TextChanges::new(),
-                });
-            }
-        }
-        result?;
-        Ok(())
-    }
 }
 
 pub fn register(
@@ -238,6 +198,7 @@ pub fn register(
             futures::pin_mut!(diagnostic_stream);
             while let Some(entry) = diagnostic_stream.next().await {
                 let entry: Entry<Url, String, _> = entry;
+
                 diagnostics_runner
                     .run_diagnostics(&entry.key, Some(entry.version), &entry.value)
                     .await;
@@ -257,6 +218,32 @@ pub fn register(
             tokio::spawn(async move {
                 let filename = strip_file_prefix_with_thread(&thread, &change.text_document.uri);
                 let module = filename_to_module(&filename);
+
+                let import = thread.get_macros().get("import").expect("Import macro");
+                let import = import
+                    .downcast_ref::<Import<CheckImporter>>()
+                    .expect("Check importer");
+                {
+                    let mut importer = import.importer.0.lock().await;
+
+                    match importer.entry(module.clone()) {
+                        hash_map::Entry::Occupied(mut entry) => {
+                            let module = entry.get_mut();
+
+                            module.version = Some(change.text_document.version);
+
+                            module.uri = change.text_document.uri.clone();
+                        }
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(self::State {
+                                uri: change.text_document.uri.clone(),
+                                version: Some(change.text_document.version),
+                                text_changes: TextChanges::new(),
+                            });
+                        }
+                    }
+                }
+
                 thread
                     .get_database_mut()
                     .add_module(module.into(), &change.text_document.text);
@@ -277,14 +264,10 @@ pub fn register(
         io.add_notification(notification!("textDocument/didSave"), f);
     }
 
-    async fn did_change<S>(
+    async fn did_change(
         thread: &Thread,
-        message_log: mpsc::Sender<String>,
-        mut work_queue: S,
         change: DidChangeTextDocumentParams,
-    ) where
-        S: Sink<Entry<Url, String, i64>, Error = ()> + Send + Unpin + 'static,
-    {
+    ) -> Result<Option<Entry<Url, String, i64>>, ServerError<()>> {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
         let import = import
@@ -314,7 +297,7 @@ pub fn register(
         if module_state.uri != uri {
             module_state.uri.clone_from(&uri);
         }
-        let result = {
+        let (new_version, source) = {
             let mut source = thread
                 .get_database()
                 .get_filemap(&module_name)
@@ -327,31 +310,23 @@ pub fn register(
                     .text_changes
                     .apply_changes(&mut source, current_version)
                 {
-                    Ok(version) if version == current_version => return,
-                    Ok(version) => Ok((version, source)),
-                    Err(err) => Err(err),
+                    Ok(version) if version == current_version => return Ok(None),
+                    Ok(version) => (version, source),
+                    Err(err) => return Err(err),
                 },
-                None => return,
+                None => return Ok(None),
             }
         };
-        match result {
-            Ok((new_version, source)) => {
-                module_state.version = Some(new_version);
-                thread
-                    .get_database_mut()
-                    .add_module(module_name.into(), &source);
-                debug!("Changed to\n{}", source);
-                work_queue
-                    .send(Entry {
-                        key: uri,
-                        value: source,
-                        version: new_version,
-                    })
-                    .await
-                    .unwrap()
-            }
-            Err(err) => log_message!(message_log.clone(), "{}", err.message).await,
-        }
+        module_state.version = Some(new_version);
+        thread
+            .get_database_mut()
+            .add_module(module_name.into(), &source);
+        debug!("Changed to\n{}", source);
+        Ok(Some(Entry {
+            key: uri,
+            value: source,
+            version: new_version,
+        }))
     }
 
     {
@@ -359,20 +334,20 @@ pub fn register(
         let message_log = message_log.clone();
 
         let f = move |change: DidChangeTextDocumentParams| {
-            let work_queue = work_queue.clone();
+            let mut work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
             tokio::spawn(async move {
-                if let Err(err) = ::std::panic::AssertUnwindSafe(did_change(
-                    &thread,
-                    message_log.clone(),
-                    work_queue.clone().sink_map_err(|_| ()),
-                    change,
-                ))
-                .catch_unwind()
-                .await
-                {
-                    error!("{:?}", err);
+                let result = ::std::panic::AssertUnwindSafe(did_change(&thread, change))
+                    .catch_unwind()
+                    .await;
+                match result {
+                    Ok(entry) => match entry {
+                        Ok(None) => (),
+                        Ok(Some(entry)) => work_queue.send(entry).await.unwrap(),
+                        Err(err) => log_message!(message_log.clone(), "{}", err.message).await,
+                    },
+                    Err(err) => error!("{:?}", err),
                 }
             });
         };
