@@ -1,7 +1,6 @@
 use std::{
     collections::{hash_map, BTreeMap},
     fmt,
-    marker::Unpin,
 };
 
 use gluon::{
@@ -277,14 +276,10 @@ pub fn register(
         io.add_notification(notification!("textDocument/didSave"), f);
     }
 
-    async fn did_change<S>(
+    async fn did_change(
         thread: &Thread,
-        message_log: mpsc::Sender<String>,
-        mut work_queue: S,
         change: DidChangeTextDocumentParams,
-    ) where
-        S: Sink<Entry<Url, String, i64>, Error = ()> + Send + Unpin + 'static,
-    {
+    ) -> Result<Option<Entry<Url, String, i64>>, ServerError<()>> {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
         let import = import
@@ -314,7 +309,7 @@ pub fn register(
         if module_state.uri != uri {
             module_state.uri.clone_from(&uri);
         }
-        let result = {
+        let (new_version, source) = {
             let mut source = thread
                 .get_database()
                 .get_filemap(&module_name)
@@ -327,31 +322,23 @@ pub fn register(
                     .text_changes
                     .apply_changes(&mut source, current_version)
                 {
-                    Ok(version) if version == current_version => return,
-                    Ok(version) => Ok((version, source)),
-                    Err(err) => Err(err),
+                    Ok(version) if version == current_version => return Ok(None),
+                    Ok(version) => (version, source),
+                    Err(err) => return Err(err),
                 },
-                None => return,
+                None => return Ok(None),
             }
         };
-        match result {
-            Ok((new_version, source)) => {
-                module_state.version = Some(new_version);
-                thread
-                    .get_database_mut()
-                    .add_module(module_name.into(), &source);
-                debug!("Changed to\n{}", source);
-                work_queue
-                    .send(Entry {
-                        key: uri,
-                        value: source,
-                        version: new_version,
-                    })
-                    .await
-                    .unwrap()
-            }
-            Err(err) => log_message!(message_log.clone(), "{}", err.message).await,
-        }
+        module_state.version = Some(new_version);
+        thread
+            .get_database_mut()
+            .add_module(module_name.into(), &source);
+        debug!("Changed to\n{}", source);
+        Ok(Some(Entry {
+            key: uri,
+            value: source,
+            version: new_version,
+        }))
     }
 
     {
@@ -359,20 +346,20 @@ pub fn register(
         let message_log = message_log.clone();
 
         let f = move |change: DidChangeTextDocumentParams| {
-            let work_queue = work_queue.clone();
+            let mut work_queue = work_queue.clone();
             let thread = thread.clone();
             let message_log = message_log.clone();
             tokio::spawn(async move {
-                if let Err(err) = ::std::panic::AssertUnwindSafe(did_change(
-                    &thread,
-                    message_log.clone(),
-                    work_queue.clone().sink_map_err(|_| ()),
-                    change,
-                ))
-                .catch_unwind()
-                .await
-                {
-                    error!("{:?}", err);
+                let result = ::std::panic::AssertUnwindSafe(did_change(&thread, change))
+                    .catch_unwind()
+                    .await;
+                match result {
+                    Ok(entry) => match entry {
+                        Ok(None) => (),
+                        Ok(Some(entry)) => work_queue.send(entry).await.unwrap(),
+                        Err(err) => log_message!(message_log.clone(), "{}", err.message).await,
+                    },
+                    Err(err) => error!("{:?}", err),
                 }
             });
         };
