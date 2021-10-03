@@ -32,7 +32,7 @@ use crate::{
     },
     rpc::{self, send_response, Entry, ServerError},
     server::{Handler, ShutdownReceiver},
-    text_edit::TextChanges,
+    text_edit::{TextChanges, Version},
 };
 
 fn create_diagnostics<'a>(
@@ -126,7 +126,7 @@ impl DiagnosticsWorker {
     pub async fn run_diagnostics(
         &mut self,
         uri_filename: &Url,
-        version: Option<i64>,
+        version: Option<Version>,
         fileinput: &str,
     ) {
         info!("Running diagnostics on {}", uri_filename);
@@ -182,7 +182,7 @@ impl DiagnosticsWorker {
         &mut self,
         uri_filename: &Url,
         name: &str,
-        version: Option<i64>,
+        version: Option<Version>,
     ) -> GluonResult<()> {
         let result = self
             .thread
@@ -283,7 +283,7 @@ pub fn register(
         mut work_queue: S,
         change: DidChangeTextDocumentParams,
     ) where
-        S: Sink<Entry<Url, String, i64>, Error = ()> + Send + Unpin + 'static,
+        S: Sink<Entry<Url, String, Version>, Error = ()> + Send + Unpin + 'static,
     {
         // If it does not exist in sources it should exist in the `import` macro
         let import = thread.get_macros().get("import").expect("Import macro");
@@ -302,7 +302,7 @@ pub fn register(
             .or_insert_with(|| State::empty(change.text_document.uri.clone()));
 
         module_state.text_changes.add(
-            change.text_document.version.expect("version"),
+            crate::text_edit::Version::from(change.text_document.version),
             change.content_changes,
         );
 

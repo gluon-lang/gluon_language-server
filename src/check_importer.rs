@@ -11,18 +11,22 @@ use gluon::{
 
 use {futures::prelude::*, tokio::sync::Mutex, url::Url};
 
-use crate::{name::module_name_to_file_, text_edit::TextChanges};
+use crate::{
+    name::module_name_to_file_,
+    text_edit::{TextChanges, Version},
+};
 
 pub(crate) struct Module {
     pub source: Arc<gluon::base::source::FileMap>,
     pub expr: Arc<OwnedExpr<Symbol>>,
+    #[allow(unused)] // TODO
     pub metadata: Arc<Metadata>,
     pub uri: Url,
 }
 
 pub struct State {
     pub uri: Url,
-    pub version: Option<i64>,
+    pub version: Option<Version>,
     pub text_changes: TextChanges,
 }
 

@@ -116,7 +116,7 @@ where
     did_open_uri(stdin, test_url(uri), text).await
 }
 
-pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: i64, range: Range, text: &str)
+pub async fn did_change<W: ?Sized>(stdin: &mut W, uri: &str, version: i32, range: Range, text: &str)
 where
     W: AsyncWrite + Unpin,
 {
@@ -136,7 +136,7 @@ where
 pub async fn did_change_event<W: ?Sized>(
     stdin: &mut W,
     uri: &str,
-    version: i64,
+    version: i32,
     content_changes: Vec<TextDocumentContentChangeEvent>,
 ) where
     W: AsyncWrite + Unpin,
@@ -146,7 +146,7 @@ pub async fn did_change_event<W: ?Sized>(
         DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
                 uri: test_url(uri),
-                version: Some(version),
+                version,
             },
             content_changes,
         },
@@ -231,10 +231,8 @@ pub fn run_no_panic_catch<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::runtime::Builder::new()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .core_threads(1)
-        .basic_scheduler()
         .build()
         .unwrap()
         .block_on(fut)
@@ -246,8 +244,8 @@ struct ServerHandle {
 }
 
 fn start_local() -> ServerHandle {
-    let (mut stdin_write, stdin_read) = async_pipe::pipe();
-    let (stdout_write, stdout_read) = async_pipe::pipe();
+    let (mut stdin_write, stdin_read) = tokio::io::duplex(4096);
+    let (stdout_write, stdout_read) = tokio::io::duplex(4096);
     let stdout_read = BufReader::new(stdout_read);
 
     tokio::spawn(async move {

@@ -76,9 +76,10 @@ pub fn register(io: &mut IoHandler, thread: &RootedThread) {
                                                     })
                                                     .collect(),
                                             ),
+                                            active_parameter: None,
                                         }],
                                         active_signature: None,
-                                        active_parameter: help.index.map(i64::from),
+                                        active_parameter: help.index.map(u32::from),
                                     }
                                 }),
                         )

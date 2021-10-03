@@ -23,10 +23,7 @@ use combine::{
     Parser,
 };
 
-use bytes::{
-    buf::{ext::BufMutExt, Buf},
-    BytesMut,
-};
+use bytes::{buf::Buf, BufMut, BytesMut};
 
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -128,7 +125,7 @@ where
     T: LanguageServerCommand<P>,
     P: for<'de> serde::Deserialize<'de> + 'static,
 {
-    type Out = futures::compat::Compat<BoxFuture<Value, Error>>;
+    type Out = BoxFuture<Value, Error>;
     fn call(&self, param: Params) -> Self::Out {
         let value = match param {
             Params::Map(map) => Value::Object(map),
@@ -154,7 +151,6 @@ where
                         }),
                     })
                     .boxed()
-                    .compat()
             }
             Err(err) => err,
         };
@@ -167,7 +163,6 @@ where
                 .map(|v| to_value(v).expect("error data could not be serialized")),
         })
         .boxed()
-        .compat()
     }
 }
 

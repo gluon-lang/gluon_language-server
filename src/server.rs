@@ -4,7 +4,6 @@ use {
     anyhow::anyhow,
     futures::{
         channel::{mpsc, oneshot},
-        compat::*,
         prelude::*,
     },
     jsonrpc_core::{IoHandler, MetaIoHandler},
@@ -121,17 +120,16 @@ impl Server {
                 let mut message_sender = message_sender.clone();
                 async move {
                     debug!("Handle: {}", json);
-                    let result = handlers.handle_request(&json).compat().await;
+                    let result = handlers.handle_request(&json).await;
                     match result {
-                        Ok(Some(response)) => {
+                        Some(response) => {
                             debug!("Response: {}", response);
                             message_sender
                                 .send(response)
                                 .await
                                 .map_err(|_| anyhow!("Unable to send"))?;
                         }
-                        Ok(None) => (),
-                        Err(()) => (),
+                        None => (),
                     }
                     Ok(())
                 }

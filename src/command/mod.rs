@@ -143,6 +143,7 @@ fn completion_symbol_to_document_symbol(
         })
         .unwrap_or_else(|| completion_symbol_kind(&symbol.value));
     let range = byte_span_to_range(source, symbol.span)?;
+    #[allow(deprecated)]
     Ok(DocumentSymbol {
         kind,
         range,
@@ -173,6 +174,7 @@ fn completion_symbol_to_document_symbol(
                 Some(children)
             }
         },
+        tags: Default::default(),
     })
 }
 
@@ -182,6 +184,7 @@ fn completion_symbol_to_symbol_information(
     uri: Url,
 ) -> Result<SymbolInformation, ServerError<()>> {
     let kind = completion_symbol_kind(&symbol.value);
+    #[allow(deprecated)]
     Ok(SymbolInformation {
         kind,
         location: Location {
@@ -191,6 +194,7 @@ fn completion_symbol_to_symbol_information(
         name: symbol.value.name.declared_name().to_string(),
         container_name: None,
         deprecated: Default::default(),
+        tags: Default::default(),
     })
 }
 

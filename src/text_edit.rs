@@ -5,7 +5,7 @@ use lsp_types::TextDocumentContentChangeEvent;
 use crate::rpc::ServerError;
 use codespan_lsp::range_to_byte_span;
 
-pub type Version = i64;
+pub type Version = i32;
 
 #[derive(Debug)]
 struct VersionedChange {

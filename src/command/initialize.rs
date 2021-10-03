@@ -50,6 +50,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                         work_done_progress_options: WorkDoneProgressOptions {
                             work_done_progress: None,
                         },
+                        all_commit_characters: None,
                     }),
                     signature_help_provider: Some(SignatureHelpOptions {
                         trigger_characters: None,
@@ -59,11 +60,11 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                         },
                     }),
                     hover_provider: Some(true.into()),
-                    document_formatting_provider: Some(true),
-                    document_highlight_provider: Some(true),
-                    document_symbol_provider: Some(true),
-                    workspace_symbol_provider: Some(true),
-                    definition_provider: Some(true),
+                    document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+                    document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+                    document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+                    workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+                    definition_provider: Some(lsp_types::OneOf::Left(true)),
                     ..ServerCapabilities::default()
                 },
             })
