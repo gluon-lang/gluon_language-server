@@ -28,7 +28,7 @@ async-trait = "0.1"
 async-pipe = "0.1"
 jsonrpc-core = "18.0.0"
 futures = { version = "0.3", features = ["compat"] }
-tokio = { version = "1.12.0", features = ["full"] }
+tokio = { version = "1.13.1", features = ["full"] }
 tokio-util = { version = "0.6.8", features = ["codec"] }
 bytes = "1.1.0"
 
