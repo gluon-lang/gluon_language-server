@@ -68,7 +68,18 @@ export function activate(context: ExtensionContext) {
     let client = new LanguageClient('gluon', 'Gluon Language Server', serverOptions, clientOptions);
     client.start();
 
+    const restartLanguageServer = vscode.commands.registerCommand('gluon.restartLanguageServer', async () => {
+        try {
+            await client.restart();
+            vscode.window.showInformationMessage('Gluon language server restarted.');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to restart Gluon language server: ${message}`);
+        }
+    });
+
     // Push the client to the context's subscriptions so that it
     // is stopped and disposed on extension deactivation.
     context.subscriptions.push(client);
+    context.subscriptions.push(restartLanguageServer);
 }
