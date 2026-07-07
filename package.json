@@ -109,12 +109,12 @@
     "compile": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/node": "^12.7.11",
+    "@types/node": "^26.1.0",
     "@types/vscode": "^1.38.0",
-    "typescript": "^3.6.3"
+    "typescript": "^6.0.3"
   },
   "dependencies": {
     "vscode-debugadapter": "^1.37.0",
-    "vscode-languageclient": "^6.1.0"
+    "vscode-languageclient": "^10.1.0"
   }
 }

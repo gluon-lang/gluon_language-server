@@ -50,12 +50,12 @@ pub mod symbol;
 
 fn type_to_completion_item_kind(typ: &ArcType) -> CompletionItemKind {
     match **typ {
-        _ if typ.remove_forall().as_function().is_some() => CompletionItemKind::Function,
+        _ if typ.remove_forall().as_function().is_some() => CompletionItemKind::FUNCTION,
         Type::Alias(ref alias) => type_to_completion_item_kind(alias.unresolved_type()),
         Type::App(ref f, _) => type_to_completion_item_kind(f),
-        Type::Variant(_) => CompletionItemKind::Enum,
-        Type::Record(_) => CompletionItemKind::Module,
-        _ => CompletionItemKind::Variable,
+        Type::Variant(_) => CompletionItemKind::ENUM,
+        Type::Record(_) => CompletionItemKind::MODULE,
+        _ => CompletionItemKind::VARIABLE,
     }
 }
 
@@ -64,10 +64,10 @@ fn ident_to_completion_item_kind(
     typ_or_kind: either::Either<&ArcKind, &ArcType>,
 ) -> CompletionItemKind {
     match typ_or_kind {
-        either::Either::Left(_) => CompletionItemKind::Class,
+        either::Either::Left(_) => CompletionItemKind::CLASS,
         either::Either::Right(typ) => {
             if id.starts_with(char::is_uppercase) {
-                CompletionItemKind::Constructor
+                CompletionItemKind::CONSTRUCTOR
             } else {
                 type_to_completion_item_kind(typ)
             }
@@ -95,12 +95,12 @@ where
 fn completion_symbol_kind(symbol: &CompletionSymbol<'_, '_>) -> SymbolKind {
     match symbol.content {
         CompletionSymbolContent::Type { typ } => match &**typ {
-            Type::Variant(_) => SymbolKind::Enum,
-            _ => SymbolKind::Class,
+            Type::Variant(_) => SymbolKind::ENUM,
+            _ => SymbolKind::CLASS,
         },
         CompletionSymbolContent::Value { typ, kind: _, expr } => match expr {
             Some(expr) => expr_to_kind(expr, typ),
-            None => SymbolKind::Variable,
+            None => SymbolKind::VARIABLE,
         },
     }
 }
@@ -138,7 +138,7 @@ fn completion_symbol_to_document_symbol(
 ) -> Result<DocumentSymbol, ServerError<()>> {
     let kind = parent_kind
         .and_then(|parent_kind| match parent_kind {
-            SymbolKind::Enum => Some(SymbolKind::EnumMember),
+            SymbolKind::ENUM => Some(SymbolKind::ENUM_MEMBER),
             _ => None,
         })
         .unwrap_or_else(|| completion_symbol_kind(&symbol.value));
@@ -201,23 +201,23 @@ fn completion_symbol_to_symbol_information(
 fn expr_to_kind(expr: &SpannedExpr<Symbol>, typ: &ArcType) -> SymbolKind {
     match expr.value {
         // import! "std/prelude.glu" will replace itself with a symbol like `std.prelude
-        Expr::Ident(ref id) if id.name.declared_name().contains('.') => SymbolKind::Module,
+        Expr::Ident(ref id) if id.name.declared_name().contains('.') => SymbolKind::MODULE,
         _ => type_to_kind(typ),
     }
 }
 
 fn type_to_kind(typ: &ArcType) -> SymbolKind {
     match **typ {
-        _ if typ.remove_forall().as_function().is_some() => SymbolKind::Function,
-        Type::Ident(ref id) if id.name.declared_name() == "Bool" => SymbolKind::Boolean,
-        Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::Boolean,
+        _ if typ.remove_forall().as_function().is_some() => SymbolKind::FUNCTION,
+        Type::Ident(ref id) if id.name.declared_name() == "Bool" => SymbolKind::BOOLEAN,
+        Type::Alias(ref alias) if alias.name.declared_name() == "Bool" => SymbolKind::BOOLEAN,
         Type::Builtin(builtin) => match builtin {
-            BuiltinType::Char | BuiltinType::String => SymbolKind::String,
-            BuiltinType::Byte | BuiltinType::Int | BuiltinType::Float => SymbolKind::Number,
-            BuiltinType::Array => SymbolKind::Array,
-            BuiltinType::Function => SymbolKind::Function,
+            BuiltinType::Char | BuiltinType::String => SymbolKind::STRING,
+            BuiltinType::Byte | BuiltinType::Int | BuiltinType::Float => SymbolKind::NUMBER,
+            BuiltinType::Array => SymbolKind::ARRAY,
+            BuiltinType::Function => SymbolKind::FUNCTION,
         },
-        _ => SymbolKind::Variable,
+        _ => SymbolKind::VARIABLE,
     }
 }
 

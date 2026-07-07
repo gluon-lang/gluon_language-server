@@ -102,7 +102,7 @@ async fn create_diagnostics_(
             .or_default()
             .push(lsp_types::Diagnostic {
                 message: format!("{}", err),
-                severity: Some(DiagnosticSeverity::Error),
+                severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("gluon".to_string()),
                 ..Default::default()
             }),
@@ -383,10 +383,10 @@ pub fn register(
 
 pub fn make_lsp_severity(severity: Severity) -> lsp_types::DiagnosticSeverity {
     match severity {
-        Severity::Error | Severity::Bug => lsp_types::DiagnosticSeverity::Error,
-        Severity::Warning => lsp_types::DiagnosticSeverity::Warning,
-        Severity::Note => lsp_types::DiagnosticSeverity::Information,
-        Severity::Help => lsp_types::DiagnosticSeverity::Hint,
+        Severity::Error | Severity::Bug => lsp_types::DiagnosticSeverity::ERROR,
+        Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+        Severity::Note => lsp_types::DiagnosticSeverity::INFORMATION,
+        Severity::Help => lsp_types::DiagnosticSeverity::HINT,
     }
 }
 

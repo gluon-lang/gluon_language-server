@@ -1,5 +1,4 @@
 use {
-    futures::prelude::*,
     jsonrpc_core::IoHandler,
     lsp_types::{Hover, HoverContents, HoverParams, MarkedString},
 };

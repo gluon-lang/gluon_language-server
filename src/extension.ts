@@ -1,12 +1,8 @@
 'use strict';
 
-import * as path from 'path';
-
-
 import * as vscode from 'vscode';
-import { workspace, Disposable, ExtensionContext } from 'vscode';
-import { LanguageClient, LanguageClientOptions, SettingMonitor, ServerOptions, TransportKind } from 'vscode-languageclient';
-import { Trace } from 'vscode-jsonrpc';
+import { workspace, ExtensionContext } from 'vscode';
+import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
 
 function activateDebugger(context: ExtensionContext) {
 
@@ -69,10 +65,10 @@ export function activate(context: ExtensionContext) {
     }
 
     // Create the language client and start the client.
-    let client = new LanguageClient('gluon', serverOptions, clientOptions);
-    let disposable = client.start();
+    let client = new LanguageClient('gluon', 'Gluon Language Server', serverOptions, clientOptions);
+    client.start();
 
-    // Push the disposable to the context's subscriptions so that the 
-    // client can be deactivated on extension deactivation
-    context.subscriptions.push(disposable);
+    // Push the client to the context's subscriptions so that it
+    // is stopped and disposed on extension deactivation.
+    context.subscriptions.push(client);
 }

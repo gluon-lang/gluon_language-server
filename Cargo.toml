@@ -10,15 +10,15 @@ edition = "2018"
 [workspace]
 
 [dependencies]
-clap = "2.19.0"
+clap = "4"
 
 log = "0.4.0"
-env_logger = "0.9.0"
+env_logger = "0.11"
 
 anyhow = "1"
 
-codespan-lsp = "0.11.1"
-codespan-reporting = "0.11.1"
+codespan-lsp = "0.13"
+codespan-reporting = "0.13"
 
 url = "2"
 
@@ -29,28 +29,34 @@ async-pipe = "0.1"
 jsonrpc-core = "18.0.0"
 futures = { version = "0.3", features = ["compat"] }
 tokio = { version = "1.13.1", features = ["full"] }
-tokio-util = { version = "0.6.8", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.1.0"
 
 serde = "1.0.0"
 serde_json = "1.0.0"
 serde_derive = "1.0.0"
 
-lsp-types = "0.88.0"
+lsp-types = "0.91.0"
 debugserver-types = "0.5.0"
 
-gluon = { version = "0.18.1", features = ["serialization", "regex", "rand", "web"] }
+gluon = { version = "0.18.1", features = [
+    "serialization",
+    "regex",
+    "rand",
+    "web",
+    "gluon_completion",
+] }
 gluon_completion = "0.18.0"
 gluon_format = "0.18.0"
 
 [dev-dependencies]
 pretty_assertions = "1.0.0"
 
-# [patch.crates-io]
-# gluon_base = { path = "../gluon/base" }
-# gluon_parser = { path = "../gluon/parser" }
-# gluon_check = { path = "../gluon/check" }
-# gluon_format = { path = "../gluon/format" }
-# gluon_completion = { path = "../gluon/completion" }
-# gluon_vm = { path = "../gluon/vm" }
-# gluon = { path = "../gluon" }
+[patch.crates-io]
+gluon_base = { path = "../gluon/base" }
+gluon_parser = { path = "../gluon/parser" }
+gluon_check = { path = "../gluon/check" }
+gluon_format = { path = "../gluon/format" }
+gluon_completion = { path = "../gluon/completion" }
+gluon_vm = { path = "../gluon/vm" }
+gluon = { path = "../gluon" }
