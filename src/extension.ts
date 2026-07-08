@@ -34,7 +34,8 @@ export function activate(context: ExtensionContext) {
     activateDebugger(context);
 
     let config = workspace.getConfiguration("gluon");
-    let serverPath = config.get("language-server.path", "gluon_language-server");
+    let serverPath = process.env["__GLUON_LANGUAGE_SERVER_DEBUG"] || config.get("language-server.path", "gluon_language-server");
+    console.log(serverPath)
 
     // If the extension is launched in debug mode then the debug server options are used
     // Otherwise the run options are used
@@ -42,10 +43,10 @@ export function activate(context: ExtensionContext) {
         command: serverPath,
         args: [],
         options: {
-            env: {
+            env: process.env["__GLUON_LANGUAGE_SERVER_DEBUG"] ? {
                 "RUST_BACKTRACE": "1",
                 "RUST_LOG": "gluon_language_server=debug",
-            }
+            } : undefined
         }
     }
 

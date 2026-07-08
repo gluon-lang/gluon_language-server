@@ -96,13 +96,13 @@ te
                 vec![
                     CompletionItem {
                         label: "test".into(),
-                        kind: Some(CompletionItemKind::Variable),
+                        kind: Some(CompletionItemKind::VARIABLE),
                         detail: Some("Int".into()),
                         ..CompletionItem::default()
                     },
                     CompletionItem {
                         label: "test1".into(),
-                        kind: Some(CompletionItemKind::Variable),
+                        kind: Some(CompletionItemKind::VARIABLE),
                         detail: Some("String".into()),
                         ..CompletionItem::default()
                     },
@@ -136,7 +136,7 @@ let {  } = { (*>) = 1 }
                 completions,
                 vec![CompletionItem {
                     label: "*>".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some("Int".into()),
                     insert_text: Some("(*>)".to_string()),
                     ..CompletionItem::default()
@@ -171,7 +171,7 @@ fn prelude_completion() {
                 completions,
                 vec![CompletionItem {
                     label: "not".into(),
-                    kind: Some(CompletionItemKind::Function),
+                    kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some("std.types.Bool -> std.types.Bool".into()),
                     ..CompletionItem::default()
                 }]
@@ -186,7 +186,7 @@ fn resolve_completion() {
         Box::pin(async move {
             let completion = CompletionItem {
                 label: "test".into(),
-                kind: Some(CompletionItemKind::Variable),
+                kind: Some(CompletionItemKind::VARIABLE),
                 detail: Some("Int".into()),
                 data: Some(
                     serde_json::to_value(CompletionData {
@@ -262,7 +262,7 @@ r.
                 completions,
                 vec![CompletionItem {
                     label: "abc".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some("Int".into()),
                     ..CompletionItem::default()
                 }]
@@ -323,7 +323,7 @@ test2
                 completions,
                 vec![CompletionItem {
                     label: "test1".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some("String".into()),
                     ..CompletionItem::default()
                 }]
@@ -402,7 +402,7 @@ test2
                 completions,
                 vec![CompletionItem {
                     label: "test1".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some("String".into()),
                     ..CompletionItem::default()
                 }]
@@ -440,7 +440,7 @@ let test = 1
                 completions,
                 vec![CompletionItem {
                     label: "test".into(),
-                    kind: Some(CompletionItemKind::Variable),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some("Int".into()),
                     ..CompletionItem::default()
                 }]
