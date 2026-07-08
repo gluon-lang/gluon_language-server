@@ -190,9 +190,9 @@ checksum = "0e4cec68f03f32e44924783795810fa50a7035d8c8ebe78580ad7e6c703fba38"
 
 [[package]]
 name = "bytes"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
@@ -304,7 +304,7 @@ version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "memchr",
 ]
 
@@ -686,7 +686,9 @@ dependencies = [
 
 [[package]]
 name = "gluon"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c65f0553314483dba34423078112c9fe1d503479a5683188b00753c1ce4bd632"
 dependencies = [
  "async-trait",
  "codespan",
@@ -757,7 +759,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_base"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "677aceec281d5f9e07ed0a7570291b7316a23f00b46fe0b9f76ece3da858165b"
 dependencies = [
  "anymap",
  "bitflags 1.3.2",
@@ -784,7 +788,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_check"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6468abf400e6aa3c7f987d9bde284e1073955892b7f7492d16452e63b28f7b4e"
 dependencies = [
  "codespan",
  "codespan-reporting",
@@ -803,7 +809,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_codegen"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "676b167ddf8c63024fedf25ed40be1257c5313a25683279afd1212c86fb52ae9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -812,7 +820,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_completion"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca6e4536061535cf23a44cc5d78871f34590442d576b4bc37b93149dce868d7f"
 dependencies = [
  "codespan",
  "either",
@@ -823,7 +833,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_format"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a3f8114e33b8a3cf72f3cbca1de20af7a9dd4201d1908e3350ed58ba79a6ed2"
 dependencies = [
  "codespan",
  "gluon_base",
@@ -839,7 +851,7 @@ dependencies = [
  "anyhow",
  "async-pipe",
  "async-trait",
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "clap",
  "codespan-lsp",
  "codespan-reporting",
@@ -864,7 +876,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_parser"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed1c61e7a1c3e365d2fdbddfc5a9061d3c56144280824a382799ff4313326255"
 dependencies = [
  "codespan",
  "codespan-reporting",
@@ -880,7 +894,9 @@ dependencies = [
 
 [[package]]
 name = "gluon_vm"
-version = "0.18.2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84f0b92ed06bed1726351628903cefdb42ba8aa7519999660dcc0ad65a34c6e7"
 dependencies = [
  "async-trait",
  "bitflags 1.3.2",
@@ -919,7 +935,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
 dependencies = [
  "atomic-waker",
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "fnv",
  "futures-core",
  "futures-sink",
@@ -972,7 +988,7 @@ version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "itoa",
 ]
 
@@ -982,7 +998,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "http",
 ]
 
@@ -992,7 +1008,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "futures-core",
  "http",
  "http-body",
@@ -1018,7 +1034,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55281c53a1894c864990125767da440a4e630446785086f52523b20033b74498"
 dependencies = [
  "atomic-waker",
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "futures-channel",
  "futures-core",
  "h2",
@@ -1039,7 +1055,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "futures-channel",
  "futures-util",
  "http",
@@ -1349,9 +1365,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.2"
+version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mio"
@@ -2098,7 +2114,7 @@ version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "libc",
  "mio",
  "parking_lot 0.12.5",
@@ -2147,7 +2163,7 @@ version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
- "bytes 1.12.0",
+ "bytes 1.12.1",
  "futures-core",
  "futures-sink",
  "pin-project-lite 0.2.17",
