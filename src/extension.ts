@@ -35,7 +35,6 @@ export function activate(context: ExtensionContext) {
 
     let config = workspace.getConfiguration("gluon");
     let serverPath = process.env["__GLUON_LANGUAGE_SERVER_DEBUG"] || config.get("language-server.path", "gluon_language-server");
-    console.log(serverPath)
 
     // If the extension is launched in debug mode then the debug server options are used
     // Otherwise the run options are used

@@ -15,7 +15,7 @@
   "activationEvents": [
     "onLanguage:gluon"
   ],
-  "main": "./out/src/extension",
+  "main": "./dist/extension",
   "contributes": {
     "commands": [
       {
@@ -111,16 +111,21 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "tsc -p ./",
-    "compile": "tsc -watch -p ./"
+    "compile": "npm run check-types && node esbuild.js",
+    "check-types": "tsc --noEmit",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "vscode:prepublish": "npm run package",
+    "package": "npm run check-types && node esbuild.js --production"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
     "@types/vscode": "^1.38.0",
+    "esbuild": "^0.28.1",
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "vscode-debugadapter": "^1.37.0",
     "vscode-languageclient": "^10.1.0"
   }
 }
