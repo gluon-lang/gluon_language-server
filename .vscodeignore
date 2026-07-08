@@ -1,9 +1,8 @@
-.vscode/**
-typings/**
-out/test/**
-test/**
-target/**
-**/*.map
-.gitignore
-tsconfig.json
-vsc-extension-quickstart.md
+**
+
+!package.json
+!dist
+!syntaxes/
+
+!readme.md
+!LICENSE

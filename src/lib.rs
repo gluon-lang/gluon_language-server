@@ -28,8 +28,9 @@ pub type BoxFuture<I, E> = std::pin::Pin<Box<dyn Future<Output = Result<I, E>> +
 pub async fn run() -> Result<(), anyhow::Error> {
     ::env_logger::init();
 
-    let _matches = clap::App::new("debugger")
+    let _matches = clap::Command::new("debugger")
         .version(env!("CARGO_PKG_VERSION"))
+        .about("Gluon Language Server")
         .get_matches();
 
     let thread = gluon::new_vm_async().await;

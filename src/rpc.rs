@@ -190,7 +190,7 @@ pub(crate) async fn log_message(sender: mpsc::Sender<String>, message: String) {
         sender,
         notification!("window/logMessage"),
         LogMessageParams {
-            typ: MessageType::Log,
+            typ: MessageType::LOG,
             message,
         },
     )

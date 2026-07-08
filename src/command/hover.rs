@@ -1,5 +1,8 @@
+use std::fmt::Write;
+
+use completion::Extract;
+
 use {
-    futures::prelude::*,
     jsonrpc_core::IoHandler,
     lsp_types::{Hover, HoverContents, HoverParams, MarkedString},
 };
@@ -34,28 +37,35 @@ impl LanguageServerCommand<HoverParams> for HoverCommand {
                     let opt_metadata =
                         completion::get_metadata(&metadata_map, source.span(), expr, byte_index);
                     let extract = (completion::TypeAt { env: &env }, completion::SpanAt);
-                    Ok(
-                        completion::completion(extract, source.span(), expr, byte_index)
-                            .map(|(typ, span)| {
-                                let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
-                                    Some(comment) => HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: format!("{}\n\n{}", typ, comment.content),
-                                    }),
-                                    None => {
-                                        HoverContents::Scalar(MarkedString::from_language_code(
-                                            "gluon".into(),
-                                            format!("{}", typ),
-                                        ))
-                                    }
-                                };
-                                Some(Hover {
-                                    contents,
-                                    range: byte_span_to_range(&source, span).ok(),
+
+                    let found = completion::complete(source.span(), expr, byte_index).ok();
+                    Ok(found.and_then(|found| {
+                        let (typ, span) = extract.extract(&found).ok()?;
+                        let ident = completion::IdentAt.extract(&found).ok();
+
+                        let contents = match opt_metadata.and_then(|m| m.comment.as_ref()) {
+                            Some(comment) => {
+                                let mut contents = String::new();
+                                write!(contents, "```gluon\n").unwrap();
+                                if let Some(ident) = ident {
+                                    write!(contents, "{}: ", ident.declared_name()).unwrap();
+                                }
+                                write!(contents, "{}\n```\n{}", typ, comment.content).unwrap();
+                                HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: contents,
                                 })
-                            })
-                            .unwrap_or_else(|()| None),
-                    )
+                            }
+                            None => HoverContents::Scalar(MarkedString::from_language_code(
+                                "gluon".into(),
+                                format!("{}", typ),
+                            )),
+                        };
+                        Some(Hover {
+                            contents,
+                            range: byte_span_to_range(&source, span).ok(),
+                        })
+                    }))
                 },
             )
             .await

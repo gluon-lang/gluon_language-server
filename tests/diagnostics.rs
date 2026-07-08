@@ -22,7 +22,7 @@ not ""
                 diagnostic.diagnostics
             );
             let error = &diagnostic.diagnostics[0];
-            assert_eq!(error.severity, Some(DiagnosticSeverity::Error));
+            assert_eq!(error.severity, Some(DiagnosticSeverity::ERROR));
             assert_eq!(
                 error.range,
                 Range {

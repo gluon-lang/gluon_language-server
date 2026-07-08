@@ -2,6 +2,7 @@ target
 
 out
 server
+dist
 node_modules
 *.bk
 *.vsix

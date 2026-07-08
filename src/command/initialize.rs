@@ -42,7 +42,7 @@ impl LanguageServerCommand<InitializeParams> for Initialize {
                 }),
                 capabilities: ServerCapabilities {
                     text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                        TextDocumentSyncKind::Incremental,
+                        TextDocumentSyncKind::INCREMENTAL,
                     )),
                     completion_provider: Some(CompletionOptions {
                         resolve_provider: Some(true),

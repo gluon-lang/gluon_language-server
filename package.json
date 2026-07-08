@@ -3,7 +3,7 @@
   "description": "Language server for the gluon programming language",
   "author": "Markus Westerlind",
   "license": "MIT",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "Marwes",
   "repository": "https://github.com/gluon-lang/gluon_language-server",
   "engines": {
@@ -15,8 +15,14 @@
   "activationEvents": [
     "onLanguage:gluon"
   ],
-  "main": "./out/src/extension",
+  "main": "./dist/extension",
   "contributes": {
+    "commands": [
+      {
+        "command": "gluon.restartLanguageServer",
+        "title": "Gluon: Restart Language Server"
+      }
+    ],
     "languages": [
       {
         "id": "gluon",
@@ -105,16 +111,21 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "tsc -p ./",
-    "compile": "tsc -watch -p ./"
+    "compile": "npm run check-types && node esbuild.js",
+    "check-types": "tsc --noEmit",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "vscode:prepublish": "npm run package",
+    "package": "npm run check-types && node esbuild.js --production"
   },
   "devDependencies": {
-    "@types/node": "^12.7.11",
+    "@types/node": "^26.1.0",
     "@types/vscode": "^1.38.0",
-    "typescript": "^3.6.3"
+    "esbuild": "^0.28.1",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
-    "vscode-debugadapter": "^1.37.0",
-    "vscode-languageclient": "^6.1.0"
+    "vscode-languageclient": "^10.1.0"
   }
 }

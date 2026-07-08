@@ -1,12 +1,8 @@
 'use strict';
 
-import * as path from 'path';
-
-
 import * as vscode from 'vscode';
-import { workspace, Disposable, ExtensionContext } from 'vscode';
-import { LanguageClient, LanguageClientOptions, SettingMonitor, ServerOptions, TransportKind } from 'vscode-languageclient';
-import { Trace } from 'vscode-jsonrpc';
+import { workspace, ExtensionContext } from 'vscode';
+import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
 
 function activateDebugger(context: ExtensionContext) {
 
@@ -38,7 +34,7 @@ export function activate(context: ExtensionContext) {
     activateDebugger(context);
 
     let config = workspace.getConfiguration("gluon");
-    let serverPath = config.get("language-server.path", "gluon_language-server");
+    let serverPath = process.env["__GLUON_LANGUAGE_SERVER_DEBUG"] || config.get("language-server.path", "gluon_language-server");
 
     // If the extension is launched in debug mode then the debug server options are used
     // Otherwise the run options are used
@@ -46,10 +42,10 @@ export function activate(context: ExtensionContext) {
         command: serverPath,
         args: [],
         options: {
-            env: {
+            env: process.env["__GLUON_LANGUAGE_SERVER_DEBUG"] ? {
                 "RUST_BACKTRACE": "1",
                 "RUST_LOG": "gluon_language_server=debug",
-            }
+            } : undefined
         }
     }
 
@@ -69,10 +65,21 @@ export function activate(context: ExtensionContext) {
     }
 
     // Create the language client and start the client.
-    let client = new LanguageClient('gluon', serverOptions, clientOptions);
-    let disposable = client.start();
+    let client = new LanguageClient('gluon', 'Gluon Language Server', serverOptions, clientOptions);
+    client.start();
 
-    // Push the disposable to the context's subscriptions so that the 
-    // client can be deactivated on extension deactivation
-    context.subscriptions.push(disposable);
+    const restartLanguageServer = vscode.commands.registerCommand('gluon.restartLanguageServer', async () => {
+        try {
+            await client.restart();
+            vscode.window.showInformationMessage('Gluon language server restarted.');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to restart Gluon language server: ${message}`);
+        }
+    });
+
+    // Push the client to the context's subscriptions so that it
+    // is stopped and disposed on extension deactivation.
+    context.subscriptions.push(client);
+    context.subscriptions.push(restartLanguageServer);
 }
